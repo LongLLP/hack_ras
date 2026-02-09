@@ -11,6 +11,10 @@ class GeometryParser:
     and dispatches to specific block handlers in hack_ras.geometry.blocks.
     """
 
+    def parse_file(self, path: str) -> "GeometryFile":
+            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                return self.parse(f.readlines())
+
     def parse(self, lines: List[str]) -> GeometryFile:
         geom = GeometryFile()
         geom.raw_lines = lines[:]  # store unmodified
