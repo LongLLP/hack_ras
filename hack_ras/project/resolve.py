@@ -153,35 +153,26 @@ def list_available_ids(prj_path: str) -> dict[str, list[str]]:
         "steady":   _ids_from_paths(fam["steady"]),
     }
 
-def highest_id(ids: list[str]) -> Optional[str]:
+class GeometryFileNotFound(FileNotFoundError):
+    """The .prj references a geometry file that does not exist on disk."""
+
+
+def resolve_default_geom(prj_path: str, prj_geom_id: Optional[str]) -> str:
     """
-    Given ['g01','g02','g10'] -> 'g10'. Returns None if empty.
+    Resolve the geometry file for a project strictly:
+      - If the .prj has no Geom File entry, raises ValueError.
+      - If the .prj lists a geometry ID but the file is missing on disk, raises GeometryFileNotFound.
+      - Otherwise returns the absolute path to the geometry file.
     """
-    if not ids:
-        return None
-    # sort by numeric part
-    return sorted(ids, key=lambda s: int(s[1:]))[-1]
-
-def choose_default_ids(
-    prj_path: str,
-    prj_geom_id: Optional[str],
-    prj_plan_id: Optional[str],
-    prj_unsteady_id: Optional[str],
-) -> dict[str, Optional[str]]:
-    """
-    Strategy:
-      1) Prefer the ids recorded in the .prj (if those files exist).
-      2) Else fall back to the highest available id for that type (e.g., g99...g01).
-    """
-    avail = list_available_ids(prj_path)
-
-    # Geometry
-    geom_id = prj_geom_id if resolve_id(prj_path, prj_geom_id) else highest_id(avail["geom"])
-
-    # Plan
-    plan_id = prj_plan_id if resolve_id(prj_path, prj_plan_id) else highest_id(avail["plan"])
-
-    # Unsteady
-    unsteady_id = prj_unsteady_id if resolve_id(prj_path, prj_unsteady_id) else highest_id(avail["unsteady"])
-
-    return {"geom": geom_id, "plan": plan_id, "unsteady": unsteady_id}
+    if not prj_geom_id:
+        raise ValueError(
+            f"Project file does not reference a geometry file: {prj_path}"
+        )
+    path = resolve_id(prj_path, prj_geom_id)
+    if path is None:
+        folder, base = project_base_parts(prj_path)
+        expected = os.path.join(folder, f"{base}.{prj_geom_id}")
+        raise GeometryFileNotFound(
+            f"Geometry file listed in .prj not found on disk: {expected}"
+        )
+    return path
