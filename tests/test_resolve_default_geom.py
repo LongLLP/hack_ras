@@ -1,7 +1,7 @@
 import unittest
 import tempfile
 import os
-from hack_ras.project.resolve import resolve_default_geom, GeometryFileNotFound
+from hack_ras.resolve import resolve_default_geom, GeometryFileNotFound
 
 
 def _make_prj(folder, name="TestProject"):

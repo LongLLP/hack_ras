@@ -1,4 +1,4 @@
-# hack_ras/project/resolve.py
+# hack_ras/resolve.py
 from __future__ import annotations
 import os
 import glob
@@ -41,29 +41,6 @@ def project_base_parts(prj_path: str) -> tuple[str, str]:
     folder = os.path.dirname(os.path.abspath(prj_path))
     base = os.path.splitext(os.path.basename(prj_path))[0]
     return folder, base
-
-def _discover_by_suffix(prj_path: str, suffix: str) -> list[str]:
-    folder, base = project_base_parts(prj_path)
-    return sorted(glob.glob(os.path.join(folder, f"{base}.{suffix}[0-9][0-9]")))
-
-def discover_family(prj_path: str) -> dict[str, list[str]]:
-    """
-    List sibling INPUT files for THIS project base only.
-    Plans are .p##; unsteady are .u##; geometry are .g##; steady are .f##.
-    NOTE: .b## are outputs and intentionally ignored.
-    """
-    return {
-        "geom":     _discover_by_suffix(prj_path, "g"),
-        "plan":     _discover_by_suffix(prj_path, "p"),
-        "unsteady": _discover_by_suffix(prj_path, "u"),
-        "steady":   _discover_by_suffix(prj_path, "f"),
-    }
-
-def _candidate_path(folder: str, base: str, file_id: str) -> str:
-    """
-    Compose a candidate filename for given id: (folder,'Stream'), 'g01' -> /folder/Stream.g01
-    """
-    return os.path.join(folder, f"{base}.{file_id}")
 
 # ---------------------------
 # ID -> filepath resolution
@@ -112,18 +89,6 @@ def _discover(prj_path: str, suffix: str) -> list[str]:
     pattern = os.path.join(folder, f"{base}.{suffix}[0-9][0-9]")
     files = sorted(glob.glob(pattern))
     return files
-
-def discover_family(prj_path: str) -> dict[str, list[str]]:
-    """
-    Lists all sibling files that belong to THIS project base only.
-    Keys: 'geom', 'plan', 'unsteady', 'steady' (steady optional for future).
-    """
-    return {
-        "geom":     _discover(prj_path, "g"),
-        "plan":     _discover(prj_path, "p"),
-        "unsteady": _discover(prj_path, "u"),
-        "steady":   _discover(prj_path, "f"),
-    }
 
 # ---------------------------
 # ID helpers and selection

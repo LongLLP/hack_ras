@@ -1,7 +1,7 @@
 # hack_ras/project/catalog.py
 from __future__ import annotations
 import os, glob
-from .resolve import is_hecras_prj, discover_family
+from ..resolve import is_hecras_prj, discover_family
 
 def catalog_folder(folder: str) -> dict[str, dict[str, list[str]]]:
     """
