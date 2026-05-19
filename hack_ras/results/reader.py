@@ -6,10 +6,22 @@ from pathlib import Path
 
 import h5py
 import numpy as np
-import geopandas as gpd
-from shapely.geometry import Polygon
 
-from .model import AreaGeometry, PlanMetadata
+from .model import (
+    AreaGeometry,
+    ConduitTimeSeries,
+    NodeTimeSeries,
+    PipeConduit,
+    PipeNetwork,
+    PipeNode,
+    PlanMetadata,
+)
+
+
+def _decode(val) -> str:
+    if isinstance(val, (bytes, np.bytes_)):
+        return val.decode('utf-8', errors='replace').strip()
+    return str(val).strip()
 
 
 # ---------------------------
@@ -86,6 +98,9 @@ def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
     """
     base = f"Geometry/2D Flow Areas/{area}"
 
+    import geopandas as gpd
+    from shapely.geometry import Polygon
+
     with h5py.File(hdf_path, "r") as hdf:
         centers      = hdf[f"{base}/Cells Center Coordinate"][:]
         fp_xy        = hdf[f"{base}/FacePoints Coordinate"][:]
@@ -121,6 +136,11 @@ def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
 # ---------------------------
 # Water surface elevations
 # ---------------------------
+
+_PIPE_TS_BASE = (
+    "Results/Unsteady/Output/Output Blocks/Base Output"
+    "/Unsteady Time Series/Pipe Networks/{network}"
+)
 
 _SUM_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
@@ -203,3 +223,238 @@ def read_wse(
                     f"  Expected format example: '01Jan2025 00:30:00'"
                 )
             return hdf[f"{TS}/Water Surface"][matches[0], :].astype(np.float64)
+
+
+# ---------------------------
+# Timestamps
+# ---------------------------
+
+def read_timestamps(hdf_path: str) -> np.ndarray:
+    """
+    Read the unsteady time-series timestamp array from a plan HDF5 file.
+
+    Returns
+    -------
+    np.ndarray, shape (T,), dtype str
+        HEC-RAS time-date stamp strings, e.g. '01Jan2025 00:30:00'.
+
+    Raises
+    ------
+    KeyError
+        If the Time Date Stamp dataset is absent.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        return np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+
+
+# ---------------------------
+# Pipe network discovery
+# ---------------------------
+
+def list_pipe_networks(hdf_path: str) -> list[str]:
+    """
+    Return names of all pipe networks in a plan HDF5 file.
+    Returns an empty list if the file has no pipe network geometry.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        try:
+            grp = hdf['Geometry/Pipe Networks']
+            return [k for k in grp.keys() if isinstance(grp[k], h5py.Group)]
+        except KeyError:
+            return []
+
+
+# ---------------------------
+# Pipe network geometry
+# ---------------------------
+
+def read_pipe_network(hdf_path: str, network: str) -> PipeNetwork:
+    """
+    Read geometry and index maps for one pipe network.
+
+    Reads the global Pipe Nodes and Pipe Conduits attribute tables, then uses
+    the per-network Node Indices / Conduit Indices to build result-position maps
+    and adjacency dicts.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    network : str
+        Network name, as returned by list_pipe_networks().
+
+    Returns
+    -------
+    PipeNetwork
+
+    Raises
+    ------
+    KeyError
+        If the network group or required geometry datasets are absent.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        raw_nodes = hdf['Geometry/Pipe Nodes/Attributes'][()]
+        global_nodes = [
+            PipeNode(name=_decode(r['Name']), system_name=_decode(r['System Name']))
+            for r in raw_nodes
+        ]
+
+        raw_conduits = hdf['Geometry/Pipe Conduits/Attributes'][()]
+        global_conduits = [
+            PipeConduit(
+                name=_decode(r['Name']),
+                us_node=_decode(r['US Node']),
+                ds_node=_decode(r['DS Node']),
+            )
+            for r in raw_conduits
+        ]
+
+        grp = hdf[f'Geometry/Pipe Networks/{network}']
+        node_indices    = grp['Node Indices'][()]
+        conduit_indices = grp['Conduit Indices'][()]
+
+    nodes: dict = {}
+    for results_pos, global_idx in enumerate(node_indices):
+        name = global_nodes[int(global_idx)].name
+        nodes[name] = results_pos
+
+    conduits: dict = {}
+    conduit_index: dict = {}
+    upstream_of: dict = {}
+    downstream_of: dict = {}
+    for results_pos, global_idx in enumerate(conduit_indices):
+        c = global_conduits[int(global_idx)]
+        conduits[c.name] = c
+        conduit_index[c.name] = results_pos
+        upstream_of.setdefault(c.ds_node, []).append(c.name)
+        downstream_of.setdefault(c.us_node, []).append(c.name)
+
+    return PipeNetwork(
+        name=network,
+        nodes=nodes,
+        conduits=conduits,
+        conduit_index=conduit_index,
+        upstream_of=upstream_of,
+        downstream_of=downstream_of,
+    )
+
+
+# ---------------------------
+# Pipe network time series
+# ---------------------------
+
+def read_node_timeseries(
+    hdf_path: str,
+    network: PipeNetwork,
+    node_name: str,
+) -> NodeTimeSeries:
+    """
+    Read and compute full time-series for one pipe node.
+
+    flow_in is the sum of Pipe Flow DS for conduits in network.upstream_of[node_name].
+    flow_out is the sum of Pipe Flow US for conduits in network.downstream_of[node_name].
+    Nodes with no incoming or outgoing conduits produce zeros, not errors.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    network : PipeNetwork
+        As returned by read_pipe_network(). Must be the network containing node_name.
+    node_name : str
+        Must be a key in network.nodes.
+
+    Returns
+    -------
+    NodeTimeSeries
+
+    Raises
+    ------
+    KeyError
+        If node_name is not in network.nodes, or HDF datasets are absent.
+    """
+    if node_name not in network.nodes:
+        raise KeyError(
+            f"Node '{node_name}' not found in pipe network '{network.name}'"
+        )
+
+    base = _PIPE_TS_BASE.format(network=network.name)
+    nidx = network.nodes[node_name]
+
+    with h5py.File(hdf_path, 'r') as hdf:
+        timestamps   = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        depth        = hdf[f'{base}/Nodes/Depth'][:, nidx].astype(np.float64)
+        wse          = hdf[f'{base}/Nodes/Water Surface'][:, nidx].astype(np.float64)
+        inlet_flow   = hdf[f'{base}/Nodes/Top + Side Inlet Flow'][:, nidx].astype(np.float64)
+
+        pipe_flow_ds = hdf[f'{base}/Pipes/Pipe Flow DS'][()].astype(np.float64)
+        pipe_flow_us = hdf[f'{base}/Pipes/Pipe Flow US'][()].astype(np.float64)
+
+    n_times  = len(timestamps)
+    flow_in  = np.zeros(n_times, dtype=np.float64)
+    flow_out = np.zeros(n_times, dtype=np.float64)
+
+    for cname in network.upstream_of.get(node_name, []):
+        flow_in += pipe_flow_ds[:, network.conduit_index[cname]]
+
+    for cname in network.downstream_of.get(node_name, []):
+        flow_out += pipe_flow_us[:, network.conduit_index[cname]]
+
+    return NodeTimeSeries(
+        timestamps=timestamps,
+        depth=depth,
+        wse=wse,
+        inlet_flow=inlet_flow,
+        flow_in=flow_in,
+        flow_out=flow_out,
+    )
+
+
+def read_conduit_timeseries(
+    hdf_path: str,
+    network: PipeNetwork,
+    conduit_name: str,
+) -> ConduitTimeSeries:
+    """
+    Read time-series for one pipe conduit.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    network : PipeNetwork
+        As returned by read_pipe_network().
+    conduit_name : str
+        Must be a key in network.conduit_index.
+
+    Returns
+    -------
+    ConduitTimeSeries
+
+    Raises
+    ------
+    KeyError
+        If conduit_name is not in network.conduit_index, or HDF datasets are absent.
+    """
+    if conduit_name not in network.conduit_index:
+        raise KeyError(
+            f"Conduit '{conduit_name}' not found in pipe network '{network.name}'"
+        )
+
+    base = _PIPE_TS_BASE.format(network=network.name)
+    cidx = network.conduit_index[conduit_name]
+
+    with h5py.File(hdf_path, 'r') as hdf:
+        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        flow_us    = hdf[f'{base}/Pipes/Pipe Flow US'][:, cidx].astype(np.float64)
+        flow_ds    = hdf[f'{base}/Pipes/Pipe Flow DS'][:, cidx].astype(np.float64)
+        vel_us     = hdf[f'{base}/Pipes/Vel US'][:, cidx].astype(np.float64)
+        vel_ds     = hdf[f'{base}/Pipes/Vel DS'][:, cidx].astype(np.float64)
+
+    return ConduitTimeSeries(
+        timestamps=timestamps,
+        flow_us=flow_us,
+        flow_ds=flow_ds,
+        vel_us=vel_us,
+        vel_ds=vel_ds,
+    )
