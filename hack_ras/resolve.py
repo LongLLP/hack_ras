@@ -1,6 +1,7 @@
 # hack_ras/resolve.py
 from __future__ import annotations
 import os
+import re
 import glob
 from typing import Optional, Iterable
 
@@ -90,6 +91,19 @@ def _discover(prj_path: str, suffix: str) -> list[str]:
     files = sorted(glob.glob(pattern))
     return files
 
+def discover_family(prj_path: str) -> dict[str, list[str]]:
+    """
+    Lists all sibling files that belong to THIS project base only.
+    Keys: 'geom', 'plan', 'unsteady', 'steady'.
+    NOTE: .b## outputs are intentionally excluded.
+    """
+    return {
+        "geom":     _discover(prj_path, "g"),
+        "plan":     _discover(prj_path, "p"),
+        "unsteady": _discover(prj_path, "u"),
+        "steady":   _discover(prj_path, "f"),
+    }
+
 # ---------------------------
 # ID helpers and selection
 # ---------------------------
@@ -120,6 +134,89 @@ def list_available_ids(prj_path: str) -> dict[str, list[str]]:
 
 class GeometryFileNotFound(FileNotFoundError):
     """The .prj references a geometry file that does not exist on disk."""
+
+class PlanHdfNotFound(FileNotFoundError):
+    """A specified plan HDF file (.p##.hdf) was not found on disk."""
+
+class CrsProjectionFileNotFound(FileNotFoundError):
+    """No ESRI .prj projection file could be found for CRS lookup."""
+
+
+# ---------------------------
+# Plan HDF and CRS discovery
+# ---------------------------
+
+_PLAN_HDF_PAT = re.compile(r"\.p(\d+)\.hdf$", re.IGNORECASE)
+
+def find_plan_hdfs(folder: str, plan_ids: list[str] | None = None) -> list[str]:
+    """
+    Discover *.p##.hdf plan output files in folder.
+
+    If plan_ids is given (e.g. ['p01', 'p02']), returns only those plans.
+    Raises PlanHdfNotFound if the folder contains no HDF files, or if a
+    specified plan ID has no corresponding file.
+
+    Returns a sorted list of absolute paths.
+    """
+    found: dict[str, str] = {}
+    for f in glob.glob(os.path.join(folder, "*.p*.hdf")):
+        m = _PLAN_HDF_PAT.search(os.path.basename(f))
+        if m:
+            pid = "p" + m.group(1).zfill(2)
+            found[pid] = os.path.abspath(f)
+
+    if not found:
+        raise PlanHdfNotFound(
+            f"No plan HDF files (*.pXX.hdf) found in {folder}"
+        )
+
+    if plan_ids:
+        result: dict[str, str] = {}
+        for raw in plan_ids:
+            pid = "p" + str(raw).strip().lower().lstrip("p").zfill(2)
+            if pid not in found:
+                raise PlanHdfNotFound(
+                    f"Plan '{raw}' (-> '{pid}') not found in {folder}. "
+                    f"Available: {sorted(found.keys())}"
+                )
+            result[pid] = found[pid]
+        return [result[k] for k in sorted(result.keys())]
+
+    return [found[k] for k in sorted(found.keys())]
+
+
+def find_crs_prj(folder: str, specified: str | None = None) -> str:
+    """
+    Find an ESRI .prj file (CRS definition) in or below folder.
+
+    If specified is given, validates it exists and returns its absolute path.
+    Otherwise searches recursively for .prj files that are NOT HEC-RAS project
+    files (uses is_hecras_prj as the inverse filter).
+
+    If multiple ESRI .prj files are found the first is returned. For CRS
+    conflict detection across multiple files, use pyproj directly.
+
+    Raises CrsProjectionFileNotFound if no suitable file can be found.
+    """
+    if specified:
+        p = os.path.abspath(specified)
+        if not os.path.exists(p):
+            raise CrsProjectionFileNotFound(
+                f"Projection file not found: {p}"
+            )
+        return p
+
+    hits = [
+        os.path.abspath(p)
+        for p in glob.glob(os.path.join(folder, "**", "*.prj"), recursive=True)
+        if not is_hecras_prj(p)
+    ]
+    if not hits:
+        raise CrsProjectionFileNotFound(
+            f"No ESRI projection file found in {folder}. "
+            "Set 'projection_file' in your config to specify one explicitly."
+        )
+    return hits[0]
 
 
 def resolve_default_geom(prj_path: str, prj_geom_id: Optional[str]) -> str:
