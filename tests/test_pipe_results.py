@@ -32,7 +32,8 @@ except ImportError:
 
 # Path to a real plan HDF fixture — tests that need it are skipped when absent.
 _HDF_FIXTURE = os.path.join(
-    os.path.dirname(__file__), 'data', 'beaver.p01.hdf'
+    os.path.dirname(__file__), 'data',
+    '2D_culvert_bridge_levee_precip_and_pipes.p01.hdf'
 )
 HAS_HDF_FIXTURE = os.path.exists(_HDF_FIXTURE)
 
@@ -83,7 +84,7 @@ class TestListPipeNetworks(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
-@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/beaver.p01.hdf")
+@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/")
 class TestReadPipeNetwork(unittest.TestCase):
 
     def setUp(self):
@@ -132,7 +133,7 @@ class TestReadPipeNetwork(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
-@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/beaver.p01.hdf")
+@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/")
 class TestReadNodeTimeseries(unittest.TestCase):
 
     def setUp(self):
@@ -170,7 +171,7 @@ class TestReadNodeTimeseries(unittest.TestCase):
 
 
 @unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
-@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/beaver.p01.hdf")
+@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/")
 class TestReadConduitTimeseries(unittest.TestCase):
 
     def setUp(self):
