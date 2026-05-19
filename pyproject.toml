@@ -7,3 +7,17 @@ name = "hack_ras"
 version = "0.1.0"
 description = "Python tools for HEC-RAS parsing and manipulation"
 requires-python = ">=3.9"
+
+[project.optional-dependencies]
+results = [
+    "h5py>=3.0",
+    "numpy>=1.21",
+    "geopandas>=0.12",
+    "pyproj>=3.0",
+    "shapely>=2.0",
+]
+gis = [
+    "geopandas>=0.12",
+    "pyproj>=3.0",
+    "shapely>=2.0",
+]
