@@ -15,6 +15,5 @@ def parse_type_rm_length(lines, index, river, reach):
     station = rm  # RAS uses RM as station identifier
 
     cs = CrossSection(river=river, reach=reach, station=station)
-    cs.rm_length = line
 
     return cs, 1

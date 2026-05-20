@@ -15,7 +15,7 @@ def _count_xs_headers(path: Path) -> int:
 def test_title_and_xs_count():
     gp = GeometryParser()
     geom = gp.parse_file(str(DATA))
-    assert geom.title == "Beaver Cr. - bridge"
+    assert geom.title == "Beaver Cr.  - bridge"
 
     # Number of CrossSection objects should match '# of "Type RM Length"' lines
     expected = _count_xs_headers(DATA)

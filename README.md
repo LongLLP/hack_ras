@@ -10,12 +10,11 @@ HEC-RAS uses text-based input files that can be manipulated outside the HEC-RAS 
 
 Current Capabilities:
 =====================
-Right now, the tools are incomplete. They focus on understanding file formats.
 Implemented so far:
-1. Basic parsing logic for selected text-based files.
-2. Simple extraction of structured data.
-3. Minimal data manipulation utilities.
-4. Tools organized into early modular components.
+1. Project file (.prj) parsing — key/value extraction, file ID resolution.
+2. Geometry file (.g##) parsing — river/reach/cross-section structure, GIS cut lines; lossless roundtrip write-back.
+3. Plan results (.p##.hdf) reading — 2D flow area cell geometry, water surface elevations, pipe network geometry and time series.
+4. GIS profile computation — ordered profile stations along a line with WSE assignment.
 
 Overview of HEC-RAS File Types:
 ===============================
@@ -46,8 +45,8 @@ Contains:
 
 Project Goals (for now)
 =======================
-1. Improve and stabilize geometry parsing.
-2. Add simple writer utilities.
+1. Complete cross-section data parsing (Sta/Elev, Manning, bank stations, inefficiency blocks).
+2. Broaden test coverage for the project parser and utility modules.
 
 Why This Repository Exists
 ==========================

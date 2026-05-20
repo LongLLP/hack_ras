@@ -32,9 +32,9 @@ HEC-RAS uses a base name plus a typed numeric suffix:
 - Avoid global state — do not use module-level mutable variables; all state lives in dataclass instances created fresh per use
 
 ## Current Work
-*(Last updated: 2026-05-18)*
-- Improving geometry parsing reliability
-- Adding test coverage for untested areas (project parser, XS cut line coordinates, cross-section metadata, error paths)
+*(Last updated: 2026-05-20)*
+- Completing cross-section data parsing: Sta/Elev, Manning, bank stations, and inefficiency blocks are recognized as "to do" in the parser but currently skipped
+- Adding test coverage for the project parser (catalog.py) and utility modules (utils/)
 
 ## Known Constraints
 - Windows environment

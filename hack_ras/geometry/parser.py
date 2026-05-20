@@ -61,13 +61,7 @@ class GeometryParser:
                 i += consumed
                 continue
 
-            # To do:
-            #   #Sta/Elev blocks
-            #   #Mann blocks
-            #   Bank Sta=...
-            #   Inefficiency blocks
-            #   etc.
-            # For now we skip
+            # TODO: Sta/Elev, Mann, Bank Sta, and Inefficiency blocks are not yet parsed.
             i += 1
 
         return geom
