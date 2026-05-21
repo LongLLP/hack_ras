@@ -33,7 +33,7 @@ except ImportError:
 # Path to a real plan HDF fixture — tests that need it are skipped when absent.
 _HDF_FIXTURE = os.path.join(
     os.path.dirname(__file__), 'data',
-    '2D_culvert_bridge_levee_precip_and_pipes.p01.hdf'
+    '2D culvert bridge levee precip pipes', 'Model.p02.hdf'
 )
 HAS_HDF_FIXTURE = os.path.exists(_HDF_FIXTURE)
 

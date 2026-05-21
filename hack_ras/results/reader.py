@@ -9,6 +9,7 @@ import numpy as np
 
 from .model import (
     AreaGeometry,
+    CellVolumeTable,
     ConduitTimeSeries,
     NodeTimeSeries,
     PipeConduit,
@@ -131,6 +132,74 @@ def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
         boundary=boundary,
         cell_gdf=cell_gdf,
     )
+
+
+# ---------------------------
+# Cell volume-elevation tables
+# ---------------------------
+
+def read_cell_volume_table(hdf_path: str, area: str) -> CellVolumeTable:
+    """
+    Read the volume-elevation lookup table for all cells in one 2D flow area.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    area : str
+        Name of the 2D flow area (from list_areas).
+
+    Returns
+    -------
+    CellVolumeTable
+        info   shape (N_cells, 2) int32  — [start_idx, count] per cell
+        values shape (total_pairs, 2) float32 — [elevation, volume] pairs
+
+    Raises
+    ------
+    KeyError
+        If the volume-elevation datasets are absent from the HDF file.
+    """
+    base = f"Geometry/2D Flow Areas/{area}"
+    with h5py.File(hdf_path, "r") as hdf:
+        info   = hdf[f"{base}/Cells Volume Elevation Info"][:]
+        values = hdf[f"{base}/Cells Volume Elevation Values"][:]
+    return CellVolumeTable(info=info, values=values)
+
+
+def interpolate_cell_volume(table: CellVolumeTable, cell_idx: int, wse: float) -> float:
+    """
+    Interpolate the water volume stored in one cell at a given water surface elevation.
+
+    Uses the cell's volume-elevation table from a CellVolumeTable. Returns 0.0 when
+    the cell is dry (WSE at or below the lowest table elevation). Clamps to the
+    maximum table volume when WSE exceeds the highest table elevation.
+
+    Parameters
+    ----------
+    table : CellVolumeTable
+        As returned by read_cell_volume_table().
+    cell_idx : int
+        Zero-based cell index.
+    wse : float
+        Water surface elevation to interpolate at.
+
+    Returns
+    -------
+    float
+        Interpolated (or clamped) volume for the cell.
+    """
+    start = int(table.info[cell_idx, 0])
+    count = int(table.info[cell_idx, 1])
+    if count == 0:
+        return 0.0
+    elev  = table.values[start : start + count, 0]
+    vol   = table.values[start : start + count, 1]
+    if wse <= float(elev[0]):
+        return 0.0
+    if wse >= float(elev[-1]):
+        return float(vol[-1])
+    return float(np.interp(wse, elev, vol))
 
 
 # ---------------------------

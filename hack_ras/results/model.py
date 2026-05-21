@@ -40,6 +40,22 @@ class AreaGeometry:
 
 
 @dataclass
+class CellVolumeTable:
+    """
+    Volume-elevation lookup table for all cells in one 2D flow area.
+
+    Attributes
+    ----------
+    info : np.ndarray, shape (N_cells, 2), dtype int32
+        Per-cell [start_index, count] into the values array.
+    values : np.ndarray, shape (total_pairs, 2), dtype float32
+        Packed elevation-volume pairs: column 0 = elevation, column 1 = volume.
+    """
+    info:   np.ndarray
+    values: np.ndarray
+
+
+@dataclass
 class PipeNode:
     """A pipe network junction node from Geometry/Pipe Nodes/Attributes."""
     name: str

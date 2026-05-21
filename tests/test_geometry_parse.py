@@ -1,7 +1,7 @@
 from pathlib import Path
 from hack_ras.geometry.parser import GeometryParser
 
-DATA = Path(__file__).parent / "data" / "beaver.g01"
+DATA = Path(__file__).parent / "data" / "Beaver" / "beaver.g01"
 
 def _count_xs_headers(path: Path) -> int:
     # Count how many cross sections appear by scanning the raw file for the header line

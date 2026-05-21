@@ -2,7 +2,7 @@ from pathlib import Path
 from hack_ras.geometry.parser import GeometryParser
 from hack_ras.geometry.writer import GeometryWriter
 
-DATA = Path(__file__).parent / "data" / "beaver.g01"
+DATA = Path(__file__).parent / "data" / "Beaver" / "beaver.g01"
 
 def test_roundtrip_is_lossless(tmp_path):
     # Read the original file as raw text to compare exact bytes
