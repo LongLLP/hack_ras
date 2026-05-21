@@ -167,13 +167,19 @@ def read_cell_volume_table(hdf_path: str, area: str) -> CellVolumeTable:
     return CellVolumeTable(info=info, values=values)
 
 
-def interpolate_cell_volume(table: CellVolumeTable, cell_idx: int, wse: float) -> float:
+def interpolate_cell_volume(
+    table: CellVolumeTable,
+    cell_idx: int,
+    wse: float,
+    cell_plan_area: float,
+) -> float:
     """
-    Interpolate the water volume stored in one cell at a given water surface elevation.
+    Compute the water volume stored in one cell at a given water surface elevation.
 
-    Uses the cell's volume-elevation table from a CellVolumeTable. Returns 0.0 when
-    the cell is dry (WSE at or below the lowest table elevation). Clamps to the
-    maximum table volume when WSE exceeds the highest table elevation.
+    Interpolates within the cell's volume-elevation table. When WSE exceeds the
+    highest terrain elevation in the table, HEC-RAS computes additional volume
+    using the full plan area of the cell (a linear extension), so this function
+    does the same rather than clamping.
 
     Parameters
     ----------
@@ -182,23 +188,31 @@ def interpolate_cell_volume(table: CellVolumeTable, cell_idx: int, wse: float) -
     cell_idx : int
         Zero-based cell index.
     wse : float
-        Water surface elevation to interpolate at.
+        Water surface elevation to evaluate at.
+    cell_plan_area : float
+        Horizontal footprint area of the cell polygon (ft² or m², matching the
+        model's coordinate units). Used for linear extrapolation above the table
+        maximum. Obtain from AreaGeometry.polygons[cell_idx].area.
 
     Returns
     -------
     float
-        Interpolated (or clamped) volume for the cell.
+        Volume for the cell at the given WSE.
+        0.0 if WSE is at or below the cell's minimum terrain elevation.
+        Linearly extrapolated above the table maximum using cell_plan_area.
     """
     start = int(table.info[cell_idx, 0])
     count = int(table.info[cell_idx, 1])
     if count == 0:
         return 0.0
-    elev  = table.values[start : start + count, 0]
-    vol   = table.values[start : start + count, 1]
+    elev = table.values[start : start + count, 0]
+    vol  = table.values[start : start + count, 1]
     if wse <= float(elev[0]):
         return 0.0
-    if wse >= float(elev[-1]):
-        return float(vol[-1])
+    if wse > float(elev[-1]):
+        # WSE above the highest terrain point in the table: the cell is fully
+        # inundated and HEC-RAS extends volume linearly at the full plan area.
+        return float(vol[-1]) + (wse - float(elev[-1])) * cell_plan_area
     return float(np.interp(wse, elev, vol))
 
 

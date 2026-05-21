@@ -81,7 +81,12 @@ vol  = values[start:start+count, 1]    # volumes for this cell
 interpolated = np.interp(wse, elev, vol)
 ```
 - If WSE ≤ elev[0]: volume = 0.0 (dry)
-- If WSE ≥ elev[-1]: volume = vol[-1] (clamp to table maximum)
+- If WSE > elev[-1]: **linear extrapolation** — `vol[-1] + (wse - elev[-1]) * cell_plan_area`
+  HEC-RAS treats the cell as a flat-bottomed tank once WSE exceeds the highest terrain
+  point; volume grows linearly at the cell's horizontal plan area (ft² or m²).
+  Do **not** clamp to `vol[-1]` — that underestimates storage in deeply flooded cells.
+- `cell_plan_area` comes from `AreaGeometry.polygons[cell_idx].area` (shapely Polygon area
+  in the model's projected coordinate units).
 
 ### Water Surface Elevation Results
 Base path: `Results/Unsteady/Output/Output Blocks/Base Output/`

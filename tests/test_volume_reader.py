@@ -45,25 +45,40 @@ class TestInterpolateCellVolume(unittest.TestCase):
 
     def test_below_min_returns_zero(self):
         t = self._make_table()
-        self.assertEqual(interpolate_cell_volume(t, 0, 9.0), 0.0)
-        self.assertEqual(interpolate_cell_volume(t, 0, 10.0), 0.0)
+        self.assertEqual(interpolate_cell_volume(t, 0, 9.0, 500.0), 0.0)
+        self.assertEqual(interpolate_cell_volume(t, 0, 10.0, 500.0), 0.0)
 
-    def test_above_max_clamps_to_max(self):
+    def test_above_max_extrapolates_linearly(self):
         t = self._make_table()
-        self.assertAlmostEqual(interpolate_cell_volume(t, 0, 15.0), 300.0, places=3)
-        self.assertAlmostEqual(interpolate_cell_volume(t, 0, 12.0), 300.0, places=3)
+        # Cell 0: table max is elev=12, vol=300. Plan area = 500 ft².
+        # At exactly the table max: no extrapolation needed → 300.0
+        self.assertAlmostEqual(interpolate_cell_volume(t, 0, 12.0, 500.0), 300.0, places=3)
+        # At 3 ft above the table max: 300 + 3 * 500 = 1800
+        self.assertAlmostEqual(interpolate_cell_volume(t, 0, 15.0, 500.0), 1800.0, places=2)
+        # At 0.5 ft above: 300 + 0.5 * 500 = 550
+        self.assertAlmostEqual(interpolate_cell_volume(t, 0, 12.5, 500.0), 550.0, places=2)
 
     def test_midrange_interpolation(self):
         t = self._make_table()
-        # Between elev 11 (vol 100) and elev 12 (vol 300): midpoint = 200
-        result = interpolate_cell_volume(t, 0, 11.5)
+        # Between elev 11 (vol 100) and elev 12 (vol 300): midpoint → 200
+        result = interpolate_cell_volume(t, 0, 11.5, 500.0)
         self.assertAlmostEqual(result, 200.0, places=2)
 
     def test_second_cell(self):
         t = self._make_table()
         # Between elev 20 (vol 0) and elev 21 (vol 50): at 20.5 → 25
-        result = interpolate_cell_volume(t, 1, 20.5)
+        result = interpolate_cell_volume(t, 1, 20.5, 200.0)
         self.assertAlmostEqual(result, 25.0, places=2)
+
+    def test_extrapolation_uses_plan_area(self):
+        t = self._make_table()
+        # Confirm the extrapolation rate equals the plan area:
+        # vol at (max_elev + dh) - vol at max_elev == dh * plan_area
+        area = 750.0
+        dh = 2.0
+        v_max  = interpolate_cell_volume(t, 0, 12.0, area)
+        v_high = interpolate_cell_volume(t, 0, 12.0 + dh, area)
+        self.assertAlmostEqual(v_high - v_max, dh * area, places=2)
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -106,11 +121,13 @@ class TestReadCellVolumeTable(unittest.TestCase):
 
     def test_interpolation_on_real_cell(self):
         tbl = read_cell_volume_table(HDF_FIXTURE, "Interior")
-        # Cell 0: interpolate at mid-range WSE — result should be > 0
+        # Cell 0: interpolate at mid-range WSE — result should be > 0.
+        # Plan area is only needed for above-max extrapolation; use a plausible
+        # value so the call is valid even if mid_wse happens to equal elev[-1].
         start, count = int(tbl.info[0, 0]), int(tbl.info[0, 1])
         elev_vals = tbl.values[start : start + count, 0]
         mid_wse = float((elev_vals[0] + elev_vals[-1]) / 2.0)
-        vol = interpolate_cell_volume(tbl, 0, mid_wse)
+        vol = interpolate_cell_volume(tbl, 0, mid_wse, cell_plan_area=1000.0)
         self.assertGreater(vol, 0.0)
 
 
