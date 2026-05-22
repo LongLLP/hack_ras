@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import re
 import glob
+import xml.etree.ElementTree as ET
 from typing import Optional, Iterable
 
 # ---------------------------
@@ -185,16 +186,44 @@ def find_plan_hdfs(folder: str, plan_ids: list[str] | None = None) -> list[str]:
     return [found[k] for k in sorted(found.keys())]
 
 
+def find_rasmap(folder: str) -> str | None:
+    """Return the absolute path of the first *.rasmap file in folder, or None."""
+    hits = glob.glob(os.path.join(folder, "*.rasmap"))
+    return os.path.abspath(hits[0]) if hits else None
+
+
+def _rasmap_crs_prj(rasmap_path: str) -> str | None:
+    """
+    Parse a .rasmap XML file and return the absolute path of the projection
+    file named in <RASProjectionFilename Filename="..." />, or None if the
+    element is absent, malformed, or the file does not exist on disk.
+    """
+    try:
+        tree = ET.parse(rasmap_path)
+    except ET.ParseError:
+        return None
+    el = tree.getroot().find("RASProjectionFilename")
+    if el is None:
+        return None
+    raw = el.get("Filename", "")
+    if not raw:
+        return None
+    rel = raw.replace("\\", os.sep).replace("/", os.sep)
+    candidate = os.path.normpath(os.path.join(os.path.dirname(rasmap_path), rel))
+    return candidate if os.path.exists(candidate) else None
+
+
 def find_crs_prj(folder: str, specified: str | None = None) -> str:
     """
-    Find an ESRI .prj file (CRS definition) in or below folder.
+    Find an ESRI .prj file (CRS definition) for the RAS project in folder.
 
-    If specified is given, validates it exists and returns its absolute path.
-    Otherwise searches recursively for .prj files that are NOT HEC-RAS project
-    files (uses is_hecras_prj as the inverse filter).
-
-    If multiple ESRI .prj files are found the first is returned. For CRS
-    conflict detection across multiple files, use pyproj directly.
+    Lookup order:
+    1. If specified is given, validates it exists and returns its absolute path.
+    2. Looks for a *.rasmap file in folder and reads the <RASProjectionFilename>
+       element — this is the canonical, authoritative CRS reference written by
+       HEC-RAS Mapper.
+    3. Falls back to a recursive search for *.prj files that are NOT HEC-RAS
+       project files (uses is_hecras_prj as the inverse filter).
 
     Raises CrsProjectionFileNotFound if no suitable file can be found.
     """
@@ -205,6 +234,12 @@ def find_crs_prj(folder: str, specified: str | None = None) -> str:
                 f"Projection file not found: {p}"
             )
         return p
+
+    rasmap = find_rasmap(folder)
+    if rasmap:
+        prj = _rasmap_crs_prj(rasmap)
+        if prj:
+            return prj
 
     hits = [
         os.path.abspath(p)
