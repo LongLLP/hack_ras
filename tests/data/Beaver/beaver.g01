@@ -1,5 +1,5 @@
 Geom Title=Beaver Cr.  - bridge
-Program Version=4.00
+Program Version=5.03
 Viewing Rectangle=-0.0392 , 0.9196 , 1.0719 ,-0.1627 
 
 River Reach=Beaver Creek    ,Kentwood        
@@ -36,6 +36,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=866,948
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=210.9,0.51, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.97    ,73.33,100,66.67
@@ -67,6 +68,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=823.08,914.67
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=210.49,0.52, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.951   ,73.33,100,66.67
@@ -98,6 +100,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=780.17,881.33
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=210.08,0.53, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.93    ,73.33,100,66.67
@@ -129,6 +132,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=737.25,848
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=209.67,0.54, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.913   ,73.33,100,66.67
@@ -160,6 +164,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=694.33,814.67
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=209.27,0.55, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.894   ,73.33,100,66.67
@@ -191,6 +196,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=651.42,781.33
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=208.86,0.56, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.875   ,73.33,100,66.67
@@ -220,6 +226,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=608.5,748
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=208.45,0.57, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.855   ,73.33,100,66.67
@@ -252,6 +259,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=565.58,714.67
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=208.04,0.58, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.836   ,73.33,100,66.67
@@ -284,6 +292,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=522.67,681.33
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=207.63,0.59, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.81    ,73.33,100,66.67
@@ -316,6 +325,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=479.75,648
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=207.23,0.61, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.798   ,73.33,100,66.67
@@ -348,6 +358,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=436.83,614.67
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=206.82,0.62, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.779   ,73.33,100,66.67
@@ -380,6 +391,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=393.92,581.33
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=206.41,0.63, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.76    ,56.25,100,68.75
@@ -402,6 +414,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=351,548
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=206,0.64, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.741   ,56.25,100,68.75
@@ -434,6 +447,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=410.88,587
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.93,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.72    ,56.25,100,68.75
@@ -466,6 +480,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=470.75,626
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.85,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.703   ,56.25,100,68.75
@@ -498,6 +513,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=530.62,665
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.77,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.685   ,56.25,100,68.75
@@ -526,6 +542,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=590.5,704
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.7,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.666   ,56.25,100,68.75
@@ -555,6 +572,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=650.38,743
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.62,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.647   ,56.25,100,68.75
@@ -584,6 +602,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=710.25,782
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.55,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.628   ,56.25,100,68.75
@@ -613,6 +632,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=770.12,821
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.47,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.61    ,48,92,38
@@ -634,6 +654,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=830,860
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.4,0.66, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.593   ,48,92,38
@@ -662,6 +683,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=797.2,833.4
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.35,0.67, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.576   ,48,92,38
@@ -690,6 +712,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=764.4,806.8
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.3,0.69, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.559   ,48,92,38
@@ -718,6 +741,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=731.6,780.2
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.25,0.71, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.542   ,48,92,38
@@ -746,6 +770,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=698.8,753.6
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.2,0.73, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.525   ,48,92,38
@@ -772,6 +797,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=666,727
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.15,0.75, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.508   ,48,92,38
@@ -800,6 +826,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=633.2,700.4
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.1,0.77, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.491   ,48,92,38
@@ -828,6 +855,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=600.4,673.8
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205.05,0.79, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.474   ,48,92,38
@@ -856,6 +884,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=567.6,647.2
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=205,0.81, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.457   ,48,92,38
@@ -884,6 +913,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=534.8,620.6
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=204.95,0.83, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.44    ,135,85,250
@@ -905,6 +935,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=502,594
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=204.9,0.85, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.425   ,135,85,250
@@ -935,6 +966,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=476,620.5
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=204.3,0.84, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.41    ,100,100,100
@@ -967,6 +999,7 @@ Permanent Ineff=
 Bank Sta=450,647
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.7,0.84, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 3 ,5.4     ,,,
@@ -1063,6 +1096,7 @@ Permanent Ineff=
 Bank Sta=450,647
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.7,0.67, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.37    ,64,100,116
@@ -1093,6 +1127,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=404.6,573.4
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.72,0.66, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.35    ,64,100,116
@@ -1123,6 +1158,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=359.2,499.8
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.74,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.33    ,64,100,116
@@ -1153,6 +1189,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=313.8,426.2
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.76,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.31    ,64,100,116
@@ -1183,6 +1220,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=268.4,352.6
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.78,0.64, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.5,0.3
 
 Type RM Length L Ch R = 1 ,5.29    ,82,83.3,82
@@ -1204,6 +1242,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=223,279
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.8,0.63, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.274   ,82,83.3,82
@@ -1232,6 +1271,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=216.2,272.4
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.51,0.64, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.258   ,82,83.3,82
@@ -1260,6 +1300,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=209.4,265.8
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=203.22,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.242   ,82,83.3,82
@@ -1288,6 +1329,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=202.6,259.2
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=202.93,0.66, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.226   ,82,83.3,82
@@ -1316,6 +1358,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=195.8,252.6
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=202.64,0.68, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.21    ,82,83.3,82
@@ -1342,6 +1385,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=189,246
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=202.35,0.69, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.194   ,82,83.3,82
@@ -1370,6 +1414,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=182.2,239.4
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=202.06,0.7, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.178   ,82,83.3,82
@@ -1398,6 +1443,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=175.4,232.8
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=201.77,0.72, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.162   ,82,83.3,82
@@ -1426,6 +1472,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=168.6,226.2
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=201.48,0.73, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.146   ,82,83.3,82
@@ -1454,6 +1501,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=161.8,219.6
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=201.19,0.75, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.13    ,77.5,88.75,85
@@ -1480,6 +1528,7 @@ Permanent Ineff=
 Bank Sta=155,213
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.76, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.113   ,77.5,88.75,85
@@ -1509,6 +1558,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=184.88,251.12
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.74, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.097   ,77.5,88.75,85
@@ -1538,6 +1588,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=214.75,289.25
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.72, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.081   ,77.5,88.75,85
@@ -1567,6 +1618,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=244.62,327.38
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.7, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.065   ,77.5,88.75,85
@@ -1595,6 +1647,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=274.5,365.5
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.68, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.048   ,77.5,88.75,85
@@ -1626,6 +1679,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=304.38,403.62
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.66, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.032   ,77.5,88.75,85
@@ -1657,6 +1711,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=334.25,441.75
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.65, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.016   ,77.5,88.75,85
@@ -1688,6 +1743,7 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=364.12,479.88
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.64, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
 Type RM Length L Ch R = 1 ,5.0     ,0,0,0
@@ -1710,8 +1766,12 @@ Node Last Edited Time=Jul/03/2000 16:03:28
 Bank Sta=394,518
 XS Rating Curve= 0 ,0
 XS HTab Starting El and Incr=200.9,0.62, 100 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
 Exp/Cntr=0.3,0.1
 
+LCMann Time=Dec/30/1899 00:00:00
+LCMann Region Time=Dec/30/1899 00:00:00
+LCMann Table=0
 Chan Stop Cuts=-1 
 
 
@@ -1720,3 +1780,4 @@ Use User Specified Reach Order=0
 User Specified Reach Order=Beaver Creek    ,Kentwood        
 GIS Ratio Cuts To Invert=-1
 GIS Limit At Bridges=0
+Composite Channel Slope=5

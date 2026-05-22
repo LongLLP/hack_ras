@@ -1,29 +1,27 @@
 # hack_ras/project/model.py
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Optional
+
 
 @dataclass
 class ProjectModel:
     title: Optional[str] = None
-    geom_file_id: Optional[str] = None   # e.g., "g01"
-    plan_file_id: Optional[str] = None   # e.g., "p01"
-    unsteady_file_id: Optional[str] = None  # e.g., "u01"
+    geom_file_ids: list[str]     = field(default_factory=list)
+    plan_file_ids: list[str]     = field(default_factory=list)
+    unsteady_file_ids: list[str] = field(default_factory=list)
 
-    # Handy optional fields
-    y_axis_title: Optional[str] = None
+    y_axis_title: Optional[str]    = None
     x_axis_title_pf: Optional[str] = None
     x_axis_title_xs: Optional[str] = None
-    dss_file: Optional[str] = None
+    dss_file: Optional[str]        = None
 
-    # A helper to resolve IDs to filenames (convention-based)
-    def resolve_filename(self, basename_map: dict[str, str]) -> dict[str, Optional[str]]:
-        """
-        Given a map like {"g01": "Stream.g01", "p01":"Stream.p01", "u01":"Stream.u01"},
-        return absolute or relative filenames for each referenced file id.
-        """
+    def resolve_filenames(self, basename_map: dict[str, str]) -> dict[str, list[str]]:
+        """Map file IDs to filenames for all referenced files of each type."""
+        def _resolve(ids: list[str]) -> list[str]:
+            return [basename_map[i] for i in ids if i in basename_map]
         return {
-            "geom": basename_map.get(self.geom_file_id) if self.geom_file_id else None,
-            "plan": basename_map.get(self.plan_file_id) if self.plan_file_id else None,
-            "unsteady": basename_map.get(self.unsteady_file_id) if self.unsteady_file_id else None,
+            "geom":     _resolve(self.geom_file_ids),
+            "plan":     _resolve(self.plan_file_ids),
+            "unsteady": _resolve(self.unsteady_file_ids),
         }

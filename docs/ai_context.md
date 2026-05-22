@@ -9,12 +9,13 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 ## Package Structure
 | Package | Purpose |
 |---------|---------|
-| `hack_ras/project/` | Parse `.prj` project files (key=value pairs) |
+| `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
+| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass |
 | `hack_ras/geometry/` | Parse `.g##` geometry files (rivers, reaches, cross-sections, GIS cut lines) |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
 | `hack_ras/utils/` | Shared utilities (logging, line helpers) |
-| `hack_ras/resolve.py` | File discovery and ID resolution (top-level module) |
+| `hack_ras/resolve.py` | File discovery and ID resolution (lower-level module) |
 
 ## Key Design Principles
 - One package per HEC-RAS file type
@@ -25,6 +26,9 @@ writes simulation results to HDF5 files (`.p##.hdf`).
   parsed on top of the raw lines, not instead of them
 - **Typed exceptions over None**: resolution and lookup functions raise typed exceptions
   (`ValueError`, `GeometryFileNotFound`, etc.) rather than returning `None`
+- **`.prj` is authoritative**: the project file is the definitive list of which files belong
+  to a project. Files that exist on disk but are not referenced by the `.prj` (orphans) are
+  not part of the project and are silently excluded from all discovery.
 
 ## File Naming Conventions
 HEC-RAS uses a base name plus a typed numeric suffix:
@@ -39,6 +43,48 @@ HEC-RAS uses a base name plus a typed numeric suffix:
 
 `##` is a two-digit number (`01`, `02`, …). A project may have multiple geometry or plan files.
 Multiple plans may share the same geometry (same `g##` ID), which is important for grouping.
+
+## Project Entry Point — `RasProject`
+
+`from hack_ras import RasProject` is the recommended way to work with a HEC-RAS project.
+Pass the absolute path to the `.prj` file; `ValueError` is raised if the file is missing
+or is not a HEC-RAS project (e.g. an ESRI shapefile projection file with the same extension).
+
+```python
+project = RasProject(r"C:\path\to\NKC_Hillside_Levee.prj")
+project.folder        # directory containing the .prj
+project.base_name     # "NKC_Hillside_Levee"
+project.title         # project title string from the .prj
+project.model         # ProjectModel — parsed .prj content (list fields below)
+project.plan_hdfs()               # all .p##.hdf files listed in the .prj that exist on disk
+project.plan_hdfs(['p14','p15'])   # filtered subset
+project.crs_prj()     # ESRI .prj CRS file (via RAS Mapper or folder search)
+project.family()      # {'geom': [...], 'plan': [...], ...} — filesystem-based
+project.available_ids()           # same, as ID strings
+```
+
+`plan_hdfs()` uses `ProjectModel.plan_file_ids` (parsed from the `.prj`) as the
+authoritative plan list, then checks HDF existence. Orphaned HDF files on disk that
+are not listed in the `.prj` are excluded automatically.
+
+## Parsing Strategy — Project (`.prj`)
+
+The `.prj` file uses repeated keys for multi-valued entries:
+```
+Geom File=g01
+Geom File=g02
+Plan File=p01
+Plan File=p14
+...
+```
+`ProjectModel` stores these as **lists**:
+- `geom_file_ids: list[str]` — all geometry IDs referenced by the project
+- `plan_file_ids: list[str]` — all plan IDs, in the order listed in the `.prj`
+- `unsteady_file_ids: list[str]` — all unsteady flow IDs
+
+Scalar fields (`title`, `y_axis_title`, etc.) work as before.
+`resolve_filenames(basename_map)` maps all IDs of each type to filenames, returning
+`{'geom': [...], 'plan': [...], 'unsteady': [...]}`.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
@@ -132,8 +178,9 @@ cell index and therefore no volume table to query). Profile lines that extend be
 mesh boundary are handled gracefully — the out-of-mesh portion is silently ignored.
 
 ## Current Work
-*(Last updated: 2026-05-21)*
-- `results/` and `gis/` packages are complete and in production use
+*(Last updated: 2026-05-22)*
+- `results/`, `gis/`, and `project/` packages are complete and in production use
+- `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - Completing cross-section data parsing: Sta/Elev, Manning, bank stations, and
   inefficiency blocks are recognised as "to do" in `geometry/parser.py` but currently skipped
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
