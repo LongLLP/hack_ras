@@ -98,6 +98,24 @@ Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 All datasets are in the plan HDF file. The `.p##` text sidecar alongside it holds
 the plan title and geometry ID (`Geom File=g##`).
 
+### 2D Flow Area Registry
+Path: `Geometry/2D Flow Areas/` (top-level datasets, not inside any area subgroup)
+
+| Dataset | Shape | dtype | Notes |
+|---------|-------|-------|-------|
+| `Attributes` | (N_areas,) | structured | One row per area: `Name` (S16), `Cell Count` (int32 — active/non-perimeter cells only), plus Manning's n, tolerances, spacing, etc. |
+| `Cell Info` | (N_areas, 2) | int32 | `[start, count]` per area in the merged `Cell Points` array (active cells only; perimeter dummy cells are excluded) |
+| `Cell Points` | (total_active, 2) | float64 | Concatenated cell-centre XY for all areas, ordered by area then local cell index |
+
+Key facts:
+- `Cell Count` in `Attributes` and the count column in `Cell Info` reflect **active** cells
+  only. The per-area geometry subgroup (`Cells Center Coordinate`) has a larger N that
+  includes perimeter dummy cells, so `Cell Count < N_subgroup`.
+- Cell indices stored in SA 2D Conn datasets (`Headwater Cells`, `Tailwater Cells`) are
+  **local** to the connected 2D area, not offsets into `Cell Points`.
+- Each area also has a subgroup `Geometry/2D Flow Areas/{area_name}/` with its own
+  `Cell Maximum Index` attribute (highest non-perimeter cell index in that area).
+
 ### 2D Flow Area Geometry
 Base path: `Geometry/2D Flow Areas/{area_name}/`
 
@@ -148,21 +166,71 @@ WSE type options (used throughout `results.reader`):
 - `"Maximum from Time Series"` — `nanmax` across the full time series
 - `"<timestamp>"` — match against Time Date Stamp array (case-insensitive)
 
+### Structures (Connection Geometry)
+Path: `Geometry/Structures/Attributes` — structured array, one row per connection/structure.
+
+Relevant fields for SA 2D Area Conn lookups:
+
+| Field | dtype | Notes |
+|-------|-------|-------|
+| `Connection` | S16 | Connection name (truncated to 16 chars) |
+| `US SA/2D` | S16 | Name of the **HW-side** 2D flow area (or storage area) |
+| `DS SA/2D` | S16 | Name of the **TW-side** 2D flow area (or storage area) |
+| `SNN ID` | int32 | Integer node ID; matches the `Node Pointer` HDF attribute on the connection's results group |
+| `US Type` / `DS Type` | S16 | `b'2D'` for a 2D mesh side |
+
+To find which 2D area an SA 2D Conn's HW/TW cells belong to:
+1. Read `Node Pointer` attr from the connection's results group (e.g. `Results/…/SA 2D Area Conn/{name}`)
+2. Find the row in `Geometry/Structures/Attributes` where `SNN ID == Node Pointer`
+3. `US SA/2D` → HW area name; `DS SA/2D` → TW area name
+
+Use `read_sa2d_areas(hdf_path, connection)` from `hack_ras.results.reader`.
+
+### Plan Metadata
+Path: `Plan Data/Plan Information` — HDF5 group with scalar **attributes** (not datasets).
+
+| Attribute | Example value | Notes |
+|-----------|---------------|-------|
+| `Simulation Start Time` | `b'01Jan2025 00:00:00'` | Reference midnight for Summary Output decimal-days times |
+| `Simulation End Time` | `b'02Jan2025 00:00:00'` | |
+| `Time Window` | `b'01Jan2025 00:00:00 to 02Jan2025 00:00:00'` | Human-readable window |
+| `Plan Title` | `b'FC 050year'` | Same as `.p##` sidecar `Plan Title=` line |
+| `Plan Name` / `Plan ShortID` | same as title | |
+| `Geometry Title` | `b'FC gravity flow'` | |
+| `Base Output Interval` | `b'30MIN'` | Output time-step interval |
+| `Computation Time Step Base` | `b'1SEC'` | Computational sub-step |
+
+Use `read_simulation_start_time(hdf_path)` from `hack_ras.results.reader` to get a
+`datetime` object parsed from `Simulation Start Time`.
+
 ### SA 2D Area Conn Results
 Base path: `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/SA 2D Area Conn/{connection}/`
 
 SA 2D Area Conn features (levees, lateral structures) have **no Summary Output group** — only
-time-series data. Time of maximum WSE must be derived from the time series via `nanargmax`.
+time-series data at output-interval resolution (e.g. 30 min).
+
+**Group attribute:** `Node Pointer` (int) — links this results group to the geometry row
+in `Geometry/Structures/Attributes` via `SNN ID`.
 
 | Dataset | Shape | Notes |
 |---------|-------|-------|
-| `Headwater Cells` | (N_hw,) int32 | Unique cell indices in the 2D mesh on the upstream/HW side |
-| `Tailwater Cells` | (N_tw,) int32 | Unique cell indices on the downstream/TW side |
+| `Headwater Cells` | (N_hw,) int32 | Unique cell indices — **local to the HW 2D area** |
+| `Tailwater Cells` | (N_tw,) int32 | Unique cell indices — **local to the TW 2D area** |
 | `HW TW Cells/Water Surface HW Cells` | (T, N_hw) float32 | WSE time series per unique HW cell |
 | `HW TW Cells/Water Surface TW Cells` | (T, N_tw) float32 | WSE time series per unique TW cell |
 | `HW TW Segments/HW TW Station` | (N_segs+1,) float32 | Face-point stations along the structure |
 | `HW TW Segments/Headwater Cells` | (N_segs,) \|S10 | Cell index string per segment, e.g. `b'1008'` |
 | `HW TW Segments/Tailwater Cells` | (N_segs,) \|S10 | Same, TW side |
+
+**Time of max — correct approach:** Do NOT use `nanargmax` on the time series (output-interval
+resolution only, e.g. 30 min). Instead, look up the HW/TW cell indices in the Summary Output
+of the connected 2D area, which has sub-step accuracy:
+```
+Summary Output/2D Flow Areas/{hw_area}/Maximum Water Surface[1, cell_idx]  # decimal days
+```
+Convert to datetime: `simulation_start + timedelta(days=decimal_days)`. Use
+`read_sa2d_areas()` to get area names, `read_summary_max()` for the lookup, and
+`read_simulation_start_time()` for the reference datetime — all in `hack_ras.results.reader`.
 
 Station assignment: segment j spans `station[j]` to `station[j+1]`; its midpoint =
 `(station[j] + station[j+1]) / 2`. Each unique cell's representative station = mean of
@@ -200,7 +268,7 @@ cell index and therefore no volume table to query). Profile lines that extend be
 mesh boundary are handled gracefully — the out-of-mesh portion is silently ignored.
 
 ## Current Work
-*(Last updated: 2026-05-22)*
+*(Last updated: 2026-05-26)*
 - `results/`, `gis/`, and `project/` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - Completing cross-section data parsing: Sta/Elev, Manning, bank stations, and
