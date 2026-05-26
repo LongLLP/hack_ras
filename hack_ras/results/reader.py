@@ -16,6 +16,8 @@ from .model import (
     PipeNetwork,
     PipeNode,
     PlanMetadata,
+    Sa2dCell,
+    Sa2dConnection,
 )
 
 
@@ -224,6 +226,10 @@ _PIPE_TS_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
     "/Unsteady Time Series/Pipe Networks/{network}"
 )
+_SA2D_TS_BASE = (
+    "Results/Unsteady/Output/Output Blocks/Base Output"
+    "/Unsteady Time Series/SA 2D Area Conn/{connection}"
+)
 
 _SUM_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
@@ -328,6 +334,127 @@ def read_timestamps(hdf_path: str) -> np.ndarray:
     """
     with h5py.File(hdf_path, 'r') as hdf:
         return np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+
+
+# ---------------------------
+# SA 2D Area Conn discovery
+# ---------------------------
+
+def list_sa2d_connections(hdf_path: str) -> list[str]:
+    """
+    Return the names of all SA 2D Area Conn features in a plan HDF5 file.
+    Returns an empty list if the file has no SA 2D Area Conn results.
+    """
+    sa2d_path = (
+        "Results/Unsteady/Output/Output Blocks/Base Output"
+        "/Unsteady Time Series/SA 2D Area Conn"
+    )
+    with h5py.File(hdf_path, "r") as hdf:
+        try:
+            grp = hdf[sa2d_path]
+            return [k for k in grp.keys() if isinstance(grp[k], h5py.Group)]
+        except KeyError:
+            return []
+
+
+# ---------------------------
+# SA 2D Area Conn time series
+# ---------------------------
+
+def _seg_station_map(
+    unique_indices: np.ndarray,
+    seg_labels: np.ndarray,
+    seg_stations: np.ndarray,
+) -> dict:
+    """
+    Map each unique cell index to its representative station along a structure.
+
+    For each segment j (0 … N_segs-1):
+      midpoint_j = (seg_stations[j] + seg_stations[j+1]) / 2
+
+    The station for a cell = mean of midpoint_j across all segments where
+    the cell's index appears in seg_labels.  Returns nan for cells whose
+    index does not appear in any segment label.
+    """
+    n_segs = len(seg_labels)
+    midpoints = [
+        (float(seg_stations[j]) + float(seg_stations[j + 1])) / 2.0
+        for j in range(n_segs)
+    ]
+
+    cell_to_mids: dict = {}
+    for j, raw in enumerate(seg_labels):
+        label = _decode(raw)
+        try:
+            cell_id = int(label)
+        except ValueError:
+            continue
+        cell_to_mids.setdefault(cell_id, []).append(midpoints[j])
+
+    return {
+        int(idx): float(np.mean(cell_to_mids[int(idx)]))
+        if int(idx) in cell_to_mids
+        else float("nan")
+        for idx in unique_indices
+    }
+
+
+def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
+    """
+    Read HW and TW cell time series for one SA 2D Area Conn feature.
+
+    SA 2D Area Conn features have no Summary Output in the HDF.  The time of
+    maximum WSE must be derived from the returned time series via nanargmax.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    connection : str
+        Connection name, as returned by list_sa2d_connections().
+
+    Returns
+    -------
+    Sa2dConnection
+        hw_cells and tw_cells are each sorted by station ascending.
+
+    Raises
+    ------
+    KeyError
+        If the connection group or required datasets are absent.
+    """
+    base = _SA2D_TS_BASE.format(connection=connection)
+
+    with h5py.File(hdf_path, "r") as hdf:
+        timestamps   = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        hw_indices   = hdf[f"{base}/Headwater Cells"][()]
+        tw_indices   = hdf[f"{base}/Tailwater Cells"][()]
+        hw_wse       = hdf[f"{base}/HW TW Cells/Water Surface HW Cells"][()].astype(np.float64)
+        tw_wse       = hdf[f"{base}/HW TW Cells/Water Surface TW Cells"][()].astype(np.float64)
+        seg_stations = hdf[f"{base}/HW TW Segments/HW TW Station"][()]
+        seg_hw       = hdf[f"{base}/HW TW Segments/Headwater Cells"][()]
+        seg_tw       = hdf[f"{base}/HW TW Segments/Tailwater Cells"][()]
+
+    hw_map = _seg_station_map(hw_indices, seg_hw, seg_stations)
+    tw_map = _seg_station_map(tw_indices, seg_tw, seg_stations)
+
+    hw_cells = sorted(
+        [Sa2dCell(cell_idx=int(hw_indices[i]), station=hw_map[int(hw_indices[i])], wse=hw_wse[:, i])
+         for i in range(len(hw_indices))],
+        key=lambda c: c.station,
+    )
+    tw_cells = sorted(
+        [Sa2dCell(cell_idx=int(tw_indices[i]), station=tw_map[int(tw_indices[i])], wse=tw_wse[:, i])
+         for i in range(len(tw_indices))],
+        key=lambda c: c.station,
+    )
+
+    return Sa2dConnection(
+        name=connection,
+        timestamps=timestamps,
+        hw_cells=hw_cells,
+        tw_cells=tw_cells,
+    )
 
 
 # ---------------------------

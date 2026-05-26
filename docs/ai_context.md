@@ -139,7 +139,7 @@ Base path: `Results/Unsteady/Output/Output Blocks/Base Output/`
 
 | Path (relative to base) | Shape | Notes |
 |--------------------------|-------|-------|
-| `Summary Output/2D Flow Areas/{area}/Maximum Water Surface` | (2, N) | Row 0 = WSE, row 1 = time index of maximum |
+| `Summary Output/2D Flow Areas/{area}/Maximum Water Surface` | (2, N) | Row 0 = max WSE (sub-step accuracy, may exceed any time-series value); row 1 = time of maximum as **decimal days from midnight** of the simulation start date |
 | `Unsteady Time Series/2D Flow Areas/{area}/Water Surface` | (T, N) | WSE at every output time step |
 | `Unsteady Time Series/Time Date Stamp` | (T,) | Timestamp strings: `'01Jan2025 00:30:00'` |
 
@@ -147,6 +147,28 @@ WSE type options (used throughout `results.reader`):
 - `"Maximum"` — reads Summary Output row 0 (sub-step accuracy, may exceed any single time step)
 - `"Maximum from Time Series"` — `nanmax` across the full time series
 - `"<timestamp>"` — match against Time Date Stamp array (case-insensitive)
+
+### SA 2D Area Conn Results
+Base path: `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/SA 2D Area Conn/{connection}/`
+
+SA 2D Area Conn features (levees, lateral structures) have **no Summary Output group** — only
+time-series data. Time of maximum WSE must be derived from the time series via `nanargmax`.
+
+| Dataset | Shape | Notes |
+|---------|-------|-------|
+| `Headwater Cells` | (N_hw,) int32 | Unique cell indices in the 2D mesh on the upstream/HW side |
+| `Tailwater Cells` | (N_tw,) int32 | Unique cell indices on the downstream/TW side |
+| `HW TW Cells/Water Surface HW Cells` | (T, N_hw) float32 | WSE time series per unique HW cell |
+| `HW TW Cells/Water Surface TW Cells` | (T, N_tw) float32 | WSE time series per unique TW cell |
+| `HW TW Segments/HW TW Station` | (N_segs+1,) float32 | Face-point stations along the structure |
+| `HW TW Segments/Headwater Cells` | (N_segs,) \|S10 | Cell index string per segment, e.g. `b'1008'` |
+| `HW TW Segments/Tailwater Cells` | (N_segs,) \|S10 | Same, TW side |
+
+Station assignment: segment j spans `station[j]` to `station[j+1]`; its midpoint =
+`(station[j] + station[j+1]) / 2`. Each unique cell's representative station = mean of
+midpoints across all segments where that cell appears. Use `list_sa2d_connections()` and
+`read_sa2d_connection()` from `hack_ras.results.reader` to get a typed `Sa2dConnection`
+object with `hw_cells` / `tw_cells` lists sorted by station.
 
 ### Pipe Network Geometry & Results
 ```

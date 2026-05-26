@@ -144,3 +144,49 @@ class ConduitTimeSeries:
     flow_ds: np.ndarray
     vel_us: np.ndarray
     vel_ds: np.ndarray
+
+
+@dataclass
+class Sa2dCell:
+    """
+    One cell on the HW or TW side of an SA 2D Area Conn structure.
+
+    Attributes
+    ----------
+    cell_idx : int
+        Index of the cell in the 2D flow area mesh.
+    station : float
+        Representative station along the structure (model coordinate units).
+        Computed as the mean of segment midpoint stations for all segments
+        where this cell appears in HW TW Segments.
+    wse : np.ndarray, shape (T,), dtype float64
+        WSE time series for this cell.
+    """
+    cell_idx: int
+    station: float
+    wse: np.ndarray
+
+
+@dataclass
+class Sa2dConnection:
+    """
+    HW and TW cell time series for one SA 2D Area Conn (levee / lateral structure).
+
+    SA 2D Area Conn features have no Summary Output in the HDF; time of maximum
+    WSE must be derived from the time series via nanargmax.
+
+    Attributes
+    ----------
+    name : str
+        Connection name (HDF group key).
+    timestamps : np.ndarray, shape (T,), dtype str
+        HEC-RAS time-date stamp strings, e.g. '01Jan2025 00:30:00'.
+    hw_cells : list[Sa2dCell]
+        Cells on the headwater/upstream side, sorted by station ascending.
+    tw_cells : list[Sa2dCell]
+        Cells on the tailwater/downstream side, sorted by station ascending.
+    """
+    name: str
+    timestamps: np.ndarray
+    hw_cells: list
+    tw_cells: list
