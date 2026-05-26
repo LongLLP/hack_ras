@@ -2,6 +2,7 @@
 # Requires: pip install hack_ras[results]
 from __future__ import annotations
 import re
+from datetime import datetime
 from pathlib import Path
 
 import h5py
@@ -455,6 +456,88 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
         hw_cells=hw_cells,
         tw_cells=tw_cells,
     )
+
+
+def read_sa2d_areas(hdf_path: str, connection: str) -> tuple[str, str]:
+    """
+    Return (hw_area, tw_area) for an SA 2D Area Conn by looking up
+    US SA/2D and DS SA/2D in Geometry/Structures/Attributes.
+
+    Uses the Node Pointer attribute on the connection's results group
+    to match against the SNN ID field in Structures/Attributes.
+
+    Raises
+    ------
+    KeyError
+        If the connection group or Structures/Attributes is absent.
+    ValueError
+        If no structure row matches the connection's Node Pointer.
+    """
+    conn_grp = _SA2D_TS_BASE.format(connection=connection)
+    with h5py.File(hdf_path, "r") as hdf:
+        node_ptr = int(hdf[conn_grp].attrs["Node Pointer"])
+        attrs    = hdf["Geometry/Structures/Attributes"][()]
+    matches = [r for r in attrs if int(r["SNN ID"]) == node_ptr]
+    if not matches:
+        raise ValueError(
+            f"No structure found with SNN ID={node_ptr} "
+            f"for connection '{connection}' in {hdf_path}"
+        )
+    row = matches[0]
+    return _decode(row["US SA/2D"]), _decode(row["DS SA/2D"])
+
+
+def read_simulation_start_time(hdf_path: str) -> datetime:
+    """
+    Read simulation start time from Plan Data/Plan Information.
+
+    Returns
+    -------
+    datetime
+        Parsed from the 'Simulation Start Time' attribute, e.g. '01Jan2025 00:00:00'.
+
+    Raises
+    ------
+    KeyError
+        If Plan Data/Plan Information is absent.
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        raw = hdf["Plan Data/Plan Information"].attrs["Simulation Start Time"]
+    return datetime.strptime(_decode(raw), "%d%b%Y %H:%M:%S")
+
+
+def read_summary_max(
+    hdf_path: str,
+    area: str,
+    cell_indices,
+) -> dict[int, tuple[float, float]]:
+    """
+    Read max WSE and time of max from Summary Output for specific cells.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    area : str
+        Name of the 2D flow area.
+    cell_indices : iterable of int
+        Local cell indices (0-based within the area) to retrieve.
+
+    Returns
+    -------
+    dict[int, tuple[float, float]]
+        {cell_idx: (max_wse, time_days)} where time_days is decimal days
+        from midnight of the simulation start date (sub-step resolution).
+
+    Raises
+    ------
+    KeyError
+        If the Summary Output group for the area is absent.
+    """
+    SUM = _SUM_BASE.format(area=area)
+    with h5py.File(hdf_path, "r") as hdf:
+        data = hdf[f"{SUM}/Maximum Water Surface"][()]   # shape (2, N_cells)
+    return {idx: (float(data[0, idx]), float(data[1, idx])) for idx in cell_indices}
 
 
 # ---------------------------
