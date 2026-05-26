@@ -172,15 +172,16 @@ class Sa2dConnection:
     """
     HW and TW cell time series for one SA 2D Area Conn (levee / lateral structure).
 
-    SA 2D Area Conn features have no Summary Output in the HDF; time of maximum
-    WSE must be derived from the time series via nanargmax.
+    SA 2D Area Conn features have no Summary Output in the HDF.  Use
+    read_sa2d_areas() + read_summary_max() to look up time-of-max at sub-step
+    accuracy from the connected 2D flow area's Summary Output.
 
     Attributes
     ----------
     name : str
         Connection name (HDF group key).
     timestamps : np.ndarray, shape (T,), dtype str
-        HEC-RAS time-date stamp strings, e.g. '01Jan2025 00:30:00'.
+        HEC-RAS time-date stamp strings, e.g. '01JAN2025 00:30:00'.
     hw_cells : list[Sa2dCell]
         Cells on the headwater/upstream side, sorted by station ascending.
     tw_cells : list[Sa2dCell]

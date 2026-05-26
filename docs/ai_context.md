@@ -152,19 +152,64 @@ interpolated = np.interp(wse, elev, vol)
 - `cell_plan_area` comes from `AreaGeometry.polygons[cell_idx].area` (shapely Polygon area
   in the model's projected coordinate units).
 
+### Output Blocks
+The `Results/Unsteady/Output/Output Blocks/` group contains three named output blocks:
+
+| Block | Contents |
+|-------|----------|
+| `Base Output` | Summary Output + Unsteady Time Series — the primary block to read from |
+| `DSS Hydrograph Output` | Unsteady Time Series only (no Summary Output) |
+| `DSS Profile Output` | Unsteady Time Series only (no Summary Output) |
+
+All reader code should target `Base Output`. The other two blocks duplicate the time-series
+data for DSS export purposes and can be ignored.
+
+Base path used throughout: `Results/Unsteady/Output/Output Blocks/Base Output/`
+
 ### Water Surface Elevation Results
-Base path: `Results/Unsteady/Output/Output Blocks/Base Output/`
 
 | Path (relative to base) | Shape | Notes |
 |--------------------------|-------|-------|
 | `Summary Output/2D Flow Areas/{area}/Maximum Water Surface` | (2, N) | Row 0 = max WSE (sub-step accuracy, may exceed any time-series value); row 1 = time of maximum as **decimal days from midnight** of the simulation start date |
 | `Unsteady Time Series/2D Flow Areas/{area}/Water Surface` | (T, N) | WSE at every output time step |
-| `Unsteady Time Series/Time Date Stamp` | (T,) | Timestamp strings: `'01Jan2025 00:30:00'` |
+| `Unsteady Time Series/SA 2D Area Conn/Time Date Stamp` | (T,) | Timestamp strings: `b'01JAN2025 00:30:00'` (upper-case, bytes) |
 
 WSE type options (used throughout `results.reader`):
 - `"Maximum"` — reads Summary Output row 0 (sub-step accuracy, may exceed any single time step)
 - `"Maximum from Time Series"` — `nanmax` across the full time series
 - `"<timestamp>"` — match against Time Date Stamp array (case-insensitive)
+
+### Summary Output — 2D Flow Areas (per area)
+Path: `Summary Output/2D Flow Areas/{area}/`
+
+| Dataset | Shape | Notes |
+|---------|-------|-------|
+| `Maximum Water Surface` | (2, N_cells) | Row 0 = max WSE; row 1 = time of max in decimal days (sub-step accuracy) |
+| `Minimum Water Surface` | (2, N_cells) | Row 0 = min WSE; row 1 = time |
+| `Maximum Face Velocity` | (2, N_faces) | Row 0 = max velocity; row 1 = time in decimal days |
+| `Minimum Face Velocity` | (2, N_faces) | Row 0 = min (most-negative) velocity; row 1 = time |
+| `Cell Maximum Water Surface Error` | (2, N_cells) | Row 0 = max solver error (ft); row 1 = time in decimal days |
+| `Cell Cumulative Iteration` | (N_cells,) float32 | Total times each cell hit max iterations |
+| `Cell Last Iteration` | (N_cells,) int32 | Times each cell was last to converge |
+| `Starting Differences WSE` | (3, N_cells) | Rows: prior profile WSE, first time step WSE, difference |
+| `Starting Differences Velocity` | (3, N_faces) | Same but for velocity |
+
+Group-level **attributes** (not datasets) hold per-area volume accounting summary:
+`Vol Accounting Ending Volume`, `Vol Accounting Error`, `Vol Accounting Error Percentage`,
+`Vol Accounting External Inflow/Outflow`, `Vol Accounting Internal Inflow/Outflow` (all float32, acre-ft).
+
+### Summary Output — Pipe Networks
+Path: `Summary Output/Pipe Networks/{network}/` (only in Base Output)
+
+| Dataset | Shape | Notes |
+|---------|-------|-------|
+| `Maximum Water Surface` | (2, N_nodes) | Max node water surface; row 1 = time in decimal days |
+| `Maximum Face Flow` | (2, N_faces) | Max face flow; row 1 = time |
+| `Maximum Face Velocity` | (2, N_faces) | Max face velocity; row 1 = time |
+| `Maximum Link US/DS Flow` | (2, N_pipes) | Max pipe flow (US or DS end); row 1 = time |
+| `Maximum Link US/DS Velocity` | (2, N_pipes) | Max velocity; row 1 = time |
+| `Maximum Link US/DS Water Surface` | (2, N_pipes) | Max WSE at pipe end; row 1 = time |
+| `Minimum Face Flow / Velocity / Water Surface` | (2, …) | Same pattern as Maximum equivalents |
 
 ### Structures (Connection Geometry)
 Path: `Geometry/Structures/Attributes` — structured array, one row per connection/structure.
@@ -203,6 +248,59 @@ Path: `Plan Data/Plan Information` — HDF5 group with scalar **attributes** (no
 Use `read_simulation_start_time(hdf_path)` from `hack_ras.results.reader` to get a
 `datetime` object parsed from `Simulation Start Time`.
 
+### Unsteady Time Series — 2D Flow Areas
+Base path: `Results/.../Unsteady Time Series/2D Flow Areas/{area}/`
+
+Each 2D area group contains:
+
+| Path | Shape | Notes |
+|------|-------|-------|
+| `Water Surface` | (T, N_cells) | WSE at every output time step |
+| `Face Velocity` | (T, N_faces) | Face-normal velocity at every output time step |
+| `Boundary Conditions/Cell Cumulative Excess Depth` | (T, N_cells) | Cumulative excess precipitation (in) |
+| `Boundary Conditions/Cell Cumulative Infiltration Depth` | (T, N_cells) | Cumulative infiltration (in) |
+| `Boundary Conditions/Cell Cumulative Precipitation Depth` | (T, N_cells) | Cumulative gross precipitation (in) |
+| `Computations/Inner Iteration Number` | (T, 1) | Sum of inner-loop iterations per time step |
+| `Computations/Outer Iteration Number` | (T, 1) | Number of outer-loop iterations |
+| `Computations/Outer Status` | (T, 1) | Convergence code: 1=ConvMax, 2=ConvRMS, 3=Stall, 4=Iter, 5=Small, −1=Max, −2=Div |
+| `Computations/Max Water Surface Cell` | (T, 1) | Cell index of highest WSE at each time step |
+| `Computations/Volume` | (T, 1) | Total wet volume (acre-ft) |
+
+### Unsteady Time Series — 2D Hyd Conn (culverts and inline structures)
+Base path: `Results/.../Unsteady Time Series/2D Flow Areas/{area}/2D Hyd Conn/{connection}/`
+
+2D Hyd Conn features are culverts and inline road structures **within** a 2D flow area (not levees
+between areas). Each has a `Node Pointer` attribute linking to `Geometry/Structures/Attributes`.
+
+| Dataset | Shape | Notes |
+|---------|-------|-------|
+| `Headwater Cells` | (N_hw,) int32 | HW cells — local to the area |
+| `Tailwater Cells` | (N_tw,) int32 | TW cells — local to the area |
+| `Culvert Groups/{Culvert #N}` | (T, 3) | Culvert Flow (cfs), Stage HW (ft), Stage TW (ft) |
+| `Structure Variables` | (T, 5) | Total Flow, Weir Flow, Stage HW, Stage TW, Total Culvert Flow |
+| `Weir Variables` | (T, 9) | Weir Flow, Sta US, Sta DS, Top Width, Max Depth, Avg Depth, Flow Area, Coef |
+| `HW TW Cells/Water Surface HW Cells` | (T, N_hw) | WSE time series per unique HW cell |
+| `HW TW Cells/Water Surface TW Cells` | (T, N_tw) | WSE time series per unique TW cell |
+| `HW TW Segments/HW TW Station` | (N_segs+1,) float32 | Face-point stations |
+| `HW TW Segments/Headwater Cells` | (N_segs,) \|S10 | Cell index string per segment |
+| `HW TW Segments/Tailwater Cells` | (N_segs,) \|S10 | Same, TW side |
+| `Geometric Info/Gates and Culverts/{Culvert #N}/Culvert CL Cell HW` | (N,) int32 | Cells at culvert centerline — HW side |
+| `Geometric Info/Gates and Culverts/{Culvert #N}/Culvert CL Cell TW` | (N,) int32 | Cells at culvert centerline — TW side |
+
+### Unsteady Time Series — 2D Bridges
+Base path: `Results/.../Unsteady Time Series/2D Bridges/{bridge_name}/`
+
+2D Bridges are road bridges modelled inside a 2D flow area.
+
+| Dataset | Shape | Notes |
+|---------|-------|-------|
+| `Headwater Cells` | (N_hw,) int32 | Upstream face cells |
+| `Tailwater Cells` | (N_tw,) int32 | Downstream face cells |
+| `Cell WS US` | (T, N_hw) | WSE on the upstream side of each bridge cell |
+| `Cell WS DS` | (T, N_tw) | WSE on the downstream side |
+| `Face Flow` | (T, N_faces) | Flow through each bridge face |
+| `Structure Variables` | (T, 6) | Flow (cfs), Stage HW, Stage TW, Head loss, Drag Factor, Error HW |
+
 ### SA 2D Area Conn Results
 Base path: `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/SA 2D Area Conn/{connection}/`
 
@@ -221,6 +319,21 @@ in `Geometry/Structures/Attributes` via `SNN ID`.
 | `HW TW Segments/HW TW Station` | (N_segs+1,) float32 | Face-point stations along the structure |
 | `HW TW Segments/Headwater Cells` | (N_segs,) \|S10 | Cell index string per segment, e.g. `b'1008'` |
 | `HW TW Segments/Tailwater Cells` | (N_segs,) \|S10 | Same, TW side |
+| `Structure Variables` | (T, 4) | Total Flow, Weir Flow, Stage HW, Stage TW |
+| `Weir Variables` | (T, 9) | Weir Flow, Sta US, Sta DS, Top Width, Max Depth, Avg Depth, Flow Area, Coef |
+| `Geometric Info/Headwater Face Points` | (N,) int32 | Face-point indices along the HW side of the levee |
+| `Geometric Info/Headwater Face Points Stations` | (N,) float32 | Stations for HW face points (ft from start) |
+| `Geometric Info/Tailwater Face Points` | (N,) int32 | Face-point indices along the TW side |
+| `Geometric Info/Tailwater Face Points Stations` | (N,) float32 | Stations for TW face points |
+
+**Time arrays** — at the `SA 2D Area Conn/` level (parent of individual connection groups):
+
+| Dataset | Shape | Notes |
+|---------|-------|-------|
+| `Time` | (T,) float64 | Decimal days from simulation start (same reference as Summary Output) |
+| `Time Date Stamp` | (T,) \|S19 | `b'01JAN2025 00:30:00'` — upper-case, no milliseconds |
+| `Time Date Stamp (ms)` | (T,) \|S22 | `b'01JAN2025 00:30:00:000'` — with milliseconds |
+| `Time Step` | (T,) float32 | Actual adaptive time step used, in seconds |
 
 **Time of max — correct approach:** Do NOT use `nanargmax` on the time series (output-interval
 resolution only, e.g. 30 min). Instead, look up the HW/TW cell indices in the Summary Output
@@ -245,13 +358,104 @@ Geometry/Pipe Networks/{network}/Conduit Indices
 Geometry/Pipe Nodes/Attributes                     # structured array: Name, System Name
 Geometry/Pipe Conduits/Attributes                  # structured array: Name, US Node, DS Node
 
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Cell Water Surface   (T, N_cells)
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Cell Courant         (T, N_cells)
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Face Flow            (T, N_faces)
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Face Velocity        (T, N_faces)
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Face Water Surface   (T, N_faces)
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Nodes/Depth         (T, N_nodes)
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Nodes/Water Surface  (T, N_nodes)
-Results/…/Unsteady Time Series/Pipe Networks/{network}/Nodes/Top + Side Inlet Flow
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Nodes/Top + Side Inlet Flow  (T, N_nodes)
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Pipes/Pipe Flow DS   (T, N_pipes)
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Pipes/Pipe Flow US   (T, N_pipes)
-Results/…/Unsteady Time Series/Pipe Networks/{network}/Pipes/Vel US / Vel DS
+Results/…/Unsteady Time Series/Pipe Networks/{network}/Pipes/Vel DS / Vel US  (T, N_pipes)
 ```
+
+### Computation Block (high-frequency solver diagnostics)
+Path: `Results/Computation Block/`
+
+Stores per-computational-time-step solver diagnostics (86 401 rows for a 1-second
+time-step, 24-hour simulation). These are for debugging convergence, not for results output.
+
+```
+Results/Computation Block/2D Flow Areas/{area}/Inner Iteration Number   (86401, 1)
+Results/Computation Block/2D Flow Areas/{area}/Outer Iteration Number   (86401, 1)
+Results/Computation Block/2D Flow Areas/{area}/Outer Max Water Surface Correction  (86401, 1)
+Results/Computation Block/2D Global/2D Iteration Error   (86401,)
+Results/Computation Block/2D Global/2D Iterations        (86401, 3)  # [N_iter, area_ptr, cell_idx]
+Results/Computation Block/Global/Time                    (86401,)    # decimal days
+Results/Computation Block/Global/Time Date Stamp (ms)    (86401,)    # b'01JAN2025 00:00:01:000'
+```
+
+### Results/Summary (run-level metadata)
+Path: `Results/Summary/` — **attributes** on this group (not datasets):
+
+| Attribute | Example | Notes |
+|-----------|---------|-------|
+| `Solution` | `'Unsteady Finished Successfully'` | Check first to confirm a run completed |
+| `Computation Time Total` | `'00:05:45'` | Wall-clock runtime (HH:MM:SS) |
+| `Maximum WSEL Error` | `0.0` | Max residual at end of run |
+| `Run Time Window` | `'20MAY2026 14:52:34 to …'` | When RAS executed the plan |
+| `Time Solution Went Unstable` | `nan` | NaN if stable throughout |
+
+Volume accounting totals are nested in `Results/Summary/Volume Accounting/` and its
+sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{network}/`):
+`Cum Inflow`, `Cum Outflow`, `Error`, `Error Percent`, `Vol Ending` — all float32, acre-ft.
+
+## Results Package API (`hack_ras/results/`)
+
+### `model.py` — dataclasses
+
+| Class | Fields | Notes |
+|-------|--------|-------|
+| `PlanMetadata` | `geom_id: str`, `plan_title: str` | Parsed from `.p##` text sidecar |
+| `AreaGeometry` | `cell_centers (N,2)`, `min_elevations (N,)`, `polygons list`, `boundary Polygon`, `cell_gdf GeoDataFrame` | Non-dummy cells only in `cell_gdf`; `polygons[i]` is `None` if fewer than 3 face points |
+| `CellVolumeTable` | `info (N_cells,2) int32`, `values (total_pairs,2) float32` | `info[i] = [start, count]`; `values[:,0]` = elevation, `values[:,1]` = volume |
+| `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64` | Station = mean of segment midpoint stations where cell appears |
+| `Sa2dConnection` | `name: str`, `timestamps (T,) str`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
+| `PipeNode` | `name: str`, `system_name: str` | From `Geometry/Pipe Nodes/Attributes` |
+| `PipeConduit` | `name: str`, `us_node: str`, `ds_node: str` | From `Geometry/Pipe Conduits/Attributes` |
+| `PipeNetwork` | `name`, `nodes dict[str,int]`, `conduits dict[str,PipeConduit]`, `conduit_index dict[str,int]`, `upstream_of dict`, `downstream_of dict` | `nodes[name]` → results column index |
+| `NodeTimeSeries` | `timestamps`, `depth`, `wse`, `inlet_flow`, `flow_in`, `flow_out` — all `(T,) float64` | `flow_in` = sum of `Pipe Flow DS` for conduits draining into node |
+| `ConduitTimeSeries` | `timestamps`, `flow_us`, `flow_ds`, `vel_us`, `vel_ds` — all `(T,) float64` | US/DS ends of the conduit |
+
+### `reader.py` — public functions
+
+#### Discovery
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `list_areas(hdf_path)` | `list[str]` | Names of 2D flow areas; empty list if none |
+| `list_sa2d_connections(hdf_path)` | `list[str]` | Names of SA 2D Area Conn groups; empty if none |
+| `list_pipe_networks(hdf_path)` | `list[str]` | Names of pipe networks; empty if none |
+
+#### Plan / geometry
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `read_plan_metadata(hdf_path)` | `PlanMetadata` | Parses `.p##` text sidecar; raises `FileNotFoundError` if missing |
+| `read_area_geometry(hdf_path, area)` | `AreaGeometry` | Reads cell centres, face-point polygons, perimeter, min elevation; excludes perimeter dummy cells from `cell_gdf` |
+| `read_cell_volume_table(hdf_path, area)` | `CellVolumeTable` | Raw info + values arrays; use `interpolate_cell_volume` to query |
+| `interpolate_cell_volume(table, cell_idx, wse, cell_plan_area)` | `float` | Returns 0.0 if dry; linearly extrapolates above table max using `cell_plan_area` |
+
+#### WSE results
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `read_wse(hdf_path, area, wse_type)` | `np.ndarray (N,) float64` | `wse_type` = `"Maximum"`, `"Maximum from Time Series"`, or a timestamp string |
+| `read_timestamps(hdf_path)` | `np.ndarray (T,) str` | All output-interval time stamps from the HDF |
+| `read_simulation_start_time(hdf_path)` | `datetime` | Parses `Plan Data/Plan Information` attr `Simulation Start Time`; format `%d%b%Y %H:%M:%S` |
+| `read_summary_max(hdf_path, area, cell_indices)` | `dict[int, tuple[float, float]]` | Returns `{cell_idx: (max_wse, time_days)}` where `time_days` is decimal days at sub-step accuracy |
+
+#### SA 2D Area Conn
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `read_sa2d_connection(hdf_path, connection)` | `Sa2dConnection` | HW and TW cell WSE time series + stations; cells sorted by station |
+| `read_sa2d_areas(hdf_path, connection)` | `tuple[str, str]` | `(hw_area, tw_area)` — looks up `US SA/2D` / `DS SA/2D` via `SNN ID == Node Pointer` |
+
+#### Pipe networks
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `read_pipe_network(hdf_path, network)` | `PipeNetwork` | Geometry, index maps, adjacency dicts for one network |
+| `read_node_timeseries(hdf_path, network, node_name)` | `NodeTimeSeries` | Depth, WSE, inlet flow, computed flow_in / flow_out |
+| `read_conduit_timeseries(hdf_path, network, conduit_name)` | `ConduitTimeSeries` | Flow and velocity at US and DS ends |
 
 ## GIS Profile Line Workflow (`hack_ras/gis/`)
 `compute_profile_stations(line, area_data)` takes a shapely `LineString` and a dict of
