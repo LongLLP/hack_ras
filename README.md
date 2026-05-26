@@ -13,7 +13,7 @@ Current Capabilities:
 Implemented so far:
 1. Project file (.prj) parsing — key/value extraction, file ID resolution.
 2. Geometry file (.g##) parsing — river/reach/cross-section structure, GIS cut lines; lossless roundtrip write-back.
-3. Plan results (.p##.hdf) reading — 2D flow area cell geometry, water surface elevations, cell volume-elevation tables, pipe network geometry and time series.
+3. Plan results (.p##.hdf) reading — 2D flow area cell geometry, water surface elevations, cell volume-elevation tables, SA 2D Area Conn (levee/lateral structure) HW/TW cell time series with sub-step accurate time-of-maximum, and pipe network geometry and time series.
 4. GIS profile computation — ordered profile stations along a line with WSE assignment and cell volume interpolation.
 
 Overview of HEC-RAS File Types:
