@@ -487,6 +487,92 @@ def read_sa2d_areas(hdf_path: str, connection: str) -> tuple[str, str]:
     return _decode(row["US SA/2D"]), _decode(row["DS SA/2D"])
 
 
+# Hardcoded column names for SA 2D Area Conn variable datasets.
+# Column order matches HEC-RAS HDF output (verified against plans with breach).
+_SA2D_STRUCTURE_COLS = ("Total Flow", "Weir Flow", "Stage HW", "Stage TW")
+_SA2D_WEIR_COLS = (
+    "Weir Flow", "Sta US", "Sta DS", "Top Width",
+    "Max Depth", "Avg Depth", "Flow Area", "Coef", "Submergence",
+)
+_SA2D_BREACHING_COLS = (
+    "Stage HW", "Stage TW", "Bottom-Width", "Bottom-Elevation",
+    "Left Side Slope", "Right Side Slope",
+    "Breach Flow", "Breach Velocity", "Breach Flow Area",
+)
+
+
+def read_breach_timeseries(hdf_path: str, connection: str) -> dict:
+    """
+    Read Structure Variables, Breaching Variables, and Weir Variables time
+    series for one SA 2D Area Conn feature.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    connection : str
+        Connection name, as returned by list_sa2d_connections().
+
+    Returns
+    -------
+    dict with keys:
+
+    ``'timestamps'``
+        np.ndarray, shape (T,), str — HEC-RAS time-date stamp strings,
+        e.g. ``'01JAN2025 00:30:00'``.
+
+    ``'structure'``
+        dict[str, np.ndarray] — always present.
+        Keys: ``'Total Flow'``, ``'Weir Flow'``, ``'Stage HW'``, ``'Stage TW'``.
+
+    ``'breaching'``
+        dict[str, np.ndarray] or None — present only when a breach has occurred.
+        Keys: ``'Stage HW'``, ``'Stage TW'``, ``'Bottom-Width'``,
+        ``'Bottom-Elevation'``, ``'Left Side Slope'``, ``'Right Side Slope'``,
+        ``'Breach Flow'``, ``'Breach Velocity'``, ``'Breach Flow Area'``.
+
+    ``'weir'``
+        dict[str, np.ndarray] or None — present when weir overflow occurs.
+        Keys: ``'Weir Flow'``, ``'Sta US'``, ``'Sta DS'``, ``'Top Width'``,
+        ``'Max Depth'``, ``'Avg Depth'``, ``'Flow Area'``, ``'Coef'``,
+        ``'Submergence'``.
+
+    Raises
+    ------
+    KeyError
+        If the connection group or the Structure Variables dataset are absent.
+    """
+    base = _SA2D_TS_BASE.format(connection=connection)
+
+    with h5py.File(hdf_path, "r") as hdf:
+        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+
+        # Structure Variables — always present for any SA 2D Area Conn
+        sv = hdf[f"{base}/Structure Variables"][()].astype(np.float64)
+        structure = {name: sv[:, i] for i, name in enumerate(_SA2D_STRUCTURE_COLS)}
+
+        # Breaching Variables — only exists when a breach has occurred in this plan
+        breaching = None
+        bv_path = f"{base}/Breaching Variables"
+        if bv_path in hdf:
+            bv = hdf[bv_path][()].astype(np.float64)
+            breaching = {name: bv[:, i] for i, name in enumerate(_SA2D_BREACHING_COLS)}
+
+        # Weir Variables — present when there is weir overflow
+        weir = None
+        wv_path = f"{base}/Weir Variables"
+        if wv_path in hdf:
+            wv = hdf[wv_path][()].astype(np.float64)
+            weir = {name: wv[:, i] for i, name in enumerate(_SA2D_WEIR_COLS)}
+
+    return {
+        "timestamps": timestamps,
+        "structure":  structure,
+        "breaching":  breaching,
+        "weir":       weir,
+    }
+
+
 def read_simulation_start_time(hdf_path: str) -> datetime:
     """
     Read simulation start time from Plan Data/Plan Information.
