@@ -156,15 +156,21 @@ class Sa2dCell:
     cell_idx : int
         Index of the cell in the 2D flow area mesh.
     station : float
-        Representative station along the structure (model coordinate units).
+        Representative center station along the structure (model coordinate units).
         Computed as the mean of segment midpoint stations for all segments
         where this cell appears in HW TW Segments.
+    station_start : float
+        Minimum face-point station bounding the segments this cell occupies.
+    station_end : float
+        Maximum face-point station bounding the segments this cell occupies.
     wse : np.ndarray, shape (T,), dtype float64
         WSE time series for this cell.
     """
     cell_idx: int
     station: float
     wse: np.ndarray
+    station_start: float = float("nan")
+    station_end: float = float("nan")
 
 
 @dataclass

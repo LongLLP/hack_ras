@@ -368,14 +368,16 @@ def _seg_station_map(
     seg_stations: np.ndarray,
 ) -> dict:
     """
-    Map each unique cell index to its representative station along a structure.
+    Map each unique cell index to (station_start, station_center, station_end).
 
     For each segment j (0 … N_segs-1):
       midpoint_j = (seg_stations[j] + seg_stations[j+1]) / 2
 
-    The station for a cell = mean of midpoint_j across all segments where
-    the cell's index appears in seg_labels.  Returns nan for cells whose
-    index does not appear in any segment label.
+    station_center = mean of midpoint_j across all segments where the cell appears.
+    station_start  = minimum face-point station bounding those segments.
+    station_end    = maximum face-point station bounding those segments.
+
+    Returns (nan, nan, nan) for cells whose index does not appear in any segment.
     """
     n_segs = len(seg_labels)
     midpoints = [
@@ -384,6 +386,7 @@ def _seg_station_map(
     ]
 
     cell_to_mids: dict = {}
+    cell_to_bounds: dict = {}
     for j, raw in enumerate(seg_labels):
         label = _decode(raw)
         try:
@@ -391,11 +394,21 @@ def _seg_station_map(
         except ValueError:
             continue
         cell_to_mids.setdefault(cell_id, []).append(midpoints[j])
+        sta_j  = float(seg_stations[j])
+        sta_j1 = float(seg_stations[j + 1])
+        if cell_id not in cell_to_bounds:
+            cell_to_bounds[cell_id] = [min(sta_j, sta_j1), max(sta_j, sta_j1)]
+        else:
+            cell_to_bounds[cell_id][0] = min(cell_to_bounds[cell_id][0], sta_j, sta_j1)
+            cell_to_bounds[cell_id][1] = max(cell_to_bounds[cell_id][1], sta_j, sta_j1)
 
+    _nan = float("nan")
     return {
-        int(idx): float(np.mean(cell_to_mids[int(idx)]))
-        if int(idx) in cell_to_mids
-        else float("nan")
+        int(idx): (
+            cell_to_bounds[int(idx)][0] if int(idx) in cell_to_bounds else _nan,
+            float(np.mean(cell_to_mids[int(idx)])) if int(idx) in cell_to_mids else _nan,
+            cell_to_bounds[int(idx)][1] if int(idx) in cell_to_bounds else _nan,
+        )
         for idx in unique_indices
     }
 
@@ -440,13 +453,23 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
     tw_map = _seg_station_map(tw_indices, seg_tw, seg_stations)
 
     hw_cells = sorted(
-        [Sa2dCell(cell_idx=int(hw_indices[i]), station=hw_map[int(hw_indices[i])], wse=hw_wse[:, i])
-         for i in range(len(hw_indices))],
+        [Sa2dCell(
+            cell_idx=int(hw_indices[i]),
+            station=hw_map[int(hw_indices[i])][1],
+            wse=hw_wse[:, i],
+            station_start=hw_map[int(hw_indices[i])][0],
+            station_end=hw_map[int(hw_indices[i])][2],
+         ) for i in range(len(hw_indices))],
         key=lambda c: c.station,
     )
     tw_cells = sorted(
-        [Sa2dCell(cell_idx=int(tw_indices[i]), station=tw_map[int(tw_indices[i])], wse=tw_wse[:, i])
-         for i in range(len(tw_indices))],
+        [Sa2dCell(
+            cell_idx=int(tw_indices[i]),
+            station=tw_map[int(tw_indices[i])][1],
+            wse=tw_wse[:, i],
+            station_start=tw_map[int(tw_indices[i])][0],
+            station_end=tw_map[int(tw_indices[i])][2],
+         ) for i in range(len(tw_indices))],
         key=lambda c: c.station,
     )
 
