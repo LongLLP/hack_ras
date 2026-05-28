@@ -58,6 +58,10 @@ Real sample files live in `tests/data/`, organised into subfolders by model:
 tests/data/
   Beaver/
     beaver.g01                          ← geometry parse / roundtrip tests
+  Baxter/
+    Baxter.g02                          ← XS GIS cut line shifting tests (georeferenced 1D model,
+                                           Baxter River / Upper Reach / Tule Creek / Lower Reach,
+                                           167 cut lines with projected coordinates)
   2D culvert bridge levee precip pipes/
     Model.p02.hdf                       ← results reader / pipe network tests
     Model.p02                           ← plan sidecar (used by read_plan_metadata)

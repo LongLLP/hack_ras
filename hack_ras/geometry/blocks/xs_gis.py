@@ -23,6 +23,7 @@ def parse_cutline(lines, index):
         line = lines[i].rstrip("\n")
         fields = read_fixed_fields(line, 16)
         fields = fields[: (n_vals - gathered)]  # don't over-read
+        fields = [f for f in fields if f]  # skip empty partial fields at line breaks
 
         floats = list(map(float, fields))
         for j in range(0, len(floats), 2):

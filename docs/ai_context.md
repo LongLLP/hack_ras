@@ -11,11 +11,29 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
 | `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass |
-| `hack_ras/geometry/` | Parse `.g##` geometry files (rivers, reaches, cross-sections, GIS cut lines) |
+| `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
 | `hack_ras/utils/` | Shared utilities (logging, line helpers) |
 | `hack_ras/resolve.py` | File discovery and ID resolution (lower-level module) |
+
+## HEC-RAS File Title Uniqueness
+
+HEC-RAS requires every file within a project to have a unique human-readable
+title.  Duplicate titles cause the project to malfunction — HEC-RAS cannot
+reliably distinguish between files that share the same name.  This applies to:
+
+| File type | Title field |
+|-----------|-------------|
+| Geometry (`.g##`) | `Geom Title=` |
+| Plan (`.p##`) | `Plan Title=` |
+| Unsteady flow (`.u##`) | `Flow Title=` |
+| Steady flow (`.f##`) | `Flow Title=` |
+
+When creating a new file derived from an existing one (e.g. a shifted geometry
+`g17` copied from `g16`), **always supply a new title**.  Scripts that write
+new files must enforce this — `shift_xs_gis.py` treats `geom_name_out` as a
+required config key and exits with an error if it is missing.
 
 ## Key Design Principles
 - One package per HEC-RAS file type
@@ -346,10 +364,11 @@ Convert to datetime: `simulation_start + timedelta(days=decimal_days)`. Use
 `read_simulation_start_time()` for the reference datetime — all in `hack_ras.results.reader`.
 
 Station assignment: segment j spans `station[j]` to `station[j+1]`; its midpoint =
-`(station[j] + station[j+1]) / 2`. Each unique cell's representative station = mean of
-midpoints across all segments where that cell appears. Use `list_sa2d_connections()` and
-`read_sa2d_connection()` from `hack_ras.results.reader` to get a typed `Sa2dConnection`
-object with `hw_cells` / `tw_cells` lists sorted by station.
+`(station[j] + station[j+1]) / 2`. Each unique cell's representative station (`Sa2dCell.station`) =
+mean of midpoints across all segments where that cell appears. `Sa2dCell.station_start` =
+minimum face-point station bounding those segments; `Sa2dCell.station_end` = maximum.
+Use `list_sa2d_connections()` and `read_sa2d_connection()` from `hack_ras.results.reader`
+to get a typed `Sa2dConnection` object with `hw_cells` / `tw_cells` lists sorted by station.
 
 ### Pipe Network Geometry & Results
 ```
@@ -411,7 +430,7 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `PlanMetadata` | `geom_id: str`, `plan_title: str` | Parsed from `.p##` text sidecar |
 | `AreaGeometry` | `cell_centers (N,2)`, `min_elevations (N,)`, `polygons list`, `boundary Polygon`, `cell_gdf GeoDataFrame` | Non-dummy cells only in `cell_gdf`; `polygons[i]` is `None` if fewer than 3 face points |
 | `CellVolumeTable` | `info (N_cells,2) int32`, `values (total_pairs,2) float32` | `info[i] = [start, count]`; `values[:,0]` = elevation, `values[:,1]` = volume |
-| `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64` | Station = mean of segment midpoint stations where cell appears |
+| `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64`, `station_start: float`, `station_end: float` | `station` = mean of segment midpoint stations (center); `station_start`/`station_end` = min/max face-point stations bounding the cell's segments; default `nan` |
 | `Sa2dConnection` | `name: str`, `timestamps (T,) str`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
 | `PipeNode` | `name: str`, `system_name: str` | From `Geometry/Pipe Nodes/Attributes` |
 | `PipeConduit` | `name: str`, `us_node: str`, `ds_node: str` | From `Geometry/Pipe Conduits/Attributes` |
@@ -471,9 +490,49 @@ For **volume extraction**, only `cell` points are used (boundary/endpoint points
 cell index and therefore no volume table to query). Profile lines that extend beyond the
 mesh boundary are handled gracefully — the out-of-mesh portion is silently ignored.
 
+## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
+
+Translates cross-section GIS cut-line polylines along their own alignment while
+preserving total arc length.  Driven by a pandas DataFrame (typically loaded from
+an Excel file) with columns `River`, `Reach`, `River Station`, `Translation`.
+
+```python
+import pandas as pd
+from hack_ras.geometry.parser import GeometryParser
+from hack_ras.geometry.writer import GeometryWriter
+from hack_ras.geometry.shift import build_translation_dict, shift_xs_cutlines
+
+df    = pd.read_excel(r"path\to\XS to shift.xlsx")
+trans = build_translation_dict(df)          # {(norm_river, norm_reach, norm_rs): float}
+geom  = GeometryParser().parse_file(r"path\to\Model.g16")
+out   = shift_xs_cutlines(geom, trans, new_title="Edited in Python")
+GeometryWriter().write(out, r"path\to\Model.g17")
+```
+
+| Function | Purpose |
+|----------|---------|
+| `build_translation_dict(df)` | Validate + normalise DataFrame → lookup dict; warns on duplicates |
+| `shift_xs_cutlines(geom, translations, new_title)` | Return new `GeometryFile` with shifted raw lines and updated in-memory cutlines |
+| `shift_polyline(points, dist, tol)` | Core algorithm — slide a polyline by `dist` along itself |
+
+`shift_xs_cutlines` streams through `raw_lines`, matches on normalised
+`(river, reach, rs)` keys, and is non-destructive (the original `GeometryFile`
+is not modified).  River/reach/RS matching is case- and whitespace-insensitive.
+All other geometry content is passed through byte-for-byte.
+
+The companion CLI script is at
+`Hillside_Levee_Scripts/XS GIS Shifter/shift_xs_gis.py` (YAML-configured,
+`python shift_xs_gis.py config.yaml`).
+
+Config keys: `prj_path`, `geom_in` (e.g. `g16`), `geom_out` (e.g. `g17`),
+`excel_path`, `geom_name_out` (required — see HEC-RAS title uniqueness note
+below).  The script resolves full geometry paths from the project file via
+`resolve_id`, writes the new geometry, and appends `Geom File=<geom_out>` to
+the `.prj` so HEC-RAS recognises the new file without a manual edit.
+
 ## Current Work
-*(Last updated: 2026-05-26)*
-- `results/`, `gis/`, and `project/` packages are complete and in production use
+*(Last updated: 2026-05-28)*
+- `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - Completing cross-section data parsing: Sta/Elev, Manning, bank stations, and
   inefficiency blocks are recognised as "to do" in `geometry/parser.py` but currently skipped
