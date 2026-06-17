@@ -1,0 +1,36 @@
+# hack_ras/geometry/blocks/xs_sta_elev.py
+
+from __future__ import annotations
+from typing import List, Tuple
+from .base import read_fixed_fields
+
+
+def parse_sta_elev(lines, index):
+    """
+    Parse #Sta/Elev= block starting at index.
+    Returns (List[Tuple[float, float]], lines_consumed) where each tuple is (station, elevation).
+    """
+    header = lines[index].strip()           # "#Sta/Elev= 43"
+    n_pairs = int(header.split("=")[1])
+    n_vals = n_pairs * 2
+
+    pairs: List[Tuple[float, float]] = []
+    consumed = 1
+    gathered = 0
+    i = index + 1
+
+    while gathered < n_vals:
+        line = lines[i].rstrip("\n")
+        fields = read_fixed_fields(line, 8)
+        fields = fields[: (n_vals - gathered)]
+        fields = [f for f in fields if f]
+
+        floats = list(map(float, fields))
+        for j in range(0, len(floats), 2):
+            pairs.append((floats[j], floats[j + 1]))
+
+        gathered += len(floats)
+        consumed += 1
+        i += 1
+
+    return pairs, consumed

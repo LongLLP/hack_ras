@@ -11,7 +11,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
 | `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass |
-| `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment |
+| `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
 | `hack_ras/utils/` | Shared utilities (logging, line helpers) |
@@ -106,10 +106,87 @@ Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
-  (`River Reach=`, `Type RM Length=`, `XS GIS Cut Line=`, etc.)
+  (`River Reach=`, `Type RM Length=`, `XS GIS Cut Line=`, `#Sta/Elev=`, `#XS Ineff=`, etc.)
 - **Lossless roundtrip**: `GeometryFile` stores original raw lines; `GeometryWriter`
   writes them back unchanged.
 - **Strict errors**: resolution functions raise typed exceptions rather than `None`.
+
+### Parsed cross-section blocks
+
+All block data in the geometry file uses **8-character fixed-width fields** (except
+`XS GIS Cut Line=` which uses 16-character fields).  Use `read_fixed_fields(line, 8)`
+from `hack_ras/geometry/blocks/base.py` to split data lines.
+
+| Block header | Handler | `CrossSection` field | Notes |
+|---|---|---|---|
+| `XS GIS Cut Line=` | `blocks/xs_gis.py` | `cutline: XSGISCutLine` | 16-char fields; X,Y pairs |
+| `#Sta/Elev=` | `blocks/xs_sta_elev.py` | `sta_elev: List[Tuple[float,float]]` | 8-char fields; (station, elevation) pairs |
+| `#XS Ineff=` | `blocks/xs_ineff.py` | `ineff: IneffFlowAreas` | 8-char fields; see IFA section below |
+| `#Mann=` | not yet parsed | `manning` | — |
+| `Bank Sta=` | not yet parsed | `bank_stations` | — |
+
+### Ineffective flow areas (IFAs)
+
+Parsed by `blocks/xs_ineff.py`.  The `#XS Ineff=` header gives the count and type flag;
+`Permanent Ineff=` (always the next block) provides per-area T/F flags.
+
+**Type flag:**
+- `0` → `"normal"`: always exactly 2 areas — a left-bank zone and a right-bank zone.
+- `-1` → `"multiple_block"`: 1–10 arbitrary blocked zones.
+
+**Data format** — each area occupies 3 consecutive 8-char fields: `start_sta`, `end_sta`, `elevation`.
+A blank field and an explicit `0` are equivalent (both parse to `0.0` for stations, `None` for elevation).
+
+**Sentinel values for normal type:**
+- `start_sta = 0.0` → the area begins at the leftmost XS station (`sta_elev[0][0]`).
+- `end_sta = 0.0` → the area ends at the rightmost XS station (`sta_elev[-1][0]`).
+- Both `start_sta` and `end_sta` equal `0.0` → the IFA entry is **blank** (undefined);
+  skip it entirely. Either the left or the right area can be blank independently.
+
+**Elevation** — `None` means infinite height (the ineffective zone is always active
+regardless of water surface elevation).
+
+```python
+@dataclass
+class IneffArea:
+    start_sta: float           # 0.0 = left sentinel (see above)
+    end_sta: float             # 0.0 = right sentinel (see above)
+    elevation: Optional[float] # None = infinite height
+    permanent: bool            # from Permanent Ineff= block
+
+@dataclass
+class IneffFlowAreas:
+    ifa_type: str              # "normal" or "multiple_block"
+    areas: List[IneffArea]
+```
+
+### Station-to-XY interpolation — `geometry/xs_interp.py`
+
+HEC-RAS cross-section stationing and GIS cut-line coordinates are **independent**.
+A cross-section may be stationed from 0 to 800 ft while its GIS cut line is only
+400 ft long in projected map coordinates.  The HEC-RAS GUI reconciles this by
+mapping station-based features (IFAs, blocked obstructions, Manning's n breaks)
+proportionally along the cut line:
+
+```
+fraction = (station − min_sta) / (max_sta − min_sta)
+dist_along_cutline = fraction × cutline_arc_length
+```
+
+Two public functions implement this mapping:
+
+| Function | Returns | Raises |
+|---|---|---|
+| `station_to_xy(xs, station)` | `(x, y)` at the given RAS station | `ValueError` if `xs.cutline` or `xs.sta_elev` is `None` |
+| `clip_xs_polyline(xs, sta_start, sta_end)` | `List[(x,y)]` sub-polyline from `sta_start` to `sta_end` | same |
+
+Both functions take a `CrossSection` directly.  The cut-line vertices between
+the interpolated entry and exit points are preserved, so the result correctly
+follows all bends in the GIS cut line regardless of how many station/elevation
+pairs the cross-section has.
+
+Use these functions (not ad-hoc arc-length arithmetic) whenever a script needs
+to place any station-referenced XS feature in GIS space.
 
 ## HEC-RAS HDF5 Structure (`.p##.hdf`)
 
@@ -531,11 +608,13 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-05-28)*
+*(Last updated: 2026-06-17)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
-- Completing cross-section data parsing: Sta/Elev, Manning, bank stations, and
-  inefficiency blocks are recognised as "to do" in `geometry/parser.py` but currently skipped
+- `#Sta/Elev=` and `#XS Ineff=` blocks are now parsed; `CrossSection.sta_elev` and
+  `CrossSection.ineff` are populated.  `#Mann=` and `Bank Sta=` blocks are still skipped.
+- `geometry/xs_interp.py` is the canonical tool for mapping RAS station values to GIS
+  cut-line XY coordinates; use it for any future station-referenced feature export.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
 ## Known Constraints

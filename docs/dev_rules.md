@@ -22,6 +22,34 @@ admin privileges and must handle installs themselves.
 4. Add a test using the fixture at `tests/data/Beaver/beaver.g01` or a new fixture in
    `tests/data/`.
 
+Implemented block parsers (as of 2026-06-17):
+- `blocks/xs_sta_elev.py` — `#Sta/Elev= N`: reads N station/elevation pairs from
+  8-char fixed-width fields; returns `(List[Tuple[float,float]], lines_consumed)`.
+  Populates `CrossSection.sta_elev`.
+- `blocks/xs_ineff.py` — `#XS Ineff= N , flag` plus the immediately following
+  `Permanent Ineff=` block: reads N×3 8-char fields (start_sta, end_sta, elevation),
+  then T/F permanent flags; returns `(IneffFlowAreas, lines_consumed)`.
+  Sentinel rules: blank station field → `0.0`; blank elevation field → `None`.
+  Populates `CrossSection.ineff`.
+
+## Mapping RAS Stations to GIS Coordinates
+When a script needs to place station-referenced XS features (IFAs, bank stations,
+Manning breaks, etc.) in GIS space, use the helpers in `hack_ras/geometry/xs_interp.py`:
+
+```python
+from hack_ras.geometry.xs_interp import station_to_xy, clip_xs_polyline
+
+xy = station_to_xy(xs, station)                      # -> (x, y)
+pts = clip_xs_polyline(xs, sta_start, sta_end)       # -> List[(x, y)]
+```
+
+**Why fractional mapping is required:** HEC-RAS stationing (from `#Sta/Elev=`) is
+independent of the GIS cut-line arc length (from `XS GIS Cut Line`).  A station value
+cannot be used as a direct arc-length offset.  `xs_interp.py` converts stations to a
+fraction of the full XS station range, then walks that fraction of the cut-line arc
+length.  Do NOT implement ad-hoc station-to-XY conversion in scripts — always use these
+helpers to avoid subtle geometry errors.
+
 ## Adding a New HEC-RAS File Type
 Create a new package under `hack_ras/` with:
 - `model.py` — dataclasses for the parsed structure (always required)
