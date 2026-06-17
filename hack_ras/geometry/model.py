@@ -10,17 +10,29 @@ class XSGISCutLine:
     points: List[Tuple[float, float]] = field(default_factory=list)
 
 @dataclass
+class IneffArea:
+    start_sta: float           # left station; 0.0 means XS leftmost
+    end_sta: float             # right station; 0.0 means XS rightmost
+    elevation: Optional[float] # None = infinite height (blank in file)
+    permanent: bool            # from Permanent Ineff= block
+
+@dataclass
+class IneffFlowAreas:
+    ifa_type: str              # "normal" (flag=0) or "multiple_block" (flag=-1)
+    areas: List[IneffArea] = field(default_factory=list)
+
+@dataclass
 class CrossSection:
     river: str
     reach: str
     station: str
-    
+
     rm: Optional[str] = None
     cutline: Optional[XSGISCutLine] = None
 
     sta_elev: Optional[List[Tuple[float, float]]] = None
     manning: Optional[List[Tuple[float, float]]] = None
-    ineff: Optional[List[Tuple[float, float]]] = None
+    ineff: Optional[IneffFlowAreas] = None
     bank_stations: Optional[Tuple[float, float]] = None
 
 @dataclass

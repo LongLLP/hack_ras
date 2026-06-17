@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import List, Optional
 from .model import GeometryFile, CrossSection, XSGISCutLine
-from .blocks import river_reach, xs_metadata, xs_gis
+from .blocks import river_reach, xs_metadata, xs_gis, xs_sta_elev, xs_ineff
 
 class GeometryParser:
     """
@@ -61,7 +61,24 @@ class GeometryParser:
                 i += consumed
                 continue
 
-            # TODO: Sta/Elev, Mann, Bank Sta, and Inefficiency blocks are not yet parsed.
+            # --- #Sta/Elev= ---
+            if line.startswith("#Sta/Elev="):
+                if current_xs is None:
+                    raise ValueError("Found #Sta/Elev= before an XS was created.")
+                sta_elev, consumed = xs_sta_elev.parse_sta_elev(lines, i)
+                current_xs.sta_elev = sta_elev
+                i += consumed
+                continue
+
+            # --- #XS Ineff= ---
+            if line.startswith("#XS Ineff="):
+                if current_xs is None:
+                    raise ValueError("Found #XS Ineff= before an XS was created.")
+                ineff, consumed = xs_ineff.parse_ineff(lines, i)
+                current_xs.ineff = ineff
+                i += consumed
+                continue
+
             i += 1
 
         return geom
