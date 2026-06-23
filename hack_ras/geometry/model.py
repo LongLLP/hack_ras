@@ -4,6 +4,31 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
 
+
+@dataclass
+class ManningDef:
+    """Manning's roughness definition for a cross-section.
+
+    Two mutually exclusive formats exist in HEC-RAS:
+
+    'lob_ch_rob' (Standard, method=0 in #Mann= header):
+        Three single n-values — one each for left overbank, channel, and right
+        overbank.  No station information.  n_lob, n_channel, n_rob are set.
+
+    'horizontal' (Horizontal Variation, method=1 in #Mann= header):
+        N station-keyed n-values; the value at station s applies from s to the
+        next defined station (step function).  entries is a list of
+        (station, n_value) pairs.
+    """
+    method: str  # 'lob_ch_rob' or 'horizontal'
+    # Standard LOB/Channel/ROB values (method='lob_ch_rob')
+    n_lob: float = 0.0
+    n_channel: float = 0.0
+    n_rob: float = 0.0
+    # Horizontal variation entries (method='horizontal')
+    entries: List[Tuple[float, float]] = field(default_factory=list)  # (station, n_value)
+
+
 @dataclass
 class XSGISCutLine:
     n_points: int
@@ -31,9 +56,13 @@ class CrossSection:
     cutline: Optional[XSGISCutLine] = None
 
     sta_elev: Optional[List[Tuple[float, float]]] = None
-    manning: Optional[List[Tuple[float, float]]] = None
+    manning_def: Optional[ManningDef] = None
     ineff: Optional[IneffFlowAreas] = None
     bank_stations: Optional[Tuple[float, float]] = None
+
+    # Raw line range within GeometryFile.raw_lines (set by parser; not semantic)
+    _raw_line_start: int = field(default=-1, repr=False, compare=False)
+    _raw_line_end: int = field(default=-1, repr=False, compare=False)
 
 @dataclass
 class Reach:

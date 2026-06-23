@@ -22,7 +22,7 @@ admin privileges and must handle installs themselves.
 4. Add a test using the fixture at `tests/data/Beaver/beaver.g01` or a new fixture in
    `tests/data/`.
 
-Implemented block parsers (as of 2026-06-17):
+Implemented block parsers (as of 2026-06-23):
 - `blocks/xs_sta_elev.py` — `#Sta/Elev= N`: reads N station/elevation pairs from
   8-char fixed-width fields; returns `(List[Tuple[float,float]], lines_consumed)`.
   Populates `CrossSection.sta_elev`.
@@ -31,6 +31,15 @@ Implemented block parsers (as of 2026-06-17):
   then T/F permanent flags; returns `(IneffFlowAreas, lines_consumed)`.
   Sentinel rules: blank station field → `0.0`; blank elevation field → `None`.
   Populates `CrossSection.ineff`.
+- `blocks/xs_mann.py` — `#Mann= N , method , 0`: handles both Manning's n formats.
+  - Standard (`method=0`, 'lob_ch_rob'): 3 plain n-values — LOB, channel, ROB — no
+    station column.  Returns `(ManningDef(method='lob_ch_rob', n_lob=…), consumed)`.
+  - Horizontal Variation (`method=1`, 'horizontal'): N entries × 3 fields each
+    (station, n_value, position_code); position_code discarded.  Returns
+    `(ManningDef(method='horizontal', entries=[…]), consumed)`.
+  Populates `CrossSection.manning_def`.
+- `blocks/xs_bank_sta.py` — `Bank Sta=left,right`: single-line parse; returns
+  `((float, float), 1)`.  Populates `CrossSection.bank_stations`.
 
 ## Mapping RAS Stations to GIS Coordinates
 When a script needs to place station-referenced XS features (IFAs, bank stations,

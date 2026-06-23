@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import List, Optional
 from .model import GeometryFile, CrossSection, XSGISCutLine
 from .blocks import river_reach, xs_metadata, xs_gis, xs_sta_elev, xs_ineff
+from .blocks import xs_mann, xs_bank_sta
 
 class GeometryParser:
     """
@@ -22,7 +23,10 @@ class GeometryParser:
         current_river = None
         current_reach = None
         current_xs = None
-        
+
+        # Track (xs, start_line) for post-loop end-line assignment
+        _xs_starts: List[tuple] = []  # (CrossSection, start_line_index)
+
         i = 0
         N = len(lines)
 
@@ -48,7 +52,9 @@ class GeometryParser:
                 current_xs, consumed = xs_metadata.parse_type_rm_length(
                     lines, i, current_river, current_reach
                 )
+                current_xs._raw_line_start = i
                 geom.add_cross_section(current_xs)
+                _xs_starts.append((current_xs, i))
                 i += consumed
                 continue
 
@@ -70,6 +76,24 @@ class GeometryParser:
                 i += consumed
                 continue
 
+            # --- #Mann= ---
+            if line.startswith("#Mann="):
+                if current_xs is None:
+                    raise ValueError("Found #Mann= before an XS was created.")
+                manning_def, consumed = xs_mann.parse_mann(lines, i)
+                current_xs.manning_def = manning_def
+                i += consumed
+                continue
+
+            # --- Bank Sta= ---
+            if line.startswith("Bank Sta="):
+                if current_xs is None:
+                    raise ValueError("Found Bank Sta= before an XS was created.")
+                bank_sta, consumed = xs_bank_sta.parse_bank_sta(lines, i)
+                current_xs.bank_stations = bank_sta
+                i += consumed
+                continue
+
             # --- #XS Ineff= ---
             if line.startswith("#XS Ineff="):
                 if current_xs is None:
@@ -80,5 +104,12 @@ class GeometryParser:
                 continue
 
             i += 1
+
+        # Assign _raw_line_end for each XS: end = start of the next XS (or EOF)
+        for j, (xs, start) in enumerate(_xs_starts):
+            if j + 1 < len(_xs_starts):
+                xs._raw_line_end = _xs_starts[j + 1][1]
+            else:
+                xs._raw_line_end = N
 
         return geom
