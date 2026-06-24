@@ -642,7 +642,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-06-23)*
+*(Last updated: 2026-06-24)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -658,6 +658,51 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
 - XS Editor GUI app lives at `../xsedit/xsedit.py` (sibling to this repo); built with
   PySide6 + pyqtgraph; uses the `xsedit_cf` conda environment.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### `geometry/merge.py` — design notes (2026-06-24)
+
+**Station/elevation merging — no interpolation at boundaries**
+`merge_sta_elev()` calls `_filter_segment()` (not the old `_extract_segment()`).
+`_filter_segment` returns only *actual* source points within a segment range — no new
+points are interpolated at breakpoint boundaries.  Boundary inclusion rule:
+
+- Segment 0 (first): `bp_start <= station <= bp_end` (left boundary inclusive)
+- Segment i > 0: `bp_start < station <= bp_end` (left boundary exclusive)
+
+This means a point exactly on an interior breakpoint belongs to the segment whose
+right edge it is, not the segment whose left edge it is.  The net effect: the output
+never contains fabricated elevation data; it contains only real survey points from
+the source geometries.
+
+**Interstitial content ordering in `_build_merged_xs_lines`**
+`_scan_xs_content()` now returns `(initial_lines, key_segments)` where `key_segments`
+is an ordered list of `(key_prefix, interstitial_lines)` pairs — one entry per key
+block found.  `interstitial_lines` are the non-key lines that immediately follow that
+key block in the source file (e.g. `Node Last Edited Time=` lives between the cut-line
+block and `#Sta/Elev=`; `XS Rating Curve=` lives after `Bank Sta=`).
+
+`_build_merged_xs_lines` emits each new key block and then its original trailing
+interstitials in one step, so non-key lines stay exactly where the source file had
+them.  Previous design lumped all non-key post-block content into a single `post_key`
+bucket, which caused `Node Last Edited Time=` to drift after `#Mann=` and `Bank Sta=`
+to drift to the very end of the XS block.
+
+`_scan_xs_content` also stops immediately on any `River Reach=` line, preventing the
+next reach's header from leaking into the last XS of a reach.
+
+**Verbatim Manning's n when not merging**
+`_raw_mann_lines(geom, xs)` extracts the raw `#Mann=` block lines from the source
+file.  In `_build_merged_xs_lines`, when `mann_option` is `'A'` or `'B'` *and* the
+horizontal transform for that source is identity (h_scale≈1, h_offset≈0), those raw
+lines are written directly instead of being re-formatted by `_write_mann_block`.  This
+preserves original numeric formatting (e.g. `.07` stays `.07` rather than becoming
+`0.07`), which is important for diff-based review workflows.
+
+**`write_merged_geometry` — B-only XS no longer corrupt reach ordering**
+The `xs_master is None` guard (which skips XS that only exist in the secondary
+geometry) now runs *before* the reach-header emission and `prev_reach_key` update.
+Previously, B-only XS could advance `prev_reach_key` to their reach, causing a
+subsequent A-reach XS to trigger a second (duplicate) reach header write.
 
 ## Known Constraints
 - Windows environment

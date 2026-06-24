@@ -85,6 +85,24 @@ class MergeConfig:
 # Station / elevation helpers
 # ---------------------------------------------------------------------------
 
+def _filter_segment(
+    sta_elev: List[Tuple[float, float]],
+    bp_start: float,
+    bp_end: float,
+    left_inclusive: bool,
+) -> List[Tuple[float, float]]:
+    """
+    Return actual source points within the segment.  No interpolation.
+
+    left_inclusive – True for the first segment (includes the global start);
+                     False for subsequent segments (first point after the boundary).
+    """
+    if left_inclusive:
+        return [(s, e) for s, e in sta_elev if bp_start <= s <= bp_end]
+    else:
+        return [(s, e) for s, e in sta_elev if bp_start < s <= bp_end]
+
+
 def _interp_elevation(
     sta_elev: List[Tuple[float, float]], station: float
 ) -> float:
@@ -162,17 +180,13 @@ def merge_sta_elev(
         bp_end = breakpoints[i + 1]
 
         if source is None:
-            # Gap: no interior points; adjacent segments provide the boundary
-            # elevations and HEC-RAS will linearly interpolate between them.
             continue
 
         src = sta_elev_a if source == 'A' else sta_elev_b
-        segment = _extract_segment(src, bp_start, bp_end)
-
-        if merged and segment:
-            # Avoid duplicating the junction station
-            if abs(segment[0][0] - merged[-1][0]) < 1e-9:
-                segment = segment[1:]
+        # First segment includes points at the left boundary; subsequent segments
+        # use strict left inequality so points at the boundary belong to the
+        # segment whose breakpoint defines it, not the one that follows.
+        segment = _filter_segment(src, bp_start, bp_end, left_inclusive=(i == 0))
 
         merged.extend(segment)
 
@@ -452,42 +466,58 @@ _KEY_PARSERS = {
 
 def _scan_xs_content(
     raw_lines: List[str], xs_start: int, xs_end: int
-) -> Tuple[List[str], List[str]]:
+) -> Tuple[List[str], List[Tuple[str, List[str]]]]:
     """
-    Partition an XS's raw lines (excluding the Type RM Length header) into
-    content that comes *before* the first key block and content that comes
-    *after* the last key block.
+    Partition an XS's raw lines (excluding the Type RM Length header) around
+    the key blocks that _build_merged_xs_lines replaces.
 
-    Key blocks (cutline, sta/elev, mann, bank_sta) are skipped; their
-    positions are determined by calling the block parsers.
+    Returns
+    -------
+    initial_lines
+        Non-key lines appearing before the first key block.
+    key_segments
+        Ordered list of (key_prefix, interstitial_lines) pairs, one per key
+        block encountered.  *key_prefix* identifies which block was found;
+        *interstitial_lines* are the non-key lines that immediately follow
+        that block (before the next key block or end-of-XS).
+
+    Preserving *interstitial_lines* per key block lets the writer re-emit them
+    in their original positions, keeping lines like ``Node Last Edited Time=``
+    and ``XS Rating Curve=`` exactly where the source file had them.
     """
-    pre_key: List[str] = []
-    post_key: List[str] = []
-    in_key_zone = False
+    initial_lines: List[str] = []
+    key_segments: List[Tuple[str, List[str]]] = []
+    current_trail: Optional[List[str]] = None
 
     i = xs_start + 1  # skip Type RM Length line
     while i < xs_end:
         line = raw_lines[i]
         stripped = line.strip()
 
+        matched_prefix: Optional[str] = None
         matched_parser = None
         for prefix, parser_fn in _KEY_PARSERS.items():
             if stripped.startswith(prefix):
+                matched_prefix = prefix
                 matched_parser = parser_fn
                 break
 
-        if matched_parser is not None:
-            in_key_zone = True
+        if stripped.startswith("River Reach="):
+            # Stop here — remainder is the next reach's header, not this XS.
+            break
+        elif matched_parser is not None:
+            current_trail = []
+            key_segments.append((matched_prefix, current_trail))
             _, consumed = matched_parser(raw_lines, i)
             i += consumed
-        elif not in_key_zone:
-            pre_key.append(line)
+        elif current_trail is None:
+            initial_lines.append(line)
             i += 1
         else:
-            post_key.append(line)
+            current_trail.append(line)
             i += 1
 
-    return pre_key, post_key
+    return initial_lines, key_segments
 
 
 # ---------------------------------------------------------------------------
@@ -539,6 +569,16 @@ def _extract_reach_header(
 
 def _norm_key(river: str, reach: str, station: str) -> Tuple[str, str, str]:
     return (river.strip().upper(), reach.strip().upper(), station.strip().upper())
+
+
+def _raw_mann_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
+    """Return the raw #Mann= block lines verbatim from the geometry file."""
+    raw = geom.raw_lines
+    for i in range(xs._raw_line_start, xs._raw_line_end):
+        if raw[i].strip().startswith("#Mann="):
+            _, consumed = parse_mann(raw, i)
+            return raw[i : i + consumed]
+    return []
 
 
 def _xs_raw_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
@@ -669,6 +709,16 @@ def write_merged_geometry(
     prev_reach_key: Optional[Tuple[str, str]] = None
 
     for river, reach, station, xs_a, xs_b in xs_pairs:
+        # Determine master/secondary before any output so that B-only XS (xs_master is None)
+        # are skipped without affecting prev_reach_key or emitting reach headers.
+        xs_master = xs_a if master_source == 'A' else xs_b
+        xs_secondary = xs_b if master_source == 'A' else xs_a
+        geom_secondary = geom_other
+
+        if xs_master is None:
+            # XS only exists in secondary source — excluded when using master's structure
+            continue
+
         reach_key = (river.strip().upper(), reach.strip().upper())
 
         if reach_key != prev_reach_key:
@@ -677,15 +727,6 @@ def write_merged_geometry(
 
         config_key = _norm_key(river, reach, station)
         config = merge_configs.get(config_key)
-
-        # Determine which XS to use as the master-source XS for pass-through
-        xs_master = xs_a if master_source == 'A' else xs_b
-        xs_secondary = xs_b if master_source == 'A' else xs_a
-        geom_secondary = geom_other
-
-        if xs_master is None:
-            # XS only exists in secondary source — excluded when using master's structure
-            continue
 
         if xs_master is not None and (
             xs_secondary is None
@@ -730,11 +771,16 @@ def _build_merged_xs_lines(
     # 1. Type RM Length= header (from source A)
     out.append(geom_a.raw_lines[xs_a._raw_line_start])
 
-    # 2. Pre-key pass-through content from source A
-    pre_key, post_key = _scan_xs_content(
+    # 2. Scan source A for interstitial content around each key block
+    initial_lines, key_segments = _scan_xs_content(
         geom_a.raw_lines, xs_a._raw_line_start, xs_a._raw_line_end
     )
-    out.extend(pre_key)
+    # Build a lookup: key_prefix -> interstitial lines that followed it in source A
+    trail_for: Dict[str, List[str]] = {}
+    for kp, trail in key_segments:
+        trail_for.setdefault(kp, trail)
+
+    out.extend(initial_lines)
 
     # 3. Compute merged data
     sta_elev_a = transform_sta_elev(xs_a.sta_elev or [], config.transform_a)
@@ -783,20 +829,40 @@ def _build_merged_xs_lines(
     else:
         merged_bank = None
 
-    # 4. Write new key blocks (cutline, sta/elev, mann)
+    # 4. Write each key block followed by its original interstitial lines.
+    #    This preserves the exact position of every non-key line from the source
+    #    (e.g. "Node Last Edited Time=" stays between cutline and #Sta/Elev=,
+    #    "XS Rating Curve=" stays after Bank Sta=, etc.).
     if merged_cl is not None:
         out.extend(_write_cutline_block(merged_cl))
+    out.extend(trail_for.get("XS GIS Cut Line=", []))
+
     if merged_se:
         out.extend(_write_sta_elev_block(merged_se))
+    out.extend(trail_for.get("#Sta/Elev=", []))
+
     if merged_mann is not None:
-        out.extend(_write_mann_block(merged_mann))
+        # When not merging Manning's n, write the source's raw lines verbatim
+        # so numeric formatting (e.g. ".07" vs "0.07") is unchanged.
+        # Fall back to formatted output only when the horizontal transform
+        # shifts stations (which would make the raw stations incorrect).
+        wrote_raw_mann = False
+        if config.mann_option == 'A' and config.transform_a.is_identity():
+            raw_mn = _raw_mann_lines(geom_a, xs_a)
+            if raw_mn:
+                out.extend(raw_mn)
+                wrote_raw_mann = True
+        elif config.mann_option == 'B' and config.transform_b.is_identity():
+            raw_mn = _raw_mann_lines(geom_b, xs_b)
+            if raw_mn:
+                out.extend(raw_mn)
+                wrote_raw_mann = True
+        if not wrote_raw_mann:
+            out.extend(_write_mann_block(merged_mann))
+    out.extend(trail_for.get("#Mann=", []))
 
-    # 5. Post-key pass-through content from source A (e.g. #XS Ineff= blocks,
-    #    which appear between #Mann= and Bank Sta= in HEC-RAS geometry files)
-    out.extend(post_key)
-
-    # 6. Bank Sta= comes last, after ineff blocks
     if merged_bank is not None:
         out.append(_write_bank_sta_line(merged_bank))
+    out.extend(trail_for.get("Bank Sta=", []))
 
     return out
