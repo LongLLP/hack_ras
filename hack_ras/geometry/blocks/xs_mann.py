@@ -48,37 +48,30 @@ def parse_mann(lines: list, index: int) -> Tuple[ManningDef, int]:
 
     Header format: #Mann= N , method , flag
 
-    Standard method (method=0, 'lob_ch_rob'):
-        Exactly 3 floats — n_lob, n_channel, n_rob — with no station column.
-        N is always 3 in practice (one value per zone).
+    All methods store data as N entries of three 8-char fixed-width fields each:
+        station   n_value   position_code
 
-    Horizontal Variation method (method=1, 'horizontal'):
-        N entries × 3 fields each: station, n_value, position_code.
-        Position codes are discarded; only (station, n_value) pairs are kept.
+    position_code is informational and is discarded on parse.
+
+    method=0:  "Horizontal Variation in n-values" OFF.  Always N=3; stations
+               are the XS left edge, left bank, and right bank (LOB/CH/ROB).
+    method=-1: "Horizontal Variation in n-values" ON (modern convention).
+               Arbitrary N entries at user-defined stations.
+    method=1:  Same semantics as method=-1; legacy convention found in older
+               files.  Parsed identically; written as -1 in new output.
     """
     header = lines[index].strip()
     parts = header.split("=", 1)[1].split(",")
     n = int(parts[0].strip())
-    method = int(parts[1].strip()) if len(parts) > 1 else 1
+    method = int(parts[1].strip()) if len(parts) > 1 else 0
 
-    if method == 0:
-        # Standard LOB/channel/ROB: read 3 plain n-values, no station column.
-        floats, consumed = _read_n_floats(lines, index + 1, 3)
-        n_lob = floats[0] if len(floats) > 0 else 0.0
-        n_channel = floats[1] if len(floats) > 1 else 0.0
-        n_rob = floats[2] if len(floats) > 2 else 0.0
-        return ManningDef(
-            method='lob_ch_rob',
-            n_lob=n_lob,
-            n_channel=n_channel,
-            n_rob=n_rob,
-        ), 1 + consumed
-    else:
-        # Horizontal Variation: N entries × 3 fields (station, n, position_code).
-        floats, consumed = _read_n_floats(lines, index + 1, n * 3)
-        entries: List[Tuple[float, float]] = []
-        for j in range(0, len(floats), 3):
-            station = floats[j]
-            n_val = floats[j + 1] if j + 1 < len(floats) else 0.0
-            entries.append((station, n_val))
-        return ManningDef(method='horizontal', entries=entries), 1 + consumed
+    floats, consumed = _read_n_floats(lines, index + 1, n * 3)
+
+    entries: List[Tuple[float, float]] = []
+    for j in range(0, len(floats), 3):
+        station = floats[j]
+        n_val = floats[j + 1] if j + 1 < len(floats) else 0.0
+        # floats[j + 2] is the position_code — discarded
+        entries.append((station, n_val))
+
+    return ManningDef(method=method, entries=entries), 1 + consumed

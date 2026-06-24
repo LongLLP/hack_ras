@@ -127,32 +127,37 @@ from `hack_ras/geometry/blocks/base.py` to split data lines.
 
 ### Manning's n formats
 
-Two mutually exclusive formats exist, distinguished by the `method` field in the
-`#Mann=` header (`#Mann= N , method , flag`):
+All formats store data as `(station, n_value, position_code)` triplets in 8-char
+fixed-width fields.  The header is `#Mann= N , method , 0`.
 
-**Standard — LOB/channel/ROB** (`method=0`):
+The method integer reflects the state of the **"Horizontal Variation in n-values"
+checkbox** in the HEC-RAS GUI:
+
+| method | GUI checkbox | Meaning |
+|--------|-------------|---------|
+| `0` | OFF | Standard LOB/Channel/ROB.  Always N=3; stations are the XS left edge, left bank station, and right bank station. |
+| `-1` | ON | Horizontal variation, modern convention.  N entries at arbitrary stations. |
+| `1` | ON | Horizontal variation, legacy convention (older files only).  Same semantics as `-1`. |
+
+Example — method=0 (standard, checkbox OFF):
 ```
 #Mann= 3 , 0 , 0
-      0.04     0.06     0.04
+         0     0.11        0    623.5    0.065        0   664.71     0.11        0
 ```
-N is always 3 (left overbank, channel, right overbank).  The data line contains
-exactly 3 n-values with no station information.  Stored as
-`ManningDef(method='lob_ch_rob', n_lob=…, n_channel=…, n_rob=…)`.
 
-**Horizontal Variation** (`method=1`):
+Example — method=-1 (horizontal variation, checkbox ON):
 ```
-#Mann= 4 , 1 , 0
-         0     0.10        0      518     0.14        0
-       866     0.04        0      948     0.14        0
+#Mann= 5 ,-1 , 0
+         0      100        0   482.77     0.11        0   850.38    0.065        0
+    872.77     0.11        0   941.38      100        0
 ```
-N entries, each occupying 3 8-char fields: station, n_value, position_code.
-Position code is informational and is discarded on parse.  Stored as
-`ManningDef(method='horizontal', entries=[(station, n_value), …])`.
 
-`merge_manning()` in `geometry/merge.py` handles both formats.  When
-`mann_option='merge'`, the output is always Horizontal Variation (because
-different segments may come from different sources with different zone boundaries).
-When `mann_option='A'` or `'B'`, the source's original format is preserved.
+Position codes are informational and discarded on parse.  Stored as
+`ManningDef(method=<int>, entries=[(station, n_value), …])`.
+
+**Read**: accept method 0, -1, and 1 (all use identical triplet structure).
+**Write**: preserve method=0 verbatim; always write method=-1 for any newly
+constructed horizontal variation output (never write method=1).
 
 ### Ineffective flow areas (IFAs)
 

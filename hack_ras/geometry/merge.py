@@ -186,89 +186,54 @@ def _transform_manning_def(
     mann_def: Optional[ManningDef], t: Transform
 ) -> Optional[ManningDef]:
     """
-    Return a copy of *mann_def* with station values transformed by *t*.
+    Return a copy of *mann_def* with each station value transformed by *t*.
 
-    For 'lob_ch_rob' format there are no station values, so n-values are
-    returned unchanged.  For 'horizontal' format, each station is shifted by
-    the transform's horizontal offset and scale.  N-values are never affected
-    by vertical scale or offset — they are roughness coefficients, not elevations.
+    Manning's n values are roughness coefficients; they are NOT affected by
+    vertical scale or offset.  Only station values use the horizontal transform.
+    The original method integer is preserved for roundtrip accuracy.
     """
     if mann_def is None:
         return None
-    if mann_def.method == 'lob_ch_rob':
-        return ManningDef(
-            method='lob_ch_rob',
-            n_lob=mann_def.n_lob,
-            n_channel=mann_def.n_channel,
-            n_rob=mann_def.n_rob,
-        )
-    # 'horizontal': apply station transform
     return ManningDef(
-        method='horizontal',
+        method=mann_def.method,
         entries=[(t.apply_station(s), n) for s, n in mann_def.entries],
     )
 
 
-def _lob_ch_rob_at_station(
-    mann_def: ManningDef,
-    bank_left: Optional[float],
-    bank_right: Optional[float],
-    station: float,
-) -> float:
-    """Return the LOB/channel/ROB n-value for *station* using bank station boundaries."""
-    if bank_left is not None and station < bank_left:
-        return mann_def.n_lob
-    if bank_right is not None and station >= bank_right:
-        return mann_def.n_rob
-    return mann_def.n_channel
+def _n_at_station(entries: List[Tuple[float, float]], station: float) -> Optional[float]:
+    """
+    Step-function lookup: return the n_value whose station is the largest
+    value ≤ *station*.  Returns None if no entry exists at or before *station*.
+    """
+    result: Optional[float] = None
+    for sta, n in entries:
+        if sta <= station + 1e-9:
+            result = n
+        else:
+            break
+    return result
 
 
 def _mann_def_to_entries_in_segment(
     mann_def: ManningDef,
-    xs: CrossSection,
     t: Transform,
     bp_start: float,
     bp_end: float,
 ) -> List[Tuple[float, float]]:
     """
-    Convert *mann_def* to a list of (station, n_value) pairs that cover the
-    segment [bp_start, bp_end].
-
-    For 'horizontal': transform stations; start with a value at bp_start (from
-    step-function lookup), then include defined values strictly inside the segment.
-
-    For 'lob_ch_rob': insert a value at bp_start for the appropriate zone; add
-    bank-station transition points where they fall inside the segment.
+    Return (station, n_value) pairs from *mann_def* covering segment
+    [bp_start, bp_end]: one entry at bp_start (from step-function lookup)
+    plus any defined entries strictly inside the segment.
     """
-    if mann_def.method == 'horizontal':
-        all_entries = [(t.apply_station(s), n) for s, n in mann_def.entries]
-        # Step-function lookup for bp_start
-        n_start: Optional[float] = None
-        for sta, n in all_entries:
-            if sta <= bp_start + 1e-9:
-                n_start = n
-            else:
-                break
-        result: List[Tuple[float, float]] = []
-        if n_start is not None:
-            result.append((bp_start, n_start))
-        for sta, n in all_entries:
-            if bp_start < sta < bp_end:
-                result.append((sta, n))
-        return result
+    all_entries = [(t.apply_station(s), n) for s, n in mann_def.entries]
+    n_start = _n_at_station(all_entries, bp_start)
 
-    # 'lob_ch_rob': derive zone transitions from bank stations
-    bank_left: Optional[float] = None
-    bank_right: Optional[float] = None
-    if xs.bank_stations:
-        bank_left = t.apply_station(xs.bank_stations[0])
-        bank_right = t.apply_station(xs.bank_stations[1])
-
-    result = [(bp_start, _lob_ch_rob_at_station(mann_def, bank_left, bank_right, bp_start))]
-    if bank_left is not None and bp_start < bank_left < bp_end:
-        result.append((bank_left, mann_def.n_channel))
-    if bank_right is not None and bp_start < bank_right < bp_end:
-        result.append((bank_right, mann_def.n_rob))
+    result: List[Tuple[float, float]] = []
+    if n_start is not None:
+        result.append((bp_start, n_start))
+    for sta, n in all_entries:
+        if bp_start < sta < bp_end:
+            result.append((sta, n))
     return result
 
 
@@ -281,21 +246,20 @@ def merge_manning(
     Merge Manning's n values according to config.mann_option.
 
     'A' / 'B':  Return that source's ManningDef with station transform applied.
-                The original format (Standard LOB/channel/ROB or Horizontal
-                Variation) is preserved.
+                The original method integer is preserved for roundtrip accuracy.
 
     'merge':    Per segment, pull n-values from the corresponding source.
-                Always produces Horizontal Variation output, because different
-                segments may come from different sources.  At each segment
-                boundary, a value is explicitly inserted so that the step
-                function is defined at the join point.
+                Always produces method=-1 output ("Horizontal Variation" ON),
+                since merged segments may come from different sources and carry
+                arbitrary breakpoints.  At each segment boundary, a value is
+                explicitly inserted so the step function is defined at the join.
     """
     if config.mann_option == 'A':
         return _transform_manning_def(xs_a.manning_def, config.transform_a)
     if config.mann_option == 'B':
         return _transform_manning_def(xs_b.manning_def, config.transform_b)
 
-    # --- 'merge' option: always produces 'horizontal' output ---
+    # --- 'merge' option ---
     result: List[Tuple[float, float]] = []
 
     for i, source in enumerate(config.segment_sources):
@@ -311,13 +275,13 @@ def merge_manning(
         if mann_def is None:
             continue
 
-        for sta, n_val in _mann_def_to_entries_in_segment(mann_def, xs_src, t, bp_start, bp_end):
+        for sta, n_val in _mann_def_to_entries_in_segment(mann_def, t, bp_start, bp_end):
             if not result or abs(result[-1][0] - sta) > 1e-9:
                 result.append((sta, n_val))
 
     if not result:
         return None
-    return ManningDef(method='horizontal', entries=result)
+    return ManningDef(method=-1, entries=result)
 
 
 # ---------------------------------------------------------------------------
@@ -431,29 +395,17 @@ def _write_sta_elev_block(sta_elev: List[Tuple[float, float]]) -> List[str]:
 
 
 def _write_mann_block(mann_def: ManningDef) -> List[str]:
-    """Write a #Mann= block for either Manning's n format.
+    """Write a #Mann= block from a ManningDef.
 
-    Standard LOB/channel/ROB (method='lob_ch_rob'):
-        #Mann= 3 , 0 , 0
-        <n_lob> <n_channel> <n_rob>   (3 values in 8-char fields)
+    All horizontal variation formats use (station, n_value, position_code)
+    triplets in 8-char fixed-width fields.  The method integer from the
+    ManningDef is written verbatim to preserve the original format.
 
-    Horizontal Variation (method='horizontal'):
-        #Mann= N , 1 , 0
-        <station> <n_value> <0>  ...  (N triplets in 8-char fields)
+        #Mann= N ,<method> , 0
+        <station> <n_value> <0>  ...  (N triplets)
     """
-    if mann_def.method == 'lob_ch_rob':
-        lines = ["#Mann= 3 , 0 , 0 \n"]
-        lines.append(
-            _fmt(mann_def.n_lob, 8)
-            + _fmt(mann_def.n_channel, 8)
-            + _fmt(mann_def.n_rob, 8)
-            + "\n"
-        )
-        return lines
-
-    # 'horizontal'
     entries = mann_def.entries
-    lines = [f"#Mann= {len(entries)} , 1 , 0 \n"]
+    lines = [f"#Mann= {len(entries)} ,{mann_def.method} , 0 \n"]
     values: List[float] = []
     for sta, n_val in entries:
         values.extend([sta, n_val, 0.0])

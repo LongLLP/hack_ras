@@ -9,23 +9,27 @@ from typing import List, Optional, Tuple, Dict
 class ManningDef:
     """Manning's roughness definition for a cross-section.
 
-    Two mutually exclusive formats exist in HEC-RAS:
+    All formats store data as (station, n_value, position_code) triplets in
+    8-char fixed-width fields; position_code is discarded on parse.
 
-    'lob_ch_rob' (Standard, method=0 in #Mann= header):
-        Three single n-values — one each for left overbank, channel, and right
-        overbank.  No station information.  n_lob, n_channel, n_rob are set.
+    The method integer is the raw value from the #Mann= header and is preserved
+    for lossless roundtrip:
 
-    'horizontal' (Horizontal Variation, method=1 in #Mann= header):
-        N station-keyed n-values; the value at station s applies from s to the
-        next defined station (step function).  entries is a list of
-        (station, n_value) pairs.
+    method=0  — "Horizontal Variation in n-values" is OFF (the HEC-RAS GUI
+                checkbox).  Always exactly 3 entries whose stations align with
+                the XS left edge, left bank station, and right bank station —
+                i.e., one n-value each for LOB, channel, and ROB.
+
+    method=-1 — "Horizontal Variation in n-values" is ON (modern convention).
+                N entries at arbitrary stations.
+
+    method=1  — Same semantics as method=-1; an older convention still found in
+                some legacy files.  Read both; always write -1 for new output.
+
+    entries: (station, n_value) pairs in station-ascending order; the n_value at
+             station s applies from s to the next defined station (step function).
     """
-    method: str  # 'lob_ch_rob' or 'horizontal'
-    # Standard LOB/Channel/ROB values (method='lob_ch_rob')
-    n_lob: float = 0.0
-    n_channel: float = 0.0
-    n_rob: float = 0.0
-    # Horizontal variation entries (method='horizontal')
+    method: int  # raw integer from #Mann= header (0, -1, or 1)
     entries: List[Tuple[float, float]] = field(default_factory=list)  # (station, n_value)
 
 

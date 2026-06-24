@@ -31,12 +31,13 @@ Implemented block parsers (as of 2026-06-23):
   then T/F permanent flags; returns `(IneffFlowAreas, lines_consumed)`.
   Sentinel rules: blank station field → `0.0`; blank elevation field → `None`.
   Populates `CrossSection.ineff`.
-- `blocks/xs_mann.py` — `#Mann= N , method , 0`: handles both Manning's n formats.
-  - Standard (`method=0`, 'lob_ch_rob'): 3 plain n-values — LOB, channel, ROB — no
-    station column.  Returns `(ManningDef(method='lob_ch_rob', n_lob=…), consumed)`.
-  - Horizontal Variation (`method=1`, 'horizontal'): N entries × 3 fields each
-    (station, n_value, position_code); position_code discarded.  Returns
-    `(ManningDef(method='horizontal', entries=[…]), consumed)`.
+- `blocks/xs_mann.py` — `#Mann= N , method , 0`: all methods use the same
+  `(station, n_value, position_code)` triplet format in 8-char fixed-width
+  fields; position_code is discarded.  Returns
+  `(ManningDef(method=<int>, entries=[(station, n_value), …]), consumed)`.
+  method=0 → "Horizontal Variation" OFF, always N=3, stations at XS-left/left-bank/
+  right-bank (LOB/Channel/ROB).  method=-1 or method=1 → "Horizontal Variation" ON,
+  arbitrary N entries.  Write -1 for any new horizontal variation output.
   Populates `CrossSection.manning_def`.
 - `blocks/xs_bank_sta.py` — `Bank Sta=left,right`: single-line parse; returns
   `((float, float), 1)`.  Populates `CrossSection.bank_stations`.
