@@ -78,6 +78,7 @@ class MergeConfig:
     segment_sources: List[Optional[str]]
     mann_option: str = 'merge'    # 'A', 'B', or 'merge'
     cutline_source: str = 'A'     # 'A' or 'B'
+    preserve_cutline: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -540,6 +541,22 @@ def _norm_key(river: str, reach: str, station: str) -> Tuple[str, str, str]:
     return (river.strip().upper(), reach.strip().upper(), station.strip().upper())
 
 
+def _xs_raw_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
+    """
+    Raw lines for a single XS, trimmed to exclude trailing reach-header content.
+
+    Because _raw_line_end is set to the start of the *next* XS (which may be in
+    a different reach), the raw slice can include the River Reach= line and
+    reach-level lines of the next reach.  Strip them so the caller can emit the
+    reach header once and only once.
+    """
+    raw = geom.raw_lines[xs._raw_line_start : xs._raw_line_end]
+    for j, line in enumerate(raw):
+        if line.strip().startswith("River Reach="):
+            return raw[:j]
+    return raw
+
+
 def _collect_xs_pairs(
     geom_a: Optional[GeometryFile],
     geom_b: Optional[GeometryFile],
@@ -593,27 +610,55 @@ def _collect_xs_pairs(
 # Public: write merged geometry file
 # ---------------------------------------------------------------------------
 
+def _is_trivial_config(config: MergeConfig, master: str) -> bool:
+    """
+    Return True when the config has no user-defined interior breakpoints, all
+    data comes from *master*, and the master transform is identity.
+
+    For trivial configs the XS should be written verbatim from the master source
+    rather than rebuilt by _build_merged_xs_lines.
+    """
+    if len(config.breakpoints) != 2:
+        return False
+    if len(config.segment_sources) != 1:
+        return False
+    if config.segment_sources[0] != master:
+        return False
+    t = config.transform_a if master == 'A' else config.transform_b
+    return t.is_identity()
+
+
 def write_merged_geometry(
     geom_a: Optional[GeometryFile],
     geom_b: Optional[GeometryFile],
     merge_configs: Dict[Tuple[str, str, str], MergeConfig],
     output_path: str,
     title: str,
+    master_source: str = 'A',
 ) -> None:
     """
     Write a merged HEC-RAS geometry file.
 
-    merge_configs : keyed by normalised (river, reach, station) tuples;
-                   XS not present default to pass-through from A (or B).
+    master_source : 'A' or 'B' — the file used for the geometry header, reach
+                   headers, and any XS without a merge config (or with a trivial
+                   config that simply mirrors the master).
+    merge_configs : keyed by normalised (river, reach, station) tuples.
     """
+    if master_source not in ('A', 'B'):
+        raise ValueError(f"master_source must be 'A' or 'B', got {master_source!r}")
+
+    geom_master = geom_a if master_source == 'A' else geom_b
+    geom_other  = geom_b if master_source == 'A' else geom_a
+
+    if geom_master is None and geom_other is None:
+        raise ValueError("At least one geometry file must be provided.")
+    if geom_master is None:
+        geom_master = geom_other
+
     lines: List[str] = []
 
-    # 1. Geometry header from source A (replace the title line)
-    src_header = geom_a or geom_b
-    if src_header is None:
-        raise ValueError("At least one geometry file must be provided.")
-
-    for line in _extract_geom_header(src_header):
+    # 1. Geometry header from master (replace the title line)
+    for line in _extract_geom_header(geom_master):
         if line.startswith("Geom Title="):
             lines.append(f"Geom Title={title}\n")
         else:
@@ -628,23 +673,41 @@ def write_merged_geometry(
 
         if reach_key != prev_reach_key:
             prev_reach_key = reach_key
-            reach_src = geom_a if geom_a else geom_b
-            lines.extend(_extract_reach_header(reach_src, river, reach))
+            lines.extend(_extract_reach_header(geom_master, river, reach))
 
         config_key = _norm_key(river, reach, station)
         config = merge_configs.get(config_key)
 
-        if xs_a is None:
-            # Only in B: copy raw lines from geom_b
-            if xs_b is not None and xs_b._raw_line_start >= 0:
-                lines.extend(geom_b.raw_lines[xs_b._raw_line_start : xs_b._raw_line_end])
-        elif xs_b is None or config is None:
-            # Only in A, or no merge configured: copy raw lines from geom_a
-            if xs_a._raw_line_start >= 0:
-                lines.extend(geom_a.raw_lines[xs_a._raw_line_start : xs_a._raw_line_end])
+        # Determine which XS to use as the master-source XS for pass-through
+        xs_master = xs_a if master_source == 'A' else xs_b
+        xs_secondary = xs_b if master_source == 'A' else xs_a
+        geom_secondary = geom_other
+
+        if xs_master is None:
+            # XS only exists in secondary source — excluded when using master's structure
+            continue
+
+        if xs_master is not None and (
+            xs_secondary is None
+            or config is None
+            or _is_trivial_config(config, master_source)
+        ):
+            # Only in master, or no merge configured, or trivial (pass-through)
+            if xs_master._raw_line_start >= 0:
+                lines.extend(_xs_raw_lines(geom_master, xs_master))
         else:
-            # Merge
-            lines.extend(_build_merged_xs_lines(geom_a, xs_a, geom_b, xs_b, config))
+            # True merge: both present, non-trivial config
+            xs_a_for_merge = xs_master if master_source == 'A' else xs_secondary
+            xs_b_for_merge = xs_secondary if master_source == 'A' else xs_master
+            geom_a_for_merge = geom_master if master_source == 'A' else geom_secondary
+            geom_b_for_merge = geom_secondary if master_source == 'A' else geom_master
+            lines.extend(
+                _build_merged_xs_lines(
+                    geom_a_for_merge, xs_a_for_merge,
+                    geom_b_for_merge, xs_b_for_merge,
+                    config,
+                )
+            )
 
     # Ensure file ends with a newline
     if lines and not lines[-1].endswith("\n"):
@@ -682,16 +745,27 @@ def _build_merged_xs_lines(
     )
     merged_mann = merge_manning(xs_a, xs_b, config)
 
-    if config.cutline_source == 'A':
-        merged_cl = build_merged_cutline(
-            xs_a, config.transform_a,
-            config.breakpoints[0], config.breakpoints[-1],
-        )
+    if merged_se:
+        actual_sta_start = merged_se[0][0]
+        actual_sta_end = merged_se[-1][0]
     else:
-        merged_cl = build_merged_cutline(
-            xs_b, config.transform_b,
-            config.breakpoints[0], config.breakpoints[-1],
-        )
+        actual_sta_start = config.breakpoints[0]
+        actual_sta_end = config.breakpoints[-1]
+
+    if config.preserve_cutline:
+        source_xs = xs_a if config.cutline_source == 'A' else xs_b
+        merged_cl = source_xs.cutline
+    else:
+        if config.cutline_source == 'A':
+            merged_cl = build_merged_cutline(
+                xs_a, config.transform_a,
+                actual_sta_start, actual_sta_end,
+            )
+        else:
+            merged_cl = build_merged_cutline(
+                xs_b, config.transform_b,
+                actual_sta_start, actual_sta_end,
+            )
 
     # Bank stations from the cutline source
     if config.cutline_source == 'A' and xs_a.bank_stations:
@@ -709,17 +783,20 @@ def _build_merged_xs_lines(
     else:
         merged_bank = None
 
-    # 4. Write new key blocks
+    # 4. Write new key blocks (cutline, sta/elev, mann)
     if merged_cl is not None:
         out.extend(_write_cutline_block(merged_cl))
     if merged_se:
         out.extend(_write_sta_elev_block(merged_se))
     if merged_mann is not None:
         out.extend(_write_mann_block(merged_mann))
+
+    # 5. Post-key pass-through content from source A (e.g. #XS Ineff= blocks,
+    #    which appear between #Mann= and Bank Sta= in HEC-RAS geometry files)
+    out.extend(post_key)
+
+    # 6. Bank Sta= comes last, after ineff blocks
     if merged_bank is not None:
         out.append(_write_bank_sta_line(merged_bank))
-
-    # 5. Post-key pass-through content from source A
-    out.extend(post_key)
 
     return out
