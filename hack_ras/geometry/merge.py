@@ -430,7 +430,7 @@ def _write_mann_block(mann_def: ManningDef) -> List[str]:
 
 
 def _write_cutline_block(cutline: XSGISCutLine) -> List[str]:
-    lines = [f"XS GIS Cut Line= {cutline.n_points} \n"]
+    lines = [f"XS GIS Cut Line={cutline.n_points}\n"]
     values = []
     for x, y in cutline.points:
         values.extend([x, y])
@@ -597,13 +597,26 @@ def _xs_raw_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
     return raw
 
 
+def _xs_in_file_order(geom: GeometryFile) -> List[CrossSection]:
+    """
+    Return all cross-sections in the order they appear in raw_lines,
+    preserving the original reach interleaving rather than grouping by river.
+    """
+    xs_all = []
+    for river in geom.rivers.values():
+        for rch in river.reaches.values():
+            xs_all.extend(rch.cross_sections)
+    xs_all.sort(key=lambda xs: xs._raw_line_start)
+    return xs_all
+
+
 def _collect_xs_pairs(
     geom_a: Optional[GeometryFile],
     geom_b: Optional[GeometryFile],
 ) -> List[Tuple[str, str, str, Optional[CrossSection], Optional[CrossSection]]]:
     """
     Build an ordered list of (river, reach, station, xs_a, xs_b) tuples
-    covering all XS from both geometries, ordered by source A's ordering
+    covering all XS from both geometries, ordered by source A's file ordering
     then any B-only XS appended per reach.
     """
     index_a: Dict[Tuple, CrossSection] = {}
@@ -611,19 +624,15 @@ def _collect_xs_pairs(
     order_a: List[Tuple[str, str, str]] = []
 
     if geom_a:
-        for river in geom_a.rivers.values():
-            for rch in river.reaches.values():
-                for xs in rch.cross_sections:
-                    k = _norm_key(xs.river, xs.reach, xs.station)
-                    index_a[k] = xs
-                    order_a.append((xs.river, xs.reach, xs.station))
+        for xs in _xs_in_file_order(geom_a):
+            k = _norm_key(xs.river, xs.reach, xs.station)
+            index_a[k] = xs
+            order_a.append((xs.river, xs.reach, xs.station))
 
     if geom_b:
-        for river in geom_b.rivers.values():
-            for rch in river.reaches.values():
-                for xs in rch.cross_sections:
-                    k = _norm_key(xs.river, xs.reach, xs.station)
-                    index_b[k] = xs
+        for xs in _xs_in_file_order(geom_b):
+            k = _norm_key(xs.river, xs.reach, xs.station)
+            index_b[k] = xs
 
     result = []
     seen: set = set()
@@ -635,13 +644,11 @@ def _collect_xs_pairs(
 
     # B-only XS appended per reach
     if geom_b:
-        for river in geom_b.rivers.values():
-            for rch in river.reaches.values():
-                for xs in rch.cross_sections:
-                    k = _norm_key(xs.river, xs.reach, xs.station)
-                    if k not in seen:
-                        seen.add(k)
-                        result.append((xs.river, xs.reach, xs.station, None, xs))
+        for xs in _xs_in_file_order(geom_b):
+            k = _norm_key(xs.river, xs.reach, xs.station)
+            if k not in seen:
+                seen.add(k)
+                result.append((xs.river, xs.reach, xs.station, None, xs))
 
     return result
 

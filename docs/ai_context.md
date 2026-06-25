@@ -642,7 +642,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-06-24)*
+*(Last updated: 2026-06-25)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -655,8 +655,11 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   stitching cross-sections from two geometry files.
 - `geometry/xs_interp.py` is the canonical tool for mapping RAS station values to GIS
   cut-line XY coordinates; use it for any future station-referenced feature export.
-- XS Editor GUI app lives at `../xsedit/xsedit.py` (sibling to this repo); built with
-  PySide6 + pyqtgraph; uses the `xsedit_cf` conda environment.
+- XS Editor GUI app lives at `../RAS_xsedit/xsedit.py` (sibling to this repo); built with
+  PySide6 + pyqtgraph; uses the `xsedit_cf` conda environment. The `hack_ras` test suite
+  uses the `Hillside_Levee` conda environment.
+- `tests/test_geometry_merge.py` covers `write_merged_geometry` using Sterp Creek fixtures
+  in the sibling `RAS_xsedit` repo. See `RAS_xsedit/tests/README.md` for how to add cases.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
 ### `geometry/merge.py` — design notes (2026-06-24)
@@ -703,6 +706,18 @@ The `xs_master is None` guard (which skips XS that only exist in the secondary
 geometry) now runs *before* the reach-header emission and `prev_reach_key` update.
 Previously, B-only XS could advance `prev_reach_key` to their reach, causing a
 subsequent A-reach XS to trigger a second (duplicate) reach header write.
+
+**`_collect_xs_pairs` — reach interleaving preserved (2026-06-25)**
+`_xs_in_file_order(geom)` sorts all XS by `_raw_line_start` before building the
+ordered list. Previously the code iterated `geom.rivers.values()` which grouped all
+reaches under the same river name together, destroying the original interleaved reach
+order (e.g. West/Upper → East/East Branch → West/Trib became West/Upper → West/Trib →
+West/Lower → East/East Branch).
+
+**`_write_cutline_block` — header format matches HEC-RAS (2026-06-25)**
+The `XS GIS Cut Line=` header is now written as `XS GIS Cut Line={n}` (no surrounding
+spaces), matching the format produced by HEC-RAS itself. Previously an extra leading
+space and trailing space were added, which showed up as a spurious diff on any merged XS.
 
 ## Known Constraints
 - Windows environment

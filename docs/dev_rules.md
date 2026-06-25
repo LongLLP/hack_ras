@@ -5,6 +5,23 @@ Do not install new packages or attempt to work around a missing package. If a pa
 would be useful, **ask the user to install it** and wait. The user runs Anaconda without
 admin privileges and must handle installs themselves.
 
+## Run Tests After Every Code Change
+
+After any edit to `hack_ras`, run the full test suite before reporting the task complete.
+Use the `Hillside_Levee` conda environment (the base env is missing h5py/geopandas/shapely):
+
+```
+cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
+pytest tests\
+```
+
+All tests must pass. The baseline is 70 passing tests (plus any added in the current
+session). If a new test is added, the new count becomes the baseline.
+
+The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
+repo to be present. See `RAS_xsedit/tests/README.md` for how those fixtures are
+organised and how to add new merge test cases.
+
 ## Invariants — Do Not Break
 - **Lossless roundtrip**: `GeometryFile.raw_lines` must be preserved exactly as read.
   Any parser change that drops or modifies raw lines will break the roundtrip test.
@@ -90,7 +107,7 @@ All HDF5 reader functions live in `hack_ras/results/reader.py`. Follow this patt
    Use `@unittest.skipUnless(HAS_HDF, "…")` so CI without the fixture still passes.
 
 ## Test Fixtures
-Real sample files live in `tests/data/`, organised into subfolders by model:
+Real sample files live in `tests/data/`, organised into subfolders by model.
 
 ```
 tests/data/
@@ -107,11 +124,16 @@ tests/data/
       Profile Lines.shp  (.dbf .shx .prj)  ← GIS profile line tests; line extends beyond mesh by design
 ```
 
+Geometry merge tests reference fixtures from the sibling `RAS_xsedit` repo via a
+relative path — do NOT copy those files into `hack_ras/tests/data/`. See
+`RAS_xsedit/tests/README.md` for the full fixture layout and instructions for
+adding new merge test cases.
+
 Do not generate synthetic test data inline in tests unless the fixture is trivially small
 (a few lines of key=value). When adding a new real-data fixture, place it in the
 appropriate existing subfolder or create a new one named after the model.
 
 ## Git Workflow
-- Do not push branches; the user pushes themselves.
+- Do not push or pull unless explicitly asked by the user.
 - `git commit -am` only stages already-tracked files. New untracked files always need
   an explicit `git add` first (`git add .` from the repo root, then `git commit`).
