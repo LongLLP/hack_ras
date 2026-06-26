@@ -571,6 +571,16 @@ def _norm_key(river: str, reach: str, station: str) -> Tuple[str, str, str]:
     return (river.strip().upper(), reach.strip().upper(), station.strip().upper())
 
 
+def _raw_sta_elev_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
+    """Return the raw #Sta/Elev= block lines verbatim from the geometry file."""
+    raw = geom.raw_lines
+    for i in range(xs._raw_line_start, xs._raw_line_end):
+        if raw[i].strip().startswith("#Sta/Elev="):
+            _, consumed = parse_sta_elev(raw, i)
+            return raw[i : i + consumed]
+    return []
+
+
 def _raw_mann_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
     """Return the raw #Mann= block lines verbatim from the geometry file."""
     raw = geom.raw_lines
@@ -659,11 +669,17 @@ def _collect_xs_pairs(
 
 def _is_trivial_config(config: MergeConfig, master: str) -> bool:
     """
-    Return True when the config has no user-defined interior breakpoints, all
-    data comes from *master*, and the master transform is identity.
+    Return True when the config results in output byte-for-byte identical to
+    the master XS — every configurable option must point to master.
 
-    For trivial configs the XS should be written verbatim from the master source
-    rather than rebuilt by _build_merged_xs_lines.
+    Checks:
+      - Geometry (sta/elev): single segment from master, identity master transform
+      - Manning's n source: master
+      - GIS cut line source: master (also governs bank stations)
+
+    Ineffective flow areas and blocked obstructions are not currently
+    configurable; they always pass through verbatim from master via
+    _scan_xs_content, so no check is needed for them.
     """
     if len(config.breakpoints) != 2:
         return False
@@ -672,7 +688,13 @@ def _is_trivial_config(config: MergeConfig, master: str) -> bool:
     if config.segment_sources[0] != master:
         return False
     t = config.transform_a if master == 'A' else config.transform_b
-    return t.is_identity()
+    if not t.is_identity():
+        return False
+    if config.mann_option != master:
+        return False
+    if config.cutline_source != master:
+        return False
+    return True
 
 
 def write_merged_geometry(
@@ -845,7 +867,22 @@ def _build_merged_xs_lines(
     out.extend(trail_for.get("XS GIS Cut Line=", []))
 
     if merged_se:
-        out.extend(_write_sta_elev_block(merged_se))
+        # When all sta/elev comes from A with an identity transform, write the
+        # raw source lines verbatim to preserve original numeric formatting
+        # (idiosyncratic spacing, ".07" vs "0.07", etc.).  Only reformat when
+        # the geometry is genuinely rebuilt from two sources or a transform is
+        # applied.
+        se_unchanged = (
+            len(config.breakpoints) == 2
+            and len(config.segment_sources) == 1
+            and config.segment_sources[0] == 'A'
+            and config.transform_a.is_identity()
+        )
+        if se_unchanged:
+            raw_se = _raw_sta_elev_lines(geom_a, xs_a)
+            out.extend(raw_se if raw_se else _write_sta_elev_block(merged_se))
+        else:
+            out.extend(_write_sta_elev_block(merged_se))
     out.extend(trail_for.get("#Sta/Elev=", []))
 
     if merged_mann is not None:

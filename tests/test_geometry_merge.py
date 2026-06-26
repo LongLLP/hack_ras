@@ -48,27 +48,119 @@ def _build_index(geom):
 
 def _sterp_configs(geom_a):
     """
-    MergeConfig for Sterp West / Upper / RS 43320, matching the inputs recorded
-    in 'Sterp Creek inputs and outputs.xlsx':
-      - Geom A = g02 (master, identity transform)
-      - Geom B = g01 (h_offset = -523)
-      - Segments: [0, 111) → A,  [111, 117.4) → B,  [117.4, end] → A
-      - Manning's n source = A,  cut-line source = A,  preserve_cutline = False
-    """
-    idx_a = _build_index(geom_a)
-    xs_a = idx_a[_norm_key("Sterp West", "Upper", "43320")]
-    end_sta = xs_a.sta_elev[-1][0]
+    Full set of MergeConfigs matching xsedit_config.json (all 10 configured XS),
+    as recorded in 'Sterp Creek inputs and outputs.xlsx'.
 
-    config = MergeConfig(
-        transform_a=Transform(),
-        transform_b=Transform(h_offset=-523.0),
-        breakpoints=[0.0, 111.0, 117.4, end_sta],
-        segment_sources=["A", "B", "A"],
-        mann_option="A",
-        cutline_source="A",
-        preserve_cutline=False,
-    )
-    return {_norm_key("Sterp West", "Upper", "43320"): config}
+    Geom A = g02 (master), Geom B = g01, master_source = 'A'.
+
+    Four of the ten configs are trivial (_is_trivial_config returns True for
+    them: 43084, 42893, 42528, 41868) and will be written verbatim from g02.
+    The remaining six are genuinely merged.
+    """
+    T = Transform  # alias for brevity
+
+    return {
+        # --- Sterp West / Upper ---
+        _norm_key("Sterp West", "Upper", "43320"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(h_offset=-523.0),
+            breakpoints=[0.0, 111.0, 117.4, 455.8023],
+            segment_sources=["A", "B", "A"],
+            mann_option="A",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "43170"): MergeConfig(
+            transform_a=T(h_offset=-222.0, v_offset=-1.0),
+            transform_b=T(),
+            breakpoints=[0.0, 88.0, 107.0, 689.8838],
+            segment_sources=["A", "B", "A"],
+            mann_option="A",
+            cutline_source="A",
+            preserve_cutline=True,
+        ),
+        _norm_key("Sterp West", "Upper", "43084"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(),
+            breakpoints=[0.0, 100.0],
+            segment_sources=["A"],
+            mann_option="A",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "42998"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(h_offset=158.0, h_scale=1.1, v_offset=-2.0),
+            breakpoints=[0.0, 261.5, 277.0, 300.0, 305.0, 669.6589],
+            segment_sources=["A", "B", "A", "B", "A"],
+            mann_option="merge",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "42893"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(),
+            breakpoints=[0.0, 620.56],
+            segment_sources=["A"],
+            mann_option="A",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "42788"): MergeConfig(
+            transform_a=T(h_offset=-20.0),
+            transform_b=T(),
+            breakpoints=[0.0, 833.0729],
+            segment_sources=["A"],
+            mann_option="B",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "42528"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(),
+            breakpoints=[0.0, 1125.249],
+            segment_sources=["A"],
+            mann_option="A",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "42268"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(),
+            breakpoints=[0.0, 1366.524],
+            segment_sources=["A"],
+            mann_option="B",
+            cutline_source="B",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "41868"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(),
+            breakpoints=[0.0, 1643.446],
+            segment_sources=["A"],
+            mann_option="A",
+            cutline_source="A",
+            preserve_cutline=False,
+        ),
+        _norm_key("Sterp West", "Upper", "41468"): MergeConfig(
+            transform_a=T(),
+            transform_b=T(),
+            breakpoints=[0.0, 1966.335],
+            segment_sources=["B"],
+            mann_option="B",
+            cutline_source="B",
+            preserve_cutline=False,
+        ),
+    }
+
+
+# Keys for all XS that have an explicit config — excluded from the verbatim
+# pass-through test, which only checks unconfigured cross-sections.
+_CONFIGURED_KEYS = {
+    _norm_key("Sterp West", "Upper", rs)
+    for rs in ("43320", "43170", "43084", "42998", "42893",
+               "42788", "42528", "42268", "41868", "41468")
+}
 
 
 # ---------------------------------------------------------------------------
@@ -141,13 +233,11 @@ def test_unmodified_xs_pass_through_verbatim(tmp_path, sterp_geoms):
     geom_out = parser.parse_file(str(out))
     idx_out = _build_index(geom_out)
 
-    modified_key = _norm_key("Sterp West", "Upper", "43320")
-
     for river in geom_a.rivers.values():
         for rch in river.reaches.values():
             for xs_a in rch.cross_sections:
                 k = _norm_key(xs_a.river, xs_a.reach, xs_a.station)
-                if k == modified_key:
+                if k in _CONFIGURED_KEYS:
                     continue
                 xs_out = idx_out[k]
                 lines_a = _xs_raw_lines(geom_a, xs_a)

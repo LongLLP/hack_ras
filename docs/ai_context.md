@@ -642,7 +642,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-06-25)*
+*(Last updated: 2026-06-25, session 2)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -660,7 +660,28 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   uses the `Hillside_Levee` conda environment.
 - `tests/test_geometry_merge.py` covers `write_merged_geometry` using Sterp Creek fixtures
   in the sibling `RAS_xsedit` repo. See `RAS_xsedit/tests/README.md` for how to add cases.
+- Test baseline is 98 passing tests (Hillside_Levee env, `pytest tests\` from hack_ras root).
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+## Future Features — Not Yet Implemented
+
+### `#XS Ineff=` (Ineffective Flow Areas) and `#Block Obstruct=` (Blocked Obstructions)
+
+These two blocks are **parsed by the geometry parser and stored in raw_lines, but the
+merge tool does not yet support modifying them**. In `_build_merged_xs_lines`, they
+are treated as interstitial content by `_scan_xs_content` — they are not listed in
+`_KEY_PREFIXES` and therefore pass through verbatim from source A unconditionally.
+
+When support is added:
+- Add `"#XS Ineff="` and `"#Block Obstruct="` to `_KEY_PREFIXES` (and `_KEY_PARSERS`)
+  in `merge.py` so that `_scan_xs_content` recognises them as key blocks.
+- Add configuration fields to `MergeConfig` (e.g. `ineff_source: str = 'A'`,
+  `obstruct_source: str = 'A'`).
+- Add handling in `_build_merged_xs_lines` to select and write the correct block from
+  the chosen source, similar to the cut-line and Manning's n logic.
+- Add the corresponding options to `XSState` in `xsedit.py` and wire them into the GUI.
+- Update `_is_trivial_config` to check the new options (currently documented in its
+  docstring as "not yet configurable").
 
 ### `geometry/merge.py` — design notes (2026-06-24)
 
@@ -718,6 +739,27 @@ West/Lower → East/East Branch).
 The `XS GIS Cut Line=` header is now written as `XS GIS Cut Line={n}` (no surrounding
 spaces), matching the format produced by HEC-RAS itself. Previously an extra leading
 space and trailing space were added, which showed up as a spurious diff on any merged XS.
+
+**`_is_trivial_config` — now checks all configurable options (2026-06-25)**
+Previously only checked geometry (segment sources + master transform). Now also checks
+`mann_option` and `cutline_source`. A config is only trivial (verbatim master pass-through)
+when ALL options point to master. Configs that only change Manning's n or the cut line
+source were silently bypassed before this fix. Ineffective flow areas and blocked
+obstructions are not yet configurable so no check is needed for them.
+
+**Verbatim `#Sta/Elev=` when geometry is unchanged (2026-06-25)**
+`_build_merged_xs_lines` now writes the raw `#Sta/Elev=` lines verbatim (via
+`_raw_sta_elev_lines`, mirroring `_raw_mann_lines`) when all station/elevation data
+comes from source A with an identity transform. Only reformats through
+`_write_sta_elev_block` when geometry is genuinely rebuilt from two sources or a
+transform is applied. This preserves idiosyncratic original spacing (e.g. `  25.802`)
+so ExamDiff shows only the blocks that actually changed.
+
+**Cut line drop when source has no cut line — by design**
+When `cutline_source='B'` and B's XS has no `XS GIS Cut Line` block,
+`build_merged_cutline` returns `None` and the cut line is omitted from the output.
+This is intentional: if the user says "use B's cut line" and B has none, the output
+has none.
 
 ## Known Constraints
 - Windows environment

@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 70 passing tests (plus any added in the current
+All tests must pass. The baseline is 98 passing tests (plus any added in the current
 session). If a new test is added, the new count becomes the baseline.
 
 The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
