@@ -642,7 +642,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-06-25, session 2)*
+*(Last updated: 2026-06-26, session 3)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -652,7 +652,11 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   position in `GeometryFile.raw_lines` (set by the parser; not semantic fields).
 - `geometry/merge.py` provides `Transform`, `MergeConfig`, `merge_sta_elev()`,
   `merge_manning()`, `build_merged_cutline()`, and `write_merged_geometry()` for
-  stitching cross-sections from two geometry files.
+  stitching cross-sections from two geometry files.  `write_merged_geometry()` returns
+  `List[str]` — a list of warning messages (empty when no gap interpolation occurred).
+- `geometry/xs_cutline_blend.py` provides `try_blend_extension()` for using the
+  non-selected geometry's cut line to extend the output cut line rather than straight-line
+  projection, when the two cut lines run in the same general alignment.
 - `geometry/xs_interp.py` is the canonical tool for mapping RAS station values to GIS
   cut-line XY coordinates; use it for any future station-referenced feature export.
 - XS Editor GUI app lives at `../RAS_xsedit/xsedit.py` (sibling to this repo); built with
@@ -685,7 +689,7 @@ When support is added:
 
 ### `geometry/merge.py` — design notes (2026-06-24)
 
-**Station/elevation merging — no interpolation at boundaries**
+**Station/elevation merging — no interpolation at boundaries, gap interpolation for empty segments**
 `merge_sta_elev()` calls `_filter_segment()` (not the old `_extract_segment()`).
 `_filter_segment` returns only *actual* source points within a segment range — no new
 points are interpolated at breakpoint boundaries.  Boundary inclusion rule:
@@ -697,6 +701,21 @@ This means a point exactly on an interior breakpoint belongs to the segment whos
 right edge it is, not the segment whose left edge it is.  The net effect: the output
 never contains fabricated elevation data; it contains only real survey points from
 the source geometries.
+
+**Exception — gap interpolation for zero-point segments (2026-06-26):**
+When `_filter_segment` returns zero points for a non-`None` segment, `merge_sta_elev`
+attempts gap interpolation: it searches the source for the nearest point strictly below
+`bp_start` and strictly above `bp_end`.  If both neighbors exist, it linearly interpolates
+elevation at exactly `bp_start` and `bp_end` and inserts those two fabricated points.
+If either neighbor is missing the segment remains empty (gap preserved).  A warning
+string describing the segment range, source, and neighbor stations is appended to
+`warnings_out` (if provided by the caller).
+
+`merge_sta_elev` accepts an optional `warnings_out: List[str]` parameter.
+`_build_merged_xs_lines` accepts and threads it through.
+`write_merged_geometry` collects all warnings into a list and **returns** it (return type
+changed from `None` to `List[str]`).  The xsedit GUI shows a `QMessageBox.warning` popup
+listing each affected segment when warnings are present.
 
 **Interstitial content ordering in `_build_merged_xs_lines`**
 `_scan_xs_content()` now returns `(initial_lines, key_segments)` where `key_segments`

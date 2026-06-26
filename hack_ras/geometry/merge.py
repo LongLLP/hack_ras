@@ -24,6 +24,7 @@ from .blocks.xs_gis import parse_cutline
 from .blocks.xs_mann import parse_mann
 from .blocks.xs_bank_sta import parse_bank_sta
 from .xs_interp import clip_xs_polyline, _cumulative_lengths
+from .xs_cutline_blend import try_blend_extension
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +65,25 @@ class Transform:
             and self.v_scale == 1.0
         )
 
+    def inverse(self) -> "Transform":
+        """Return the Transform that exactly undoes this one.
+
+        Used when swapping A/B: the alignment offset expressed from B's frame
+        becomes the negated offset expressed from A's frame.
+        h_scale reciprocates; h_offset and v_offset negate (after scaling).
+        """
+        if abs(self.h_scale) < 1e-12:
+            raise ValueError("Cannot invert a Transform with h_scale ≈ 0")
+        new_h_scale = 1.0 / self.h_scale
+        new_h_offset = -self.h_offset / self.h_scale
+        new_v_offset = -self.v_offset
+        return Transform(
+            h_offset=new_h_offset,
+            h_scale=new_h_scale,
+            v_offset=new_v_offset,
+            v_scale=self.v_scale,
+        )
+
 
 @dataclass
 class MergeConfig:
@@ -79,6 +99,9 @@ class MergeConfig:
     mann_option: str = 'merge'    # 'A', 'B', or 'merge'
     cutline_source: str = 'A'     # 'A' or 'B'
     preserve_cutline: bool = False
+    blend_cutline: bool = False
+    blend_cutline_threshold_pct: float = 10.0
+    blend_cutline_search_radius: float = 20.0
 
 
 # ---------------------------------------------------------------------------
@@ -161,12 +184,14 @@ def merge_sta_elev(
     sta_elev_b: List[Tuple[float, float]],
     breakpoints: List[float],
     segment_sources: List[Optional[str]],
+    warnings_out: Optional[List[str]] = None,
 ) -> List[Tuple[float, float]]:
     """
     Stitch station/elevation data from two (already-transformed) sources.
 
     breakpoints    : sorted station values; includes overall start and end.
     segment_sources: 'A', 'B', or None (gap) for each segment.
+    warnings_out   : if provided, gap-interpolation warnings are appended here.
     """
     if len(segment_sources) != len(breakpoints) - 1:
         raise ValueError(
@@ -187,6 +212,35 @@ def merge_sta_elev(
         # use strict left inequality so points at the boundary belong to the
         # segment whose breakpoint defines it, not the one that follows.
         segment = _filter_segment(src, bp_start, bp_end, left_inclusive=(i == 0))
+
+        if not segment:
+            # Zero source points in this segment — try gap interpolation.
+            # Find nearest neighbor strictly below bp_start and strictly above bp_end
+            # in the source's station space.
+            neighbor_lo: Optional[Tuple[float, float]] = None
+            neighbor_hi: Optional[Tuple[float, float]] = None
+            for sta, elev in src:
+                if sta < bp_start:
+                    neighbor_lo = (sta, elev)
+                elif sta > bp_end:
+                    neighbor_hi = (sta, elev)
+                    break
+            if neighbor_lo is not None and neighbor_hi is not None:
+                # Linearly interpolate elevation at bp_start and bp_end
+                lo_sta, lo_elev = neighbor_lo
+                hi_sta, hi_elev = neighbor_hi
+                span = hi_sta - lo_sta
+                t_start = (bp_start - lo_sta) / span
+                t_end = (bp_end - lo_sta) / span
+                elev_start = lo_elev + t_start * (hi_elev - lo_elev)
+                elev_end = lo_elev + t_end * (hi_elev - lo_elev)
+                segment = [(bp_start, elev_start), (bp_end, elev_end)]
+                if warnings_out is not None:
+                    warnings_out.append(
+                        f"Gap interpolation used for segment {bp_start:.3f}–{bp_end:.3f} "
+                        f"(source {source}): no source points found; interpolated from "
+                        f"({lo_sta:.3f}, {lo_elev:.3f}) to ({hi_sta:.3f}, {hi_elev:.3f})."
+                    )
 
         merged.extend(segment)
 
@@ -308,20 +362,32 @@ def build_merged_cutline(
     source_transform: Transform,
     merged_sta_start: float,
     merged_sta_end: float,
+    other_xs: Optional[CrossSection] = None,
+    blend: bool = False,
+    blend_threshold_pct: float = 10.0,
+    blend_search_radius: float = 20.0,
 ) -> Optional[XSGISCutLine]:
     """
     Build a GIS cut line for the merged cross-section.
 
     The source XS's cut line maps its original station range to GIS
     coordinates.  If the merged station range extends beyond the original,
-    the cut line is projected linearly using the tangent at the end.
+    the cut line is extended.  By default the extension is a straight-line
+    projection using the tangent at the end.  When ``blend=True`` and
+    ``other_xs`` is provided, the function first attempts to use the other
+    geometry's cut line for the extension via :func:`try_blend_extension`;
+    it falls back to straight-line projection if the blend fails validation.
 
     Parameters
     ----------
-    source_xs        : CrossSection whose cut line to use
-    source_transform : Transform applied to that source's station data
-    merged_sta_start : first station of the merged XS (in merged/display space)
-    merged_sta_end   : last station of the merged XS (in merged/display space)
+    source_xs             : CrossSection whose cut line to use
+    source_transform      : Transform applied to that source's station data
+    merged_sta_start      : first station of the merged XS (merged frame)
+    merged_sta_end        : last station of the merged XS (merged frame)
+    other_xs              : other geometry's CrossSection (for blend extension)
+    blend                 : attempt to use other_xs's cut line to extend
+    blend_threshold_pct   : max mean deviation as % of source arc length
+    blend_search_radius   : GIS-unit search radius for the handoff point
     """
     if source_xs.cutline is None or source_xs.sta_elev is None:
         return None
@@ -360,27 +426,49 @@ def build_merged_cutline(
 
     new_pts: List[Tuple[float, float]] = list(interior)
 
-    # Prepend backward extension
-    if back_dist > 1e-9:
-        dx = pts[1][0] - pts[0][0]
-        dy = pts[1][1] - pts[0][1]
-        seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-9:
-            ux, uy = dx / seg_len, dy / seg_len
-            back_pt = (pts[0][0] - back_dist * ux, pts[0][1] - back_dist * uy)
-            new_pts = [back_pt] + new_pts
+    use_blend = (
+        blend
+        and other_xs is not None
+        and other_xs.cutline is not None
+        and len(other_xs.cutline.points) >= 2
+    )
+    other_pts = other_xs.cutline.points if use_blend else []
 
-    # Append forward extension
+    # Backward extension
+    if back_dist > 1e-9:
+        ext = None
+        if use_blend:
+            ext = try_blend_extension(
+                pts, other_pts, "back", blend_threshold_pct, blend_search_radius
+            )
+        if ext:
+            new_pts = ext + new_pts
+        else:
+            dx = pts[1][0] - pts[0][0]
+            dy = pts[1][1] - pts[0][1]
+            seg_len = math.hypot(dx, dy)
+            if seg_len > 1e-9:
+                ux, uy = dx / seg_len, dy / seg_len
+                new_pts = [(pts[0][0] - back_dist * ux, pts[0][1] - back_dist * uy)] + new_pts
+
+    # Forward extension
     if fwd_dist > 1e-9:
-        dx = pts[-1][0] - pts[-2][0]
-        dy = pts[-1][1] - pts[-2][1]
-        seg_len = math.hypot(dx, dy)
-        if seg_len > 1e-9:
-            ux, uy = dx / seg_len, dy / seg_len
-            fwd_pt = (pts[-1][0] + fwd_dist * ux, pts[-1][1] + fwd_dist * uy)
-            # Avoid duplicate with interior end
-            if math.hypot(fwd_pt[0] - new_pts[-1][0], fwd_pt[1] - new_pts[-1][1]) > 1e-9:
-                new_pts.append(fwd_pt)
+        ext = None
+        if use_blend:
+            ext = try_blend_extension(
+                pts, other_pts, "fwd", blend_threshold_pct, blend_search_radius
+            )
+        if ext:
+            new_pts = new_pts + ext
+        else:
+            dx = pts[-1][0] - pts[-2][0]
+            dy = pts[-1][1] - pts[-2][1]
+            seg_len = math.hypot(dx, dy)
+            if seg_len > 1e-9:
+                ux, uy = dx / seg_len, dy / seg_len
+                fwd_pt = (pts[-1][0] + fwd_dist * ux, pts[-1][1] + fwd_dist * uy)
+                if math.hypot(fwd_pt[0] - new_pts[-1][0], fwd_pt[1] - new_pts[-1][1]) > 1e-9:
+                    new_pts.append(fwd_pt)
 
     return XSGISCutLine(len(new_pts), new_pts)
 
@@ -704,7 +792,7 @@ def write_merged_geometry(
     output_path: str,
     title: str,
     master_source: str = 'A',
-) -> None:
+) -> List[str]:
     """
     Write a merged HEC-RAS geometry file.
 
@@ -725,6 +813,7 @@ def write_merged_geometry(
         geom_master = geom_other
 
     lines: List[str] = []
+    warnings: List[str] = []
 
     # 1. Geometry header from master (replace the title line)
     for line in _extract_geom_header(geom_master):
@@ -776,6 +865,7 @@ def write_merged_geometry(
                     geom_a_for_merge, xs_a_for_merge,
                     geom_b_for_merge, xs_b_for_merge,
                     config,
+                    warnings_out=warnings,
                 )
             )
 
@@ -786,6 +876,8 @@ def write_merged_geometry(
     with open(output_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
+    return warnings
+
 
 def _build_merged_xs_lines(
     geom_a: GeometryFile,
@@ -793,6 +885,7 @@ def _build_merged_xs_lines(
     geom_b: GeometryFile,
     xs_b: CrossSection,
     config: MergeConfig,
+    warnings_out: Optional[List[str]] = None,
 ) -> List[str]:
     """Generate all output lines for one merged cross-section."""
     out: List[str] = []
@@ -816,7 +909,8 @@ def _build_merged_xs_lines(
     sta_elev_b = transform_sta_elev(xs_b.sta_elev or [], config.transform_b)
 
     merged_se = merge_sta_elev(
-        sta_elev_a, sta_elev_b, config.breakpoints, config.segment_sources
+        sta_elev_a, sta_elev_b, config.breakpoints, config.segment_sources,
+        warnings_out=warnings_out,
     )
     merged_mann = merge_manning(xs_a, xs_b, config)
 
@@ -835,11 +929,19 @@ def _build_merged_xs_lines(
             merged_cl = build_merged_cutline(
                 xs_a, config.transform_a,
                 actual_sta_start, actual_sta_end,
+                other_xs=xs_b,
+                blend=config.blend_cutline,
+                blend_threshold_pct=config.blend_cutline_threshold_pct,
+                blend_search_radius=config.blend_cutline_search_radius,
             )
         else:
             merged_cl = build_merged_cutline(
                 xs_b, config.transform_b,
                 actual_sta_start, actual_sta_end,
+                other_xs=xs_a,
+                blend=config.blend_cutline,
+                blend_threshold_pct=config.blend_cutline_threshold_pct,
+                blend_search_radius=config.blend_cutline_search_radius,
             )
 
     # Bank stations from the cutline source
