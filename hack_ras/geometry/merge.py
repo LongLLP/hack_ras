@@ -102,6 +102,8 @@ class MergeConfig:
     blend_cutline: bool = False
     blend_cutline_threshold_pct: float = 10.0
     blend_cutline_search_radius: float = 20.0
+    bank_stations_override: Optional[Tuple[float, float]] = None
+    mann_def_override: Optional[ManningDef] = None
 
 
 # ---------------------------------------------------------------------------
@@ -714,8 +716,8 @@ def _collect_xs_pairs(
 ) -> List[Tuple[str, str, str, Optional[CrossSection], Optional[CrossSection]]]:
     """
     Build an ordered list of (river, reach, station, xs_a, xs_b) tuples
-    covering all XS from both geometries, ordered by source A's file ordering
-    then any B-only XS appended per reach.
+    covering only XS that exist in source A, in A's file order.  B-only XS are
+    excluded because the output always follows A's structure.
     """
     index_a: Dict[Tuple, CrossSection] = {}
     index_b: Dict[Tuple, CrossSection] = {}
@@ -740,13 +742,7 @@ def _collect_xs_pairs(
         seen.add(k)
         result.append((river, reach, station, index_a.get(k), index_b.get(k)))
 
-    # B-only XS appended per reach
-    if geom_b:
-        for xs in _xs_in_file_order(geom_b):
-            k = _norm_key(xs.river, xs.reach, xs.station)
-            if k not in seen:
-                seen.add(k)
-                result.append((xs.river, xs.reach, xs.station, None, xs))
+    # B-only XS are excluded: the output always follows A's structure.
 
     return result
 
@@ -763,7 +759,7 @@ def _is_trivial_config(config: MergeConfig, master: str) -> bool:
     Checks:
       - Geometry (sta/elev): single segment from master, identity master transform
       - Manning's n source: master
-      - GIS cut line source: master (also governs bank stations)
+      - GIS cut line source: master
 
     Ineffective flow areas and blocked obstructions are not currently
     configurable; they always pass through verbatim from master via
@@ -879,6 +875,24 @@ def write_merged_geometry(
     return warnings
 
 
+def _insert_bank_station(
+    sta_elev: List[Tuple[float, float]], station: float
+) -> List[Tuple[float, float]]:
+    """Insert an interpolated point at station into sta_elev if not already present."""
+    if not sta_elev:
+        return sta_elev
+    if any(abs(s - station) < 1e-6 for s, _ in sta_elev):
+        return sta_elev
+    elev = _interp_elevation(sta_elev, station)
+    result = list(sta_elev)
+    for i, (s, _) in enumerate(result):
+        if s > station:
+            result.insert(i, (station, elev))
+            return result
+    result.append((station, elev))
+    return result
+
+
 def _build_merged_xs_lines(
     geom_a: GeometryFile,
     xs_a: CrossSection,
@@ -912,7 +926,16 @@ def _build_merged_xs_lines(
         sta_elev_a, sta_elev_b, config.breakpoints, config.segment_sources,
         warnings_out=warnings_out,
     )
-    merged_mann = merge_manning(xs_a, xs_b, config)
+
+    # Insert bank station override points before computing station range
+    if config.bank_stations_override is not None and merged_se:
+        merged_se = _insert_bank_station(merged_se, config.bank_stations_override[0])
+        merged_se = _insert_bank_station(merged_se, config.bank_stations_override[1])
+
+    if config.mann_def_override is not None:
+        merged_mann = config.mann_def_override
+    else:
+        merged_mann = merge_manning(xs_a, xs_b, config)
 
     if merged_se:
         actual_sta_start = merged_se[0][0]
@@ -944,14 +967,21 @@ def _build_merged_xs_lines(
                 blend_search_radius=config.blend_cutline_search_radius,
             )
 
-    # Bank stations from the cutline source
-    if config.cutline_source == 'A' and xs_a.bank_stations:
+    # Bank stations are station-space values referencing the #Sta/Elev= array.
+    # They must follow the geometry source (A = master), not the GIS cut line source.
+    # Only fall back to B's bank stations when A has none and the entire geometry is from B.
+    all_from_b = bool(config.segment_sources) and all(
+        s == 'B' for s in config.segment_sources
+    )
+    if config.bank_stations_override is not None:
+        merged_bank = config.bank_stations_override
+    elif xs_a.bank_stations and not all_from_b:
         left, right = xs_a.bank_stations
         merged_bank = (
             config.transform_a.apply_station(left),
             config.transform_a.apply_station(right),
         )
-    elif config.cutline_source == 'B' and xs_b.bank_stations:
+    elif all_from_b and xs_b.bank_stations:
         left, right = xs_b.bank_stations
         merged_bank = (
             config.transform_b.apply_station(left),
@@ -979,6 +1009,7 @@ def _build_merged_xs_lines(
             and len(config.segment_sources) == 1
             and config.segment_sources[0] == 'A'
             and config.transform_a.is_identity()
+            and config.bank_stations_override is None
         )
         if se_unchanged:
             raw_se = _raw_sta_elev_lines(geom_a, xs_a)
@@ -993,12 +1024,12 @@ def _build_merged_xs_lines(
         # Fall back to formatted output only when the horizontal transform
         # shifts stations (which would make the raw stations incorrect).
         wrote_raw_mann = False
-        if config.mann_option == 'A' and config.transform_a.is_identity():
+        if config.mann_def_override is None and config.mann_option == 'A' and config.transform_a.is_identity():
             raw_mn = _raw_mann_lines(geom_a, xs_a)
             if raw_mn:
                 out.extend(raw_mn)
                 wrote_raw_mann = True
-        elif config.mann_option == 'B' and config.transform_b.is_identity():
+        elif config.mann_def_override is None and config.mann_option == 'B' and config.transform_b.is_identity():
             raw_mn = _raw_mann_lines(geom_b, xs_b)
             if raw_mn:
                 out.extend(raw_mn)
