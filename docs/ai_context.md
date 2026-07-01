@@ -724,6 +724,25 @@ station.
   wired into the GUI) are unaffected in spirit — override insertion still happens before
   the rounding pass, and the final snap step is a no-op for them since the override values
   already exactly match a point that was just inserted.
+- **`_write_mann_block()` now wraps at whole-triplet boundaries, not a flat 10-values/line.**
+  Confirmed by exhaustively parsing every `#Mann=` block in `tests/data/Baxter/Baxter.g02`
+  (173 blocks) and `tests/data/Beaver/beaver.g01` (57 blocks): every real HEC-RAS data line
+  is 24, 48, or 72 characters — a whole number of triplets (max 3 per line) — never 80.
+  The old flat `range(0, len(values), 10)` chunking (correct for 2-field `#Sta/Elev=`
+  pairs, since 10 is a multiple of 2) desynced 3-field Manning triplets across the line
+  break whenever the entry count wasn't a multiple of 10 — e.g. a station would end one
+  line while its n-value and position code opened the next. HEC-RAS's own reader does not
+  tolerate this, unlike our own `_read_n_floats`, which concatenates fields across lines
+  regardless of boundary and so never caught it in round-trip tests. Confirmed against a
+  cross-section HEC-RAS itself authored with a negative starting station and a genuine
+  method=-1 n-value breakpoint at literal station 0 (not a "left-edge sentinel" — method=0's
+  first triplet is always a real station that happens to equal the XS's own left edge, not a
+  placeholder) that this specific station-0-mid-array shape is valid to HEC-RAS on its own;
+  whether the triplet-wrap fix fully resolves the FLT_MAX corruption seen in the RAS GUI for
+  such cases is still unconfirmed — a separate "only the first ~3 n-value entries render in
+  the cross-section points table" limitation was also observed and may be a distinct,
+  unrelated HEC-RAS UI cap. `#XS Ineff=` blocks are also triplet-based and likely have the
+  same line-wrap issue, but that was explicitly out of scope for this fix.
 
 ### Session 4 changes to `geometry/merge.py` (2026-06-27)
 - **Bank station bug fix**: bank stations are station-space values that index into

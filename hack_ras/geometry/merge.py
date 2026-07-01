@@ -471,8 +471,17 @@ def _write_mann_block(mann_def: ManningDef) -> List[str]:
     values: List[float] = []
     for sta, n_val in entries:
         values.extend([sta, n_val, 0.0])
-    for i in range(0, len(values), 10):
-        lines.append("".join(_fmt(v, 8) for v in values[i : i + 10]) + "\n")
+    # HEC-RAS never splits a (station, n_value, position_code) triplet across
+    # two lines — it packs whole triplets, up to 3 per line (9 of the 10
+    # available 8-char fields), then wraps. Confirmed by exhaustive inspection
+    # of every #Mann= block in tests/data/Baxter/Baxter.g02 and
+    # tests/data/Beaver/beaver.g01: every data line is 24, 48, or 72 chars —
+    # never 80. A flat 10-values-per-line chunk (fine for 2-field #Sta/Elev=
+    # pairs) desyncs a triplet's fields across the line break whenever the
+    # entry count isn't a multiple of 10, which HEC-RAS's own reader cannot
+    # recover from.
+    for i in range(0, len(values), 9):
+        lines.append("".join(_fmt(v, 8) for v in values[i : i + 9]) + "\n")
     return lines
 
 
