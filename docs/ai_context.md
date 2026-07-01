@@ -642,7 +642,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-06-27, session 4)*
+*(Last updated: 2026-07-01, session 5)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -653,7 +653,7 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
 - `geometry/merge.py` provides `Transform`, `MergeConfig`, `merge_sta_elev()`,
   `merge_manning()`, `build_merged_cutline()`, and `write_merged_geometry()` for
   stitching cross-sections from two geometry files.  `write_merged_geometry()` returns
-  `List[str]` — a list of warning messages (empty when no gap interpolation occurred).
+  `None` — see session 5 below for why the old warnings-list return was removed.
 - `geometry/xs_cutline_blend.py` provides `try_blend_extension()` for using the
   non-selected geometry's cut line to extend the output cut line rather than straight-line
   projection, when the two cut lines run in the same general alignment.
@@ -664,12 +664,66 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   uses the `Hillside_Levee` conda environment.
 - `tests/test_geometry_merge.py` covers `write_merged_geometry` using Sterp Creek fixtures
   in the sibling `RAS_xsedit` repo. See `RAS_xsedit/tests/README.md` for how to add cases.
-- **Sterp Creek test fixtures are stale** — `tests/data/xsedit_config.json` (in RAS_xsedit)
-  and the corresponding `g03` known-good output need to be regenerated after prior configs
-  used non-identity `transform_a` values that no longer exist in the GUI.  Until then,
-  `test_merge_matches_known_good_output` is excluded via `--ignore` and the effective
-  test baseline is 95 passing (will return to 98+ after fixture refresh).
+- **`SterpCreek.g03` (in RAS_xsedit `tests/data/Sterp Creek/`) is stale** — it predates the
+  session 5 redesign (H Scale removal, always-interpolate-at-breakpoints, rounding,
+  bank/Manning's snapping) and will not byte-for-byte match new output.
+  `test_merge_matches_known_good_output` is expected to fail until that fixture is
+  regenerated; the other two tests in `test_geometry_merge.py` (`test_reach_order_preserved`,
+  `test_unmodified_xs_pass_through_verbatim`) don't depend on exact byte content and pass.
+  Effective baseline: 97 passing, 1 known-failing (98 total).
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 5 changes to `geometry/merge.py` (2026-07-01)
+
+Triggered by a real bug: in a merged cross-section, a Manning's n breakpoint was written
+at a station (e.g. 0) that did not exist anywhere in the `#Sta/Elev=` block, which HEC-RAS
+cannot open — n-value changes and bank stations must land exactly on a cross-section
+station.
+
+- **H Scale removed.**  `Transform` no longer has `h_scale`; stations are only ever
+  translated (`new_station = old_station + h_offset`), never scaled.  `apply_station()`,
+  `to_orig_station()`, and `inverse()` are correspondingly simpler — `inverse()` can no
+  longer raise (there was nothing left to divide by zero).  The GUI's "H Scale" spinbox
+  and its color-coding are gone; `MergeConfig`/`XSState`/JSON configs no longer carry
+  `h_scale`.  Older config JSON files with an `h_scale` key still load fine — the key is
+  simply never read.
+- **`merge_sta_elev()` rewritten — every segment now guarantees a vertex at its own start
+  station.**  The old version only included points that happened to already exist in the
+  source data within a segment's range (`_filter_segment`, with a special left-inclusive
+  case for the first segment), plus an ad hoc "gap interpolation" fallback for segments
+  that turned out to have zero points.  The new version always calls `_vertex_at()` for
+  each segment's start station — reusing an exact source point if one lands there (after
+  rounding), otherwise interpolating — so a real vertex exists at every breakpoint
+  regardless of whether the two source surveys happen to share a station there.  The old
+  gap-interpolation fallback and its `warnings_out` plumbing are gone: what used to be an
+  unusual, warned-about case (a segment landing on zero source points) is now simply the
+  normal case for every segment.  `write_merged_geometry()` therefore returns `None`
+  instead of a warnings list, and the GUI's post-export "Gap interpolation" popup is gone.
+  A breakpoint's vertex always comes from the segment that *starts* there (not the one
+  that ends there), so each station appears exactly once.
+- **Rounding to 2 decimals is now the single definition of "does this station exist."**
+  `_round_sta()` / `_stations_equal()` in `merge.py` replace several different ad hoc
+  epsilon tolerances (1e-6 in `_insert_bank_station`, 1e-9 in `_n_at_station` and the old
+  Manning's dedup check) that didn't agree with each other or with the 2-decimal precision
+  actually written to the file.  For any cross-section that isn't a verbatim pass-through
+  of A, the finalized `#Sta/Elev=` station/elevation values are rounded to 2 decimals
+  before anything downstream (bank stations, Manning's n, `_write_sta_elev_block`) uses
+  them, so everything that follows agrees with what's on disk.
+- **Bank stations and Manning's n now snap onto the finalized `#Sta/Elev=` block** via
+  `_snap_to_nearest_station()`, instead of being computed independently and hoped to land
+  on a real station.  This is the direct fix for the reported bug.
+- **Manning's n merge simplified — no more `mann_option`.**  `merge_manning()` no longer
+  takes an `'A'` / `'B'` / `'merge'` choice; it always merges per-segment (using the same
+  source assignment as the geometry) and always writes method `-1`.  The old `'A'`/`'B'`
+  branches let a user pick "Manning's from B" while the geometry segments said otherwise,
+  which never made sense.  `_transform_manning_def()` and the raw-`#Mann=`-passthrough
+  special case in `_build_merged_xs_lines` (which depended on `mann_option`) are deleted;
+  the GUI's Manning's n radio buttons are gone along with `MergeConfig.mann_option` /
+  `XSState.mann_option`.
+- **`bank_stations_override` and `mann_def_override`** (existing `MergeConfig` fields, not
+  wired into the GUI) are unaffected in spirit — override insertion still happens before
+  the rounding pass, and the final snap step is a no-op for them since the override values
+  already exactly match a point that was just inserted.
 
 ### Session 4 changes to `geometry/merge.py` (2026-06-27)
 - **Bank station bug fix**: bank stations are station-space values that index into
@@ -707,33 +761,14 @@ When support is added:
 
 ### `geometry/merge.py` — design notes (2026-06-24)
 
-**Station/elevation merging — no interpolation at boundaries, gap interpolation for empty segments**
-`merge_sta_elev()` calls `_filter_segment()` (not the old `_extract_segment()`).
-`_filter_segment` returns only *actual* source points within a segment range — no new
-points are interpolated at breakpoint boundaries.  Boundary inclusion rule:
-
-- Segment 0 (first): `bp_start <= station <= bp_end` (left boundary inclusive)
-- Segment i > 0: `bp_start < station <= bp_end` (left boundary exclusive)
-
-This means a point exactly on an interior breakpoint belongs to the segment whose
-right edge it is, not the segment whose left edge it is.  The net effect: the output
-never contains fabricated elevation data; it contains only real survey points from
-the source geometries.
-
-**Exception — gap interpolation for zero-point segments (2026-06-26):**
-When `_filter_segment` returns zero points for a non-`None` segment, `merge_sta_elev`
-attempts gap interpolation: it searches the source for the nearest point strictly below
-`bp_start` and strictly above `bp_end`.  If both neighbors exist, it linearly interpolates
-elevation at exactly `bp_start` and `bp_end` and inserts those two fabricated points.
-If either neighbor is missing the segment remains empty (gap preserved).  A warning
-string describing the segment range, source, and neighbor stations is appended to
-`warnings_out` (if provided by the caller).
-
-`merge_sta_elev` accepts an optional `warnings_out: List[str]` parameter.
-`_build_merged_xs_lines` accepts and threads it through.
-`write_merged_geometry` collects all warnings into a list and **returns** it (return type
-changed from `None` to `List[str]`).  The xsedit GUI shows a `QMessageBox.warning` popup
-listing each affected segment when warnings are present.
+**Station/elevation merging — see session 5 (2026-07-01) above for the current design.**
+`merge_sta_elev()` now guarantees a vertex at every segment's start station via
+`_vertex_at()` (exact source point if one rounds to that station, else interpolated).
+The `_filter_segment()`/left-inclusive rule and the zero-point "gap interpolation"
+fallback described in earlier revisions of this note no longer exist — interpolating a
+guaranteed vertex is now the normal path for every segment, not an exceptional fallback,
+so there's nothing left to warn about.  `merge_sta_elev` and `write_merged_geometry` no
+longer take/return a warnings list.
 
 **Interstitial content ordering in `_build_merged_xs_lines`**
 `_scan_xs_content()` now returns `(initial_lines, key_segments)` where `key_segments`
@@ -751,13 +786,12 @@ to drift to the very end of the XS block.
 `_scan_xs_content` also stops immediately on any `River Reach=` line, preventing the
 next reach's header from leaking into the last XS of a reach.
 
-**Verbatim Manning's n when not merging**
-`_raw_mann_lines(geom, xs)` extracts the raw `#Mann=` block lines from the source
-file.  In `_build_merged_xs_lines`, when `mann_option` is `'A'` or `'B'` *and* the
-horizontal transform for that source is identity (h_scale≈1, h_offset≈0), those raw
-lines are written directly instead of being re-formatted by `_write_mann_block`.  This
-preserves original numeric formatting (e.g. `.07` stays `.07` rather than becoming
-`0.07`), which is important for diff-based review workflows.
+**Verbatim Manning's n when not merging — removed in session 5 (2026-07-01).**
+`mann_option` (and the `_raw_mann_lines()` verbatim-passthrough path keyed off it) no
+longer exists.  Manning's n for any non-trivial config is always rebuilt via
+`merge_manning()` and written through `_write_mann_block()`; only a fully trivial XS
+(handled by `write_merged_geometry` before `_build_merged_xs_lines` is ever called) still
+passes through byte-for-byte, `#Mann=` included.
 
 **`write_merged_geometry` — B-only XS no longer corrupt reach ordering**
 The `xs_master is None` guard (which skips XS that only exist in the secondary

@@ -7,7 +7,7 @@ Public API
 Transform        : horizontal / vertical offset and scale for one source
 MergeConfig      : all user settings for one cross-section merge
 merge_sta_elev() : stitch station/elevation data from two sources
-merge_manning()  : merge Manning's n according to the chosen option
+merge_manning()  : merge Manning's n, snapped onto the merged station/elevation data
 build_merged_cutline() : extend/clip a GIS cut line to a new station range
 write_merged_geometry(): write a complete merged geometry file
 """
@@ -34,53 +34,38 @@ from .xs_cutline_blend import try_blend_extension
 @dataclass
 class Transform:
     """
-    Linear horizontal and vertical transformation for a cross-section.
+    Horizontal and vertical translation for a cross-section.
 
-    Applied in order:
-        new_station   = old_station   * h_scale + h_offset
+    Applied as:
+        new_station   = old_station   + h_offset
         new_elevation = old_elevation * v_scale + v_offset
     """
     h_offset: float = 0.0
-    h_scale: float = 1.0
     v_offset: float = 0.0
     v_scale: float = 1.0
 
     def apply_station(self, sta: float) -> float:
-        return sta * self.h_scale + self.h_offset
+        return sta + self.h_offset
 
     def apply_elevation(self, elev: float) -> float:
         return elev * self.v_scale + self.v_offset
 
     def to_orig_station(self, new_sta: float) -> float:
         """Invert the station transform: new_sta → original station."""
-        if abs(self.h_scale) < 1e-12:
-            return 0.0
-        return (new_sta - self.h_offset) / self.h_scale
+        return new_sta - self.h_offset
 
     def is_identity(self) -> bool:
-        return (
-            self.h_offset == 0.0
-            and self.h_scale == 1.0
-            and self.v_offset == 0.0
-            and self.v_scale == 1.0
-        )
+        return self.h_offset == 0.0 and self.v_offset == 0.0 and self.v_scale == 1.0
 
     def inverse(self) -> "Transform":
         """Return the Transform that exactly undoes this one.
 
         Used when swapping A/B: the alignment offset expressed from B's frame
         becomes the negated offset expressed from A's frame.
-        h_scale reciprocates; h_offset and v_offset negate (after scaling).
         """
-        if abs(self.h_scale) < 1e-12:
-            raise ValueError("Cannot invert a Transform with h_scale ≈ 0")
-        new_h_scale = 1.0 / self.h_scale
-        new_h_offset = -self.h_offset / self.h_scale
-        new_v_offset = -self.v_offset
         return Transform(
-            h_offset=new_h_offset,
-            h_scale=new_h_scale,
-            v_offset=new_v_offset,
+            h_offset=-self.h_offset,
+            v_offset=-self.v_offset,
             v_scale=self.v_scale,
         )
 
@@ -96,7 +81,6 @@ class MergeConfig:
     # Source for each segment between consecutive breakpoints.
     # 'A', 'B', or None (gap).  len == len(breakpoints) - 1.
     segment_sources: List[Optional[str]]
-    mann_option: str = 'merge'    # 'A', 'B', or 'merge'
     cutline_source: str = 'A'     # 'A' or 'B'
     preserve_cutline: bool = False
     blend_cutline: bool = False
@@ -110,22 +94,29 @@ class MergeConfig:
 # Station / elevation helpers
 # ---------------------------------------------------------------------------
 
-def _filter_segment(
-    sta_elev: List[Tuple[float, float]],
-    bp_start: float,
-    bp_end: float,
-    left_inclusive: bool,
-) -> List[Tuple[float, float]]:
-    """
-    Return actual source points within the segment.  No interpolation.
+#: Decimal places HEC-RAS station/elevation text fields are rounded to for any
+#: cross-section this tool actually rebuilds.  This is the single definition of
+#: "does station X exist in the output" used by segment stitching, bank station
+#: snapping, and Manning's n snapping alike.
+_OUTPUT_DECIMALS = 2
 
-    left_inclusive – True for the first segment (includes the global start);
-                     False for subsequent segments (first point after the boundary).
-    """
-    if left_inclusive:
-        return [(s, e) for s, e in sta_elev if bp_start <= s <= bp_end]
-    else:
-        return [(s, e) for s, e in sta_elev if bp_start < s <= bp_end]
+
+def _round_sta(v: float) -> float:
+    return round(v, _OUTPUT_DECIMALS)
+
+
+def _stations_equal(a: float, b: float) -> bool:
+    """True when *a* and *b* round to the same output station."""
+    return _round_sta(a) == _round_sta(b)
+
+
+def _snap_to_nearest_station(
+    candidate: float, sta_elev: List[Tuple[float, float]]
+) -> float:
+    """Return whichever station already in *sta_elev* is closest to *candidate*."""
+    if not sta_elev:
+        return candidate
+    return min((s for s, _ in sta_elev), key=lambda s: abs(s - candidate))
 
 
 def _interp_elevation(
@@ -147,27 +138,25 @@ def _interp_elevation(
     return elevations[-1]
 
 
-def _extract_segment(
-    sta_elev: List[Tuple[float, float]],
-    sta_start: float,
-    sta_end: float,
-) -> List[Tuple[float, float]]:
+def _vertex_at(
+    sta_elev: List[Tuple[float, float]], station: float
+) -> Optional[Tuple[float, float]]:
     """
-    Return station/elevation pairs within [sta_start, sta_end].
-    Endpoints are interpolated; interior points are preserved as-is.
+    Return the (station, elevation) vertex at *station* within *sta_elev*.
+
+    If a source point already lands on *station* (after rounding to output
+    precision), that point's elevation is reused so the value is not
+    fabricated.  Otherwise the elevation is linearly interpolated so a real
+    vertex always exists there — required because HEC-RAS demands that
+    segment breakpoints, bank stations, and Manning's n changes land exactly
+    on a cross-section station.  Returns None only when *sta_elev* is empty.
     """
-    if not sta_elev or sta_end <= sta_start:
-        return []
-
-    result: List[Tuple[float, float]] = []
-    result.append((sta_start, _interp_elevation(sta_elev, sta_start)))
-
-    for sta, elev in sta_elev:
-        if sta_start < sta < sta_end:
-            result.append((sta, elev))
-
-    result.append((sta_end, _interp_elevation(sta_elev, sta_end)))
-    return result
+    if not sta_elev:
+        return None
+    for s, e in sta_elev:
+        if _stations_equal(s, station):
+            return (station, e)
+    return (station, _interp_elevation(sta_elev, station))
 
 
 def transform_sta_elev(
@@ -186,14 +175,23 @@ def merge_sta_elev(
     sta_elev_b: List[Tuple[float, float]],
     breakpoints: List[float],
     segment_sources: List[Optional[str]],
-    warnings_out: Optional[List[str]] = None,
 ) -> List[Tuple[float, float]]:
     """
     Stitch station/elevation data from two (already-transformed) sources.
 
     breakpoints    : sorted station values; includes overall start and end.
     segment_sources: 'A', 'B', or None (gap) for each segment.
-    warnings_out   : if provided, gap-interpolation warnings are appended here.
+
+    Every non-gap segment is guaranteed a vertex at its own start station,
+    taken from its assigned source — an exact source point if one lands there
+    (see _vertex_at), otherwise interpolated.  This is what lets a segment
+    breakpoint (and, downstream, a bank station or Manning's n change) land
+    exactly on a cross-section station even when the two source surveys don't
+    share a common station there.  The final segment also gets a vertex at
+    the overall end station.  A breakpoint's vertex always comes from the
+    segment that *starts* there, not the one that ends there, so each station
+    appears exactly once in the output.  Gap segments (source=None) contribute
+    nothing, leaving a straight chord between the surrounding real vertices.
     """
     if len(segment_sources) != len(breakpoints) - 1:
         raise ValueError(
@@ -201,6 +199,7 @@ def merge_sta_elev(
         )
 
     merged: List[Tuple[float, float]] = []
+    last_index = len(segment_sources) - 1
 
     for i, source in enumerate(segment_sources):
         bp_start = breakpoints[i]
@@ -210,41 +209,21 @@ def merge_sta_elev(
             continue
 
         src = sta_elev_a if source == 'A' else sta_elev_b
-        # First segment includes points at the left boundary; subsequent segments
-        # use strict left inequality so points at the boundary belong to the
-        # segment whose breakpoint defines it, not the one that follows.
-        segment = _filter_segment(src, bp_start, bp_end, left_inclusive=(i == 0))
+        if not src:
+            continue
 
-        if not segment:
-            # Zero source points in this segment — try gap interpolation.
-            # Find nearest neighbor strictly below bp_start and strictly above bp_end
-            # in the source's station space.
-            neighbor_lo: Optional[Tuple[float, float]] = None
-            neighbor_hi: Optional[Tuple[float, float]] = None
-            for sta, elev in src:
-                if sta < bp_start:
-                    neighbor_lo = (sta, elev)
-                elif sta > bp_end:
-                    neighbor_hi = (sta, elev)
-                    break
-            if neighbor_lo is not None and neighbor_hi is not None:
-                # Linearly interpolate elevation at bp_start and bp_end
-                lo_sta, lo_elev = neighbor_lo
-                hi_sta, hi_elev = neighbor_hi
-                span = hi_sta - lo_sta
-                t_start = (bp_start - lo_sta) / span
-                t_end = (bp_end - lo_sta) / span
-                elev_start = lo_elev + t_start * (hi_elev - lo_elev)
-                elev_end = lo_elev + t_end * (hi_elev - lo_elev)
-                segment = [(bp_start, elev_start), (bp_end, elev_end)]
-                if warnings_out is not None:
-                    warnings_out.append(
-                        f"Gap interpolation used for segment {bp_start:.3f}–{bp_end:.3f} "
-                        f"(source {source}): no source points found; interpolated from "
-                        f"({lo_sta:.3f}, {lo_elev:.3f}) to ({hi_sta:.3f}, {hi_elev:.3f})."
-                    )
+        start_vertex = _vertex_at(src, bp_start)
+        if start_vertex is not None:
+            merged.append(start_vertex)
 
-        merged.extend(segment)
+        merged.extend((s, e) for s, e in src if bp_start < s < bp_end)
+
+        if i == last_index:
+            end_vertex = _vertex_at(src, bp_end)
+            if end_vertex is not None and (
+                not merged or not _stations_equal(merged[-1][0], end_vertex[0])
+            ):
+                merged.append(end_vertex)
 
     return merged
 
@@ -253,24 +232,6 @@ def merge_sta_elev(
 # Manning's n helpers
 # ---------------------------------------------------------------------------
 
-def _transform_manning_def(
-    mann_def: Optional[ManningDef], t: Transform
-) -> Optional[ManningDef]:
-    """
-    Return a copy of *mann_def* with each station value transformed by *t*.
-
-    Manning's n values are roughness coefficients; they are NOT affected by
-    vertical scale or offset.  Only station values use the horizontal transform.
-    The original method integer is preserved for roundtrip accuracy.
-    """
-    if mann_def is None:
-        return None
-    return ManningDef(
-        method=mann_def.method,
-        entries=[(t.apply_station(s), n) for s, n in mann_def.entries],
-    )
-
-
 def _n_at_station(entries: List[Tuple[float, float]], station: float) -> Optional[float]:
     """
     Step-function lookup: return the n_value whose station is the largest
@@ -278,7 +239,7 @@ def _n_at_station(entries: List[Tuple[float, float]], station: float) -> Optiona
     """
     result: Optional[float] = None
     for sta, n in entries:
-        if sta <= station + 1e-9:
+        if _round_sta(sta) <= _round_sta(station):
             result = n
         else:
             break
@@ -312,25 +273,20 @@ def merge_manning(
     xs_a: CrossSection,
     xs_b: CrossSection,
     config: MergeConfig,
+    merged_se: List[Tuple[float, float]],
 ) -> Optional[ManningDef]:
     """
-    Merge Manning's n values according to config.mann_option.
+    Merge Manning's n values for a modified cross-section.
 
-    'A' / 'B':  Return that source's ManningDef with station transform applied.
-                The original method integer is preserved for roundtrip accuracy.
-
-    'merge':    Per segment, pull n-values from the corresponding source.
-                Always produces method=-1 output ("Horizontal Variation" ON),
-                since merged segments may come from different sources and carry
-                arbitrary breakpoints.  At each segment boundary, a value is
-                explicitly inserted so the step function is defined at the join.
+    Per segment, pull n-values from that segment's assigned source (the same
+    source used for the station/elevation data there), then snap each entry's
+    station onto the nearest station actually present in *merged_se* — the
+    already-finalized output station/elevation block.  This guarantees every
+    n-value change lands exactly on a cross-section station, as HEC-RAS
+    requires.  Always produces method=-1 output ("Horizontal Variation" ON),
+    since merged segments may come from different sources and carry arbitrary
+    breakpoints.
     """
-    if config.mann_option == 'A':
-        return _transform_manning_def(xs_a.manning_def, config.transform_a)
-    if config.mann_option == 'B':
-        return _transform_manning_def(xs_b.manning_def, config.transform_b)
-
-    # --- 'merge' option ---
     result: List[Tuple[float, float]] = []
 
     for i, source in enumerate(config.segment_sources):
@@ -347,8 +303,9 @@ def merge_manning(
             continue
 
         for sta, n_val in _mann_def_to_entries_in_segment(mann_def, t, bp_start, bp_end):
-            if not result or abs(result[-1][0] - sta) > 1e-9:
-                result.append((sta, n_val))
+            snapped = _snap_to_nearest_station(sta, merged_se)
+            if not result or not _stations_equal(result[-1][0], snapped):
+                result.append((snapped, n_val))
 
     if not result:
         return None
@@ -671,16 +628,6 @@ def _raw_sta_elev_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
     return []
 
 
-def _raw_mann_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
-    """Return the raw #Mann= block lines verbatim from the geometry file."""
-    raw = geom.raw_lines
-    for i in range(xs._raw_line_start, xs._raw_line_end):
-        if raw[i].strip().startswith("#Mann="):
-            _, consumed = parse_mann(raw, i)
-            return raw[i : i + consumed]
-    return []
-
-
 def _xs_raw_lines(geom: GeometryFile, xs: CrossSection) -> List[str]:
     """
     Raw lines for a single XS, trimmed to exclude trailing reach-header content.
@@ -757,8 +704,9 @@ def _is_trivial_config(config: MergeConfig, master: str) -> bool:
     the master XS — every configurable option must point to master.
 
     Checks:
-      - Geometry (sta/elev): single segment from master, identity master transform
-      - Manning's n source: master
+      - Geometry (sta/elev): single segment from master, identity master transform.
+        Manning's n is derived from the same segment sources, so a trivial
+        geometry config implies trivial Manning's n too — no separate check.
       - GIS cut line source: master
 
     Ineffective flow areas and blocked obstructions are not currently
@@ -774,8 +722,6 @@ def _is_trivial_config(config: MergeConfig, master: str) -> bool:
     t = config.transform_a if master == 'A' else config.transform_b
     if not t.is_identity():
         return False
-    if config.mann_option != master:
-        return False
     if config.cutline_source != master:
         return False
     return True
@@ -788,7 +734,7 @@ def write_merged_geometry(
     output_path: str,
     title: str,
     master_source: str = 'A',
-) -> List[str]:
+) -> None:
     """
     Write a merged HEC-RAS geometry file.
 
@@ -809,7 +755,6 @@ def write_merged_geometry(
         geom_master = geom_other
 
     lines: List[str] = []
-    warnings: List[str] = []
 
     # 1. Geometry header from master (replace the title line)
     for line in _extract_geom_header(geom_master):
@@ -861,7 +806,6 @@ def write_merged_geometry(
                     geom_a_for_merge, xs_a_for_merge,
                     geom_b_for_merge, xs_b_for_merge,
                     config,
-                    warnings_out=warnings,
                 )
             )
 
@@ -872,8 +816,6 @@ def write_merged_geometry(
     with open(output_path, "w", encoding="utf-8") as f:
         f.writelines(lines)
 
-    return warnings
-
 
 def _insert_bank_station(
     sta_elev: List[Tuple[float, float]], station: float
@@ -881,7 +823,7 @@ def _insert_bank_station(
     """Insert an interpolated point at station into sta_elev if not already present."""
     if not sta_elev:
         return sta_elev
-    if any(abs(s - station) < 1e-6 for s, _ in sta_elev):
+    if any(_stations_equal(s, station) for s, _ in sta_elev):
         return sta_elev
     elev = _interp_elevation(sta_elev, station)
     result = list(sta_elev)
@@ -899,7 +841,6 @@ def _build_merged_xs_lines(
     geom_b: GeometryFile,
     xs_b: CrossSection,
     config: MergeConfig,
-    warnings_out: Optional[List[str]] = None,
 ) -> List[str]:
     """Generate all output lines for one merged cross-section."""
     out: List[str] = []
@@ -924,18 +865,30 @@ def _build_merged_xs_lines(
 
     merged_se = merge_sta_elev(
         sta_elev_a, sta_elev_b, config.breakpoints, config.segment_sources,
-        warnings_out=warnings_out,
     )
 
-    # Insert bank station override points before computing station range
+    # Insert bank station override points before rounding, so the interpolation
+    # that locates them uses full source precision.
     if config.bank_stations_override is not None and merged_se:
         merged_se = _insert_bank_station(merged_se, config.bank_stations_override[0])
         merged_se = _insert_bank_station(merged_se, config.bank_stations_override[1])
 
-    if config.mann_def_override is not None:
-        merged_mann = config.mann_def_override
-    else:
-        merged_mann = merge_manning(xs_a, xs_b, config)
+    # When all sta/elev comes from A with an identity transform, the source's
+    # own raw lines are written verbatim (see step 4) to preserve original
+    # numeric formatting.  In that case leave merged_se unrounded too, since it
+    # already exactly matches what gets written.  Otherwise round every station
+    # and elevation to output precision — this becomes the single source of
+    # truth that bank stations and Manning's n breakpoints below are snapped
+    # onto, guaranteeing they land exactly on a station HEC-RAS will see.
+    se_unchanged = (
+        len(config.breakpoints) == 2
+        and len(config.segment_sources) == 1
+        and config.segment_sources[0] == 'A'
+        and config.transform_a.is_identity()
+        and config.bank_stations_override is None
+    )
+    if not se_unchanged:
+        merged_se = [(_round_sta(s), round(e, _OUTPUT_DECIMALS)) for s, e in merged_se]
 
     if merged_se:
         actual_sta_start = merged_se[0][0]
@@ -943,6 +896,11 @@ def _build_merged_xs_lines(
     else:
         actual_sta_start = config.breakpoints[0]
         actual_sta_end = config.breakpoints[-1]
+
+    if config.mann_def_override is not None:
+        merged_mann = config.mann_def_override
+    else:
+        merged_mann = merge_manning(xs_a, xs_b, config, merged_se)
 
     if config.preserve_cutline:
         source_xs = xs_a if config.cutline_source == 'A' else xs_b
@@ -990,6 +948,14 @@ def _build_merged_xs_lines(
     else:
         merged_bank = None
 
+    # Bank stations must land exactly on a station in the block that's about to
+    # be written, so snap them onto the nearest station actually present there.
+    if merged_bank is not None and merged_se:
+        merged_bank = (
+            _snap_to_nearest_station(merged_bank[0], merged_se),
+            _snap_to_nearest_station(merged_bank[1], merged_se),
+        )
+
     # 4. Write each key block followed by its original interstitial lines.
     #    This preserves the exact position of every non-key line from the source
     #    (e.g. "Node Last Edited Time=" stays between cutline and #Sta/Elev=,
@@ -999,19 +965,9 @@ def _build_merged_xs_lines(
     out.extend(trail_for.get("XS GIS Cut Line=", []))
 
     if merged_se:
-        # When all sta/elev comes from A with an identity transform, write the
-        # raw source lines verbatim to preserve original numeric formatting
-        # (idiosyncratic spacing, ".07" vs "0.07", etc.).  Only reformat when
-        # the geometry is genuinely rebuilt from two sources or a transform is
-        # applied.
-        se_unchanged = (
-            len(config.breakpoints) == 2
-            and len(config.segment_sources) == 1
-            and config.segment_sources[0] == 'A'
-            and config.transform_a.is_identity()
-            and config.bank_stations_override is None
-        )
         if se_unchanged:
+            # Write the raw source lines verbatim to preserve original numeric
+            # formatting (idiosyncratic spacing, ".07" vs "0.07", etc.).
             raw_se = _raw_sta_elev_lines(geom_a, xs_a)
             out.extend(raw_se if raw_se else _write_sta_elev_block(merged_se))
         else:
@@ -1019,23 +975,7 @@ def _build_merged_xs_lines(
     out.extend(trail_for.get("#Sta/Elev=", []))
 
     if merged_mann is not None:
-        # When not merging Manning's n, write the source's raw lines verbatim
-        # so numeric formatting (e.g. ".07" vs "0.07") is unchanged.
-        # Fall back to formatted output only when the horizontal transform
-        # shifts stations (which would make the raw stations incorrect).
-        wrote_raw_mann = False
-        if config.mann_def_override is None and config.mann_option == 'A' and config.transform_a.is_identity():
-            raw_mn = _raw_mann_lines(geom_a, xs_a)
-            if raw_mn:
-                out.extend(raw_mn)
-                wrote_raw_mann = True
-        elif config.mann_def_override is None and config.mann_option == 'B' and config.transform_b.is_identity():
-            raw_mn = _raw_mann_lines(geom_b, xs_b)
-            if raw_mn:
-                out.extend(raw_mn)
-                wrote_raw_mann = True
-        if not wrote_raw_mann:
-            out.extend(_write_mann_block(merged_mann))
+        out.extend(_write_mann_block(merged_mann))
     out.extend(trail_for.get("#Mann=", []))
 
     if merged_bank is not None:
