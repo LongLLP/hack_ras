@@ -8,6 +8,7 @@ Transform        : horizontal / vertical offset and scale for one source
 MergeConfig      : all user settings for one cross-section merge
 merge_sta_elev() : stitch station/elevation data from two sources
 merge_manning()  : merge Manning's n, snapped onto the merged station/elevation data
+merge_ineff()    : carry ineffective flow areas into the merged cross-section
 build_merged_cutline() : extend/clip a GIS cut line to a new station range
 write_merged_geometry(): write a complete merged geometry file
 """
@@ -18,10 +19,11 @@ import math
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
-from .model import CrossSection, GeometryFile, ManningDef, XSGISCutLine
+from .model import CrossSection, GeometryFile, IneffArea, IneffFlowAreas, ManningDef, XSGISCutLine
 from .blocks.xs_sta_elev import parse_sta_elev
 from .blocks.xs_gis import parse_cutline
 from .blocks.xs_mann import parse_mann
+from .blocks.xs_ineff import parse_ineff
 from .blocks.xs_bank_sta import parse_bank_sta
 from .xs_interp import clip_xs_polyline, _cumulative_lengths
 from .xs_cutline_blend import try_blend_extension
@@ -82,6 +84,7 @@ class MergeConfig:
     # 'A', 'B', or None (gap).  len == len(breakpoints) - 1.
     segment_sources: List[Optional[str]]
     cutline_source: str = 'A'     # 'A' or 'B'
+    ineff_source: str = 'A'       # 'A' or 'B' -- ineffective flow areas (#XS Ineff=)
     preserve_cutline: bool = False
     blend_cutline: bool = False
     blend_cutline_threshold_pct: float = 10.0
@@ -110,13 +113,39 @@ def _stations_equal(a: float, b: float) -> bool:
     return _round_sta(a) == _round_sta(b)
 
 
+def _dedupe_exact_duplicates(
+    sta_elev: List[Tuple[float, float]]
+) -> List[Tuple[float, float]]:
+    """
+    Drop adjacent points that are exact duplicates -- same station AND same
+    elevation -- after rounding.  Rounding two very close but distinct source
+    points (e.g. a natural survey point sitting right next to a point HEC-RAS
+    itself interpolated at a bank station) can otherwise produce a genuine
+    carbon-copy row, which HEC-RAS rejects.  Points that share a station but
+    differ in elevation are a real vertical wall (a common, valid HEC-RAS
+    construct) and must be kept as separate rows.
+    """
+    result: List[Tuple[float, float]] = []
+    for point in sta_elev:
+        if result and result[-1] == point:
+            continue
+        result.append(point)
+    return result
+
+
 def _snap_to_nearest_station(
     candidate: float, sta_elev: List[Tuple[float, float]]
 ) -> float:
-    """Return whichever station already in *sta_elev* is closest to *candidate*."""
+    """Return whichever station already in *sta_elev* is closest to *candidate*.
+
+    Ties are broken in favor of the higher elevation -- the common case is a
+    vertical wall, where two points share the same station (e.g. a bank
+    station sitting exactly on one) with different elevations.
+    """
     if not sta_elev:
         return candidate
-    return min((s for s, _ in sta_elev), key=lambda s: abs(s - candidate))
+    s, _ = min(sta_elev, key=lambda p: (abs(p[0] - candidate), -p[1]))
+    return s
 
 
 def _interp_elevation(
@@ -313,6 +342,68 @@ def merge_manning(
 
 
 # ---------------------------------------------------------------------------
+# Ineffective flow area (IFA) helpers
+# ---------------------------------------------------------------------------
+
+def merge_ineff(
+    xs_a: CrossSection,
+    xs_b: CrossSection,
+    config: MergeConfig,
+) -> Optional[IneffFlowAreas]:
+    """
+    Carry the chosen source's ineffective flow areas into the merged output.
+
+    The source's ifa_type is preserved verbatim ('normal' stays 'normal',
+    'multiple_block' stays 'multiple_block') rather than always converted to
+    'multiple_block'.  A "normal" area's open-ended fields -- the left area's
+    start_sta and the right area's end_sta, written as blank/0.0 in the
+    source when left unbounded -- mean "extend to whatever this
+    cross-section's edge turns out to be," a meaning HEC-RAS resolves itself
+    whenever it reads the file, against that file's actual geometry.  Baking
+    in a literal output station here would only freeze today's edges into
+    the file and lose that self-updating behavior, so those two fields are
+    carried through as literal 0.0 -- *without* applying the source's
+    Transform, since transforming a sentinel would turn it into an arbitrary
+    non-zero value and destroy its meaning.  Every other field -- the
+    non-sentinel station in a "normal" area, and every field in a
+    'multiple_block' area (which has no sentinel semantics at all) -- is
+    shifted by the chosen source's Transform like any other station or
+    elevation value.  A blank ("infinite height") elevation is likewise
+    carried through as None: 'multiple_block' areas always have a real
+    elevation already (never blank in a valid source file), and a "normal"
+    area's blank elevation is valid on its own terms, so there's nothing to
+    resolve either way.  Areas are not required to land on an existing
+    output station (unlike bank stations and Manning's n breakpoints).
+    """
+    xs_src = xs_a if config.ineff_source == 'A' else xs_b
+    t = config.transform_a if config.ineff_source == 'A' else config.transform_b
+    src_ineff = xs_src.ineff
+    if src_ineff is None:
+        return None
+
+    is_normal = src_ineff.ifa_type == 'normal'
+    last_index = len(src_ineff.areas) - 1
+
+    out_areas: List[IneffArea] = []
+    for i, area in enumerate(src_ineff.areas):
+        is_left_sentinel = is_normal and i == 0 and area.start_sta == 0.0
+        is_right_sentinel = is_normal and i == last_index and area.end_sta == 0.0
+
+        start_sta = area.start_sta if is_left_sentinel else t.apply_station(area.start_sta)
+        end_sta = area.end_sta if is_right_sentinel else t.apply_station(area.end_sta)
+        elevation = None if area.elevation is None else t.apply_elevation(area.elevation)
+
+        out_areas.append(IneffArea(
+            start_sta=_round_sta(start_sta),
+            end_sta=_round_sta(end_sta),
+            elevation=None if elevation is None else round(elevation, _OUTPUT_DECIMALS),
+            permanent=area.permanent,
+        ))
+
+    return IneffFlowAreas(ifa_type=src_ineff.ifa_type, areas=out_areas)
+
+
+# ---------------------------------------------------------------------------
 # Public: GIS cut-line construction
 # ---------------------------------------------------------------------------
 
@@ -456,6 +547,33 @@ def _write_sta_elev_block(sta_elev: List[Tuple[float, float]]) -> List[str]:
     return lines
 
 
+def _fmt_or_blank(v: Optional[float], width: int = 8) -> str:
+    """Format *v* right-justified in *width* characters, or a blank field if None."""
+    return " " * width if v is None else _fmt(v, width)
+
+
+def _write_triplet_lines(values: List[Optional[float]]) -> List[str]:
+    """
+    Chunk a flat list of 3-field-per-record values (e.g. Manning's n or IFA
+    triplets) into 8-char fixed-width lines.  A value of None (e.g. a
+    "normal" IFA's blank/infinite-height elevation) is written as a blank
+    field rather than formatted.
+
+    HEC-RAS never splits a triplet across two lines — it packs whole triplets,
+    up to 3 per line (9 of the 10 available 8-char fields), then wraps.
+    Confirmed by exhaustive inspection of every #Mann= and #XS Ineff= block in
+    tests/data/Baxter/Baxter.g02 and tests/data/Beaver/beaver.g01: every data
+    line is 24, 48, or 72 chars — never 80. A flat 10-values-per-line chunk
+    (fine for 2-field #Sta/Elev= pairs) desyncs a triplet's fields across the
+    line break whenever the record count isn't a multiple of 10, which
+    HEC-RAS's own reader cannot recover from.
+    """
+    return [
+        "".join(_fmt_or_blank(v, 8) for v in values[i : i + 9]) + "\n"
+        for i in range(0, len(values), 9)
+    ]
+
+
 def _write_mann_block(mann_def: ManningDef) -> List[str]:
     """Write a #Mann= block from a ManningDef.
 
@@ -471,17 +589,29 @@ def _write_mann_block(mann_def: ManningDef) -> List[str]:
     values: List[float] = []
     for sta, n_val in entries:
         values.extend([sta, n_val, 0.0])
-    # HEC-RAS never splits a (station, n_value, position_code) triplet across
-    # two lines — it packs whole triplets, up to 3 per line (9 of the 10
-    # available 8-char fields), then wraps. Confirmed by exhaustive inspection
-    # of every #Mann= block in tests/data/Baxter/Baxter.g02 and
-    # tests/data/Beaver/beaver.g01: every data line is 24, 48, or 72 chars —
-    # never 80. A flat 10-values-per-line chunk (fine for 2-field #Sta/Elev=
-    # pairs) desyncs a triplet's fields across the line break whenever the
-    # entry count isn't a multiple of 10, which HEC-RAS's own reader cannot
-    # recover from.
-    for i in range(0, len(values), 9):
-        lines.append("".join(_fmt(v, 8) for v in values[i : i + 9]) + "\n")
+    lines.extend(_write_triplet_lines(values))
+    return lines
+
+
+def _write_ineff_block(ineff: IneffFlowAreas) -> List[str]:
+    """Write a #XS Ineff= block from an IneffFlowAreas (plus its paired
+    Permanent Ineff= line).
+
+    The flag (0 for 'normal', -1 for 'multiple_block') is written verbatim
+    from ineff.ifa_type, preserving whichever format the chosen source used
+    -- see merge_ineff() for why "normal" areas are not converted.  A None
+    elevation ("normal"-type infinite height) is written as a blank field.
+    """
+    areas = ineff.areas
+    flag = 0 if ineff.ifa_type == 'normal' else -1
+    lines = [f"#XS Ineff= {len(areas)} ,{flag} \n"]
+    values: List[Optional[float]] = []
+    for area in areas:
+        values.extend([area.start_sta, area.end_sta, area.elevation])
+    lines.extend(_write_triplet_lines(values))
+    lines.append("Permanent Ineff=\n")
+    flags = "".join(f"{'T' if a.permanent else 'F':>8}" for a in areas)
+    lines.append(flags + "\n")
     return lines
 
 
@@ -509,6 +639,7 @@ _KEY_PREFIXES = (
     "XS GIS Cut Line=",
     "#Sta/Elev=",
     "#Mann=",
+    "#XS Ineff=",
     "Bank Sta=",
 )
 
@@ -516,6 +647,7 @@ _KEY_PARSERS = {
     "XS GIS Cut Line=": parse_cutline,
     "#Sta/Elev=": parse_sta_elev,
     "#Mann=": parse_mann,
+    "#XS Ineff=": parse_ineff,
     "Bank Sta=": lambda lines, i: (None, 1),
 }
 
@@ -717,10 +849,11 @@ def _is_trivial_config(config: MergeConfig, master: str) -> bool:
         Manning's n is derived from the same segment sources, so a trivial
         geometry config implies trivial Manning's n too — no separate check.
       - GIS cut line source: master
+      - Ineffective flow area source: master
 
-    Ineffective flow areas and blocked obstructions are not currently
-    configurable; they always pass through verbatim from master via
-    _scan_xs_content, so no check is needed for them.
+    Blocked obstructions are not currently configurable; they always pass
+    through verbatim from master via _scan_xs_content, so no check is needed
+    for them.
     """
     if len(config.breakpoints) != 2:
         return False
@@ -732,6 +865,8 @@ def _is_trivial_config(config: MergeConfig, master: str) -> bool:
     if not t.is_identity():
         return False
     if config.cutline_source != master:
+        return False
+    if config.ineff_source != master:
         return False
     return True
 
@@ -898,6 +1033,7 @@ def _build_merged_xs_lines(
     )
     if not se_unchanged:
         merged_se = [(_round_sta(s), round(e, _OUTPUT_DECIMALS)) for s, e in merged_se]
+        merged_se = _dedupe_exact_duplicates(merged_se)
 
     if merged_se:
         actual_sta_start = merged_se[0][0]
@@ -910,6 +1046,8 @@ def _build_merged_xs_lines(
         merged_mann = config.mann_def_override
     else:
         merged_mann = merge_manning(xs_a, xs_b, config, merged_se)
+
+    merged_ineff = merge_ineff(xs_a, xs_b, config)
 
     if config.preserve_cutline:
         source_xs = xs_a if config.cutline_source == 'A' else xs_b
@@ -986,6 +1124,10 @@ def _build_merged_xs_lines(
     if merged_mann is not None:
         out.extend(_write_mann_block(merged_mann))
     out.extend(trail_for.get("#Mann=", []))
+
+    if merged_ineff is not None:
+        out.extend(_write_ineff_block(merged_ineff))
+    out.extend(trail_for.get("#XS Ineff=", []))
 
     if merged_bank is not None:
         out.append(_write_bank_sta_line(merged_bank))

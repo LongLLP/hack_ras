@@ -642,7 +642,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-07-01, session 5)*
+*(Last updated: 2026-07-02, session 6)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -651,9 +651,10 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
 - `CrossSection._raw_line_start` and `CrossSection._raw_line_end` track each XS's
   position in `GeometryFile.raw_lines` (set by the parser; not semantic fields).
 - `geometry/merge.py` provides `Transform`, `MergeConfig`, `merge_sta_elev()`,
-  `merge_manning()`, `build_merged_cutline()`, and `write_merged_geometry()` for
-  stitching cross-sections from two geometry files.  `write_merged_geometry()` returns
-  `None` — see session 5 below for why the old warnings-list return was removed.
+  `merge_manning()`, `merge_ineff()`, `build_merged_cutline()`, and
+  `write_merged_geometry()` for stitching cross-sections from two geometry files.
+  `write_merged_geometry()` returns `None` — see session 5 below for why the old
+  warnings-list return was removed.
 - `geometry/xs_cutline_blend.py` provides `try_blend_extension()` for using the
   non-selected geometry's cut line to extend the output cut line rather than straight-line
   projection, when the two cut lines run in the same general alignment.
@@ -758,25 +759,92 @@ station.
   A's structure; showing B-only XS in the GUI was misleading and clicking them produced
   nonsensical plots.  The docstring now reflects this.
 
+### Session 6 changes to `geometry/merge.py` (2026-07-02): `#XS Ineff=` (Ineffective Flow Areas)
+
+`MergeConfig.ineff_source: str = 'A'` selects, per cross-section, which source's whole
+IFA list is carried into the merge (same shape as `cutline_source` — a single whole-XS
+choice, not per-segment, since an IFA range can't be meaningfully split across sources).
+Unlike `merge_manning()`, `merge_ineff()` does **not** force a single output format —
+it preserves the chosen source's `ifa_type` verbatim ('normal' stays 'normal',
+'multiple_block' stays 'multiple_block').
+
+**"normal"-type sentinel fields are carried through untouched, not resolved.**
+Confirmed against real HEC-RAS-authored fixtures (`RAS_xsedit/tests/data/Sterp Creek/
+SterpCreek.g03/.g04/.g05`, all built by hand in the RAS GUI for XS 43320) that "normal"
+IFAs are not a legacy 3-slot format like Manning's method=0 — every field is a real,
+literal value *except* two specific ones: the left area's `start_sta` and the right
+area's `end_sta`, which are written blank/`0.0` when the user leaves that side
+unbounded, meaning "extend to whatever this cross-section's edge turns out to be."
+That resolution is meant to happen whenever HEC-RAS *reads* the file, evaluated against
+whatever geometry is actually in it at that time — not something to precompute and bake
+in as a literal number at export time (an earlier version of this function did exactly
+that, resolving against the merged output's first/last station; it worked, but freezing
+today's edges into the file is strictly worse than just leaving the self-updating
+sentinel alone, so it was reverted in favor of this simpler, more correct approach).
+Those two fields are therefore written as literal `0.0`, and critically are **not**
+run through the chosen source's `Transform` — shifting a sentinel by `h_offset` would
+turn it into an arbitrary non-zero station and silently destroy its meaning. Every
+other field (the non-sentinel station in a "normal" area, and every field in a
+`multiple_block` area, which has no sentinel semantics at all) is shifted by the
+`Transform` exactly like any other station/elevation value. A blank/`None`
+("infinite height") elevation is carried through as `None` rather than resolved to a
+number — `multiple_block` areas always have a real elevation already in a valid source
+file, and a "normal" area's blank elevation is valid on its own terms, so there's
+nothing to resolve there either. `_write_ineff_block()` writes `None` as a blank field
+via a small `_fmt_or_blank()` wrapper around the shared `_write_triplet_lines()` chunker
+(which also gained `Optional[float]` support for this). IFA boundaries are confirmed to
+*not* need to land on an existing output station (unlike bank stations and Manning's n
+breakpoints), so no `_snap_to_nearest_station` call is needed here, and `merge_ineff()`
+doesn't need the merged station/elevation block passed in at all.
+
+**Line-wrap.** `#XS Ineff=` triplets are confirmed to follow the exact same whole-triplet
+line-wrap convention as `#Mann=` (`_write_ineff_block()` reuses the shared
+`_write_triplet_lines()` helper, factored out of `_write_mann_block()` for this reuse).
+`Permanent Ineff=` T/F flags are confirmed to never need more than one line, since the
+10-area cap on `multiple_block` means at most 10 single-field flags (80 chars) fit in one
+line regardless.
+
+`"#XS Ineff="` (paired with its `Permanent Ineff=` follower, both consumed by
+`parse_ineff()`'s single `lines_consumed` count) is registered in `_KEY_PREFIXES` /
+`_KEY_PARSERS`, so `_scan_xs_content` — which matches prefixes line-by-line regardless of
+where they appear — correctly recognizes it whether it comes before or after `#Mann=` in
+the source file (confirmed this isn't fixed by HEC-RAS). For writing, the block is always
+emitted between `#Mann=` and `Bank Sta=`, matching every real fixture's actual layout;
+HEC-RAS does not enforce block order, so this doesn't need to track the source's original
+position.
+
+**Duplicate `#Sta/Elev=` rows after rounding, and vertical walls.** Two very close but
+distinct source points (e.g. a natural survey point sitting right next to a point
+HEC-RAS itself interpolated at a bank station — confirmed in `SterpCreek.g02`'s own
+data around both bank stations for XS 43320) can round to the exact same
+`(station, elevation)` pair, producing a genuine carbon-copy row that HEC-RAS rejects.
+`_dedupe_exact_duplicates()` collapses adjacent rows only when **both** fields match
+after rounding. Critically, HEC-RAS cross-sections can legitimately have two rows at the
+*same* station with *different* elevations (a vertical wall — confirmed against a
+hand-built test fixture, `RAS_xsedit/tests/data/TEMP/SterpCreek.g06`, with four such
+walls), so a same-station-different-elevation pair must never be collapsed. Relatedly,
+`_snap_to_nearest_station()` now breaks distance ties in favor of the higher elevation,
+so bank-station/Manning's-n snapping onto a wall is deterministic rather than depending
+on array order (though since `Bank Sta=`/`#Mann=` only ever write the station number,
+not an elevation, this has no effect on the two wall-forming rows' text either way — it
+matters for the general equidistant-different-station case). `_vertex_at()` deliberately
+was **not** given the same tie-break: if a user-defined segment breakpoint happens to
+land exactly on a wall, picking whichever side is encountered first while scanning is
+good enough — landing a breakpoint exactly on a wall is a modeling error on the user's
+part, not a case worth adding branching for.
+
 ## Future Features — Not Yet Implemented
 
-### `#XS Ineff=` (Ineffective Flow Areas) and `#Block Obstruct=` (Blocked Obstructions)
+### `#Block Obstruct=` (Blocked Obstructions)
 
-These two blocks are **parsed by the geometry parser and stored in raw_lines, but the
-merge tool does not yet support modifying them**. In `_build_merged_xs_lines`, they
-are treated as interstitial content by `_scan_xs_content` — they are not listed in
-`_KEY_PREFIXES` and therefore pass through verbatim from source A unconditionally.
-
-When support is added:
-- Add `"#XS Ineff="` and `"#Block Obstruct="` to `_KEY_PREFIXES` (and `_KEY_PARSERS`)
-  in `merge.py` so that `_scan_xs_content` recognises them as key blocks.
-- Add configuration fields to `MergeConfig` (e.g. `ineff_source: str = 'A'`,
-  `obstruct_source: str = 'A'`).
-- Add handling in `_build_merged_xs_lines` to select and write the correct block from
-  the chosen source, similar to the cut-line and Manning's n logic.
-- Add the corresponding options to `XSState` in `xsedit.py` and wire them into the GUI.
-- Update `_is_trivial_config` to check the new options (currently documented in its
-  docstring as "not yet configurable").
+Still parsed into `raw_lines` and passed through verbatim from source A unconditionally
+via `_scan_xs_content` — the same state IFAs were in before session 6 (see above). The
+same pattern (a `MergeConfig.obstruct_source` field, a `_KEY_PREFIXES`/`_KEY_PARSERS`
+entry, a `merge_obstruct()`-shaped function reusing `_write_triplet_lines()`, GUI wiring,
+an `_is_trivial_config` check) would apply if support is added later — but note this
+block's own format conventions (sentinel fields, if any) haven't been verified against
+real HEC-RAS output the way Manning's n and IFAs now have, and shouldn't be assumed to
+match either one without doing that verification first.
 
 ### `geometry/merge.py` — design notes (2026-06-24)
 
