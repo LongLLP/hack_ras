@@ -333,7 +333,12 @@ def merge_manning(
 
         for sta, n_val in _mann_def_to_entries_in_segment(mann_def, t, bp_start, bp_end):
             snapped = _snap_to_nearest_station(sta, merged_se)
-            if not result or not _stations_equal(result[-1][0], snapped):
+            if result and _stations_equal(result[-1][0], snapped):
+                # Same output station as the previous entry: the later value
+                # wins, so a new segment's opening n-value at a breakpoint
+                # replaces the previous segment's value there.
+                result[-1] = (result[-1][0], n_val)
+            else:
                 result.append((snapped, n_val))
 
     if not result:
@@ -627,8 +632,17 @@ def _write_cutline_block(cutline: XSGISCutLine) -> List[str]:
 
 
 def _write_bank_sta_line(bank_stations: Tuple[float, float]) -> str:
+    """Write the Bank Sta= line.
+
+    The line itself is comma-separated (not an 8-char block), but each value is
+    rendered with the same 8-char formatter as the #Sta/Elev= block so the bank
+    station text always matches a station in that block exactly, up to the same
+    precision limit the 8-char field imposes.  A plain ``:g`` here (6 significant
+    digits) mangled stations like 10251.75 into 10251.8 while the block said
+    10251.75.
+    """
     left, right = bank_stations
-    return f"Bank Sta={left:g},{right:g}\n"
+    return f"Bank Sta={_fmt(left, 8).strip()},{_fmt(right, 8).strip()}\n"
 
 
 # ---------------------------------------------------------------------------
@@ -839,35 +853,43 @@ def _collect_xs_pairs(
 # Public: write merged geometry file
 # ---------------------------------------------------------------------------
 
-def _is_trivial_config(config: MergeConfig, master: str) -> bool:
+def _is_trivial_config(config: MergeConfig, xs_master: CrossSection) -> bool:
     """
     Return True when the config results in output byte-for-byte identical to
-    the master XS — every configurable option must point to master.
+    the master XS (A) — every configurable option must point to A, and the
+    outer breakpoints must span A's full station extent.
 
     Checks:
-      - Geometry (sta/elev): single segment from master, identity master transform.
+      - Geometry (sta/elev): single segment from A, identity transform, and
+        breakpoints matching A's actual first/last station (a truncated or
+        extended all-A config is a real edit, not a pass-through).
         Manning's n is derived from the same segment sources, so a trivial
         geometry config implies trivial Manning's n too — no separate check.
-      - GIS cut line source: master
-      - Ineffective flow area source: master
+      - GIS cut line source: A
+      - Ineffective flow area source: A
 
     Blocked obstructions are not currently configurable; they always pass
-    through verbatim from master via _scan_xs_content, so no check is needed
+    through verbatim from A via _scan_xs_content, so no check is needed
     for them.
     """
     if len(config.breakpoints) != 2:
         return False
     if len(config.segment_sources) != 1:
         return False
-    if config.segment_sources[0] != master:
+    if config.segment_sources[0] != 'A':
         return False
-    t = config.transform_a if master == 'A' else config.transform_b
-    if not t.is_identity():
+    if not config.transform_a.is_identity():
         return False
-    if config.cutline_source != master:
+    if config.cutline_source != 'A':
         return False
-    if config.ineff_source != master:
+    if config.ineff_source != 'A':
         return False
+    se = xs_master.sta_elev
+    if se:
+        if not _stations_equal(config.breakpoints[0], se[0][0]):
+            return False
+        if not _stations_equal(config.breakpoints[-1], se[-1][0]):
+            return False
     return True
 
 
@@ -877,26 +899,21 @@ def write_merged_geometry(
     merge_configs: Dict[Tuple[str, str, str], MergeConfig],
     output_path: str,
     title: str,
-    master_source: str = 'A',
 ) -> None:
     """
     Write a merged HEC-RAS geometry file.
 
-    master_source : 'A' or 'B' — the file used for the geometry header, reach
-                   headers, and any XS without a merge config (or with a trivial
-                   config that simply mirrors the master).
+    Geometry A is always the master: it provides the geometry header, reach
+    headers, the output's XS structure (B-only XS are excluded), and any XS
+    without a merge config (or with a trivial config that simply mirrors A).
+    The GUI's "Swap A / B" physically exchanges the two files instead of
+    flipping a master flag, so no master-selection parameter exists here.
+
     merge_configs : keyed by normalised (river, reach, station) tuples.
     """
-    if master_source not in ('A', 'B'):
-        raise ValueError(f"master_source must be 'A' or 'B', got {master_source!r}")
-
-    geom_master = geom_a if master_source == 'A' else geom_b
-    geom_other  = geom_b if master_source == 'A' else geom_a
-
-    if geom_master is None and geom_other is None:
-        raise ValueError("At least one geometry file must be provided.")
+    geom_master = geom_a if geom_a is not None else geom_b
     if geom_master is None:
-        geom_master = geom_other
+        raise ValueError("At least one geometry file must be provided.")
 
     lines: List[str] = []
 
@@ -907,50 +924,27 @@ def write_merged_geometry(
         else:
             lines.append(line)
 
-    # 2. Rivers / reaches / cross-sections
+    # 2. Rivers / reaches / cross-sections (A's structure; empty if A not loaded)
     xs_pairs = _collect_xs_pairs(geom_a, geom_b)
     prev_reach_key: Optional[Tuple[str, str]] = None
 
     for river, reach, station, xs_a, xs_b in xs_pairs:
-        # Determine master/secondary before any output so that B-only XS (xs_master is None)
-        # are skipped without affecting prev_reach_key or emitting reach headers.
-        xs_master = xs_a if master_source == 'A' else xs_b
-        xs_secondary = xs_b if master_source == 'A' else xs_a
-        geom_secondary = geom_other
-
-        if xs_master is None:
-            # XS only exists in secondary source — excluded when using master's structure
-            continue
-
         reach_key = (river.strip().upper(), reach.strip().upper())
 
         if reach_key != prev_reach_key:
             prev_reach_key = reach_key
             lines.extend(_extract_reach_header(geom_master, river, reach))
 
-        config_key = _norm_key(river, reach, station)
-        config = merge_configs.get(config_key)
+        config = merge_configs.get(_norm_key(river, reach, station))
 
-        if xs_master is not None and (
-            xs_secondary is None
-            or config is None
-            or _is_trivial_config(config, master_source)
-        ):
-            # Only in master, or no merge configured, or trivial (pass-through)
-            if xs_master._raw_line_start >= 0:
-                lines.extend(_xs_raw_lines(geom_master, xs_master))
+        if xs_b is None or config is None or _is_trivial_config(config, xs_a):
+            # Only in A, or no merge configured, or trivial (pass-through)
+            if xs_a._raw_line_start >= 0:
+                lines.extend(_xs_raw_lines(geom_master, xs_a))
         else:
             # True merge: both present, non-trivial config
-            xs_a_for_merge = xs_master if master_source == 'A' else xs_secondary
-            xs_b_for_merge = xs_secondary if master_source == 'A' else xs_master
-            geom_a_for_merge = geom_master if master_source == 'A' else geom_secondary
-            geom_b_for_merge = geom_secondary if master_source == 'A' else geom_master
             lines.extend(
-                _build_merged_xs_lines(
-                    geom_a_for_merge, xs_a_for_merge,
-                    geom_b_for_merge, xs_b_for_merge,
-                    config,
-                )
+                _build_merged_xs_lines(geom_a, xs_a, geom_b, xs_b, config)
             )
 
     # Ensure file ends with a newline
@@ -1017,19 +1011,24 @@ def _build_merged_xs_lines(
         merged_se = _insert_bank_station(merged_se, config.bank_stations_override[0])
         merged_se = _insert_bank_station(merged_se, config.bank_stations_override[1])
 
-    # When all sta/elev comes from A with an identity transform, the source's
-    # own raw lines are written verbatim (see step 4) to preserve original
-    # numeric formatting.  In that case leave merged_se unrounded too, since it
-    # already exactly matches what gets written.  Otherwise round every station
-    # and elevation to output precision — this becomes the single source of
-    # truth that bank stations and Manning's n breakpoints below are snapped
-    # onto, guaranteeing they land exactly on a station HEC-RAS will see.
+    # When all sta/elev comes from A with an identity transform AND the
+    # breakpoints span A's full extent (a truncated/extended all-A config is a
+    # real edit), the source's own raw lines are written verbatim (see step 4)
+    # to preserve original numeric formatting.  In that case leave merged_se
+    # unrounded too, since it already exactly matches what gets written.
+    # Otherwise round every station and elevation to output precision — this
+    # becomes the single source of truth that bank stations and Manning's n
+    # breakpoints below are snapped onto, guaranteeing they land exactly on a
+    # station HEC-RAS will see.
     se_unchanged = (
         len(config.breakpoints) == 2
         and len(config.segment_sources) == 1
         and config.segment_sources[0] == 'A'
         and config.transform_a.is_identity()
         and config.bank_stations_override is None
+        and bool(xs_a.sta_elev)
+        and _stations_equal(config.breakpoints[0], xs_a.sta_elev[0][0])
+        and _stations_equal(config.breakpoints[-1], xs_a.sta_elev[-1][0])
     )
     if not se_unchanged:
         merged_se = [(_round_sta(s), round(e, _OUTPUT_DECIMALS)) for s, e in merged_se]

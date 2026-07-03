@@ -669,10 +669,48 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   session 5 redesign (H Scale removal, always-interpolate-at-breakpoints, rounding,
   bank/Manning's snapping) and will not byte-for-byte match new output.
   `test_merge_matches_known_good_output` is expected to fail until that fixture is
-  regenerated; the other two tests in `test_geometry_merge.py` (`test_reach_order_preserved`,
-  `test_unmodified_xs_pass_through_verbatim`) don't depend on exact byte content and pass.
-  Effective baseline: 97 passing, 1 known-failing (98 total).
+  regenerated; the other tests in `test_geometry_merge.py` don't depend on exact byte
+  content and pass.  Effective baseline: 102 passing, 1 known-failing (103 total,
+  after the five session-7 regression tests).
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 7 changes to `geometry/merge.py` (2026-07-02, bug-review fixes)
+
+Four fixes from a code-review pass, each with regression tests in
+`tests/test_geometry_merge.py`:
+
+- **Trivial-config check now compares breakpoints against A's actual extent.**
+  `_is_trivial_config` and the `se_unchanged` fast path in `_build_merged_xs_lines`
+  previously only checked "single segment, source A, identity transform" — a
+  truncated or extended all-A config was silently exported verbatim at A's full
+  extent (while the GUI plot showed the truncation).  Both sites now also require
+  `_stations_equal` on the outer breakpoints vs `xs_a.sta_elev[0]/[-1]`; a
+  truncation/extension goes through the real merge pipeline (rebuilt/rounded
+  Sta/Elev, clipped cut line, snapped banks).  Consequence: such XS are no longer
+  byte-for-byte pass-throughs.  When A has no sta_elev the extent check is
+  skipped (breakpoints are meaningless there).  Note: an extension beyond a
+  source's data fabricates flat (clamped-elevation) points — reviewed with the
+  user and explicitly accepted, no warning wanted.
+- **`Bank Sta=` values are now rendered with `_fmt` (the #Sta/Elev block's own
+  8-char formatter), not `:g`.**  `:g` is 6 significant digits and mangled
+  stations like 10251.75 → 10251.8, so the bank station no longer matched any
+  station in the block — the exact invariant bank-station snapping exists to
+  guarantee.  The Bank Sta line itself stays comma-separated (it is not an
+  8-char block); only the value text changed.  Values that cannot fit an 8-char
+  field (e.g. 112421.75) shorten exactly the way the block field shortens them,
+  so the two always agree.  `SterpCreek.g04`'s RS 43320 (user-built fixture with
+  stationing stretched to -350..112421) covers this end-to-end.
+- **`merge_manning` station collisions: the later value wins.**  When two
+  n-entries snap to the same output station (typically the previous segment's
+  last entry vs the next segment's opening entry at a breakpoint), the previous
+  dedup kept the first and silently dropped the new segment's opening n-value.
+  Now the later entry overwrites, matching the "vertex belongs to the segment
+  that starts there" rule used by `merge_sta_elev`.
+- **`master_source` parameter removed from `write_merged_geometry`.**  It was
+  unreachable from the GUI (xsedit hardcoded "A"; the Swap button physically
+  exchanges the files instead) and its 'B' path was broken — `_collect_xs_pairs`
+  is A-structured, so master B emitted only the A∩B intersection.  Geometry A is
+  now unconditionally the master, documented in the docstring.
 
 ### Session 5 changes to `geometry/merge.py` (2026-07-01)
 

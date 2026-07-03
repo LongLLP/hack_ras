@@ -51,7 +51,7 @@ def _sterp_configs(geom_a):
     Full set of MergeConfigs matching xsedit_config.json (all 10 configured XS),
     as recorded in 'Sterp Creek inputs and outputs.xlsx'.
 
-    Geom A = g02 (master), Geom B = g01, master_source = 'A'.
+    Geom A = g02 (master), Geom B = g01.
 
     Four of the ten configs are trivial (_is_trivial_config returns True for
     them: 43084, 42893, 42528, 41868) and will be written verbatim from g02.
@@ -168,7 +168,6 @@ def test_merge_matches_known_good_output(tmp_path, sterp_geoms):
         _sterp_configs(geom_a),
         str(out),
         title="Merged Geometry",
-        master_source="A",
     )
 
     expected = (DATA_DIR / "SterpCreek.g03").read_text(encoding="utf-8", errors="ignore")
@@ -187,7 +186,6 @@ def test_reach_order_preserved(tmp_path, sterp_geoms):
         _sterp_configs(geom_a),
         str(out),
         title="Merged Geometry",
-        master_source="A",
     )
 
     def reach_order(path):
@@ -216,7 +214,6 @@ def test_unmodified_xs_pass_through_verbatim(tmp_path, sterp_geoms):
         _sterp_configs(geom_a),
         str(out),
         title="Merged Geometry",
-        master_source="A",
     )
 
     parser = GeometryParser()
@@ -236,3 +233,143 @@ def test_unmodified_xs_pass_through_verbatim(tmp_path, sterp_geoms):
                     f"XS {xs_a.river.strip()}/{xs_a.reach.strip()}/{xs_a.station.strip()} "
                     f"was unexpectedly modified"
                 )
+
+
+# ---------------------------------------------------------------------------
+# Truncation / extension of an all-A cross-section (must NOT be trivial)
+# ---------------------------------------------------------------------------
+
+@skip_if_no_data
+def test_truncated_all_a_config_is_honored(tmp_path, sterp_geoms):
+    """
+    A single-segment-A config whose breakpoints don't span A's full extent is
+    a real edit: the exported XS must be truncated, not passed through
+    verbatim.  Regression test for the bug where _is_trivial_config ignored
+    breakpoint values entirely.
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp East", "East Branch", "17318.34")  # A spans 0 .. 942.14
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[100.0, 800.0],
+        segment_sources=["A"],
+    )}
+    out = tmp_path / "truncated.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    assert xs_out.sta_elev[0][0] == 100.0
+    assert xs_out.sta_elev[-1][0] == 800.0
+    # Bank stations must still land exactly on stations in the truncated block
+    stations = {s for s, _ in xs_out.sta_elev}
+    if xs_out.bank_stations:
+        assert xs_out.bank_stations[0] in stations
+        assert xs_out.bank_stations[1] in stations
+
+
+@skip_if_no_data
+def test_full_extent_all_a_config_stays_verbatim(tmp_path, sterp_geoms):
+    """
+    A single-segment-A config whose breakpoints DO span A's full extent is
+    still a trivial pass-through — byte-for-byte identical to the source.
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp East", "East Branch", "17318.34")
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[0.0, 942.14],
+        segment_sources=["A"],
+    )}
+    out = tmp_path / "fullspan.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    geom_out = GeometryParser().parse_file(str(out))
+    xs_a = _build_index(geom_a)[key]
+    xs_out = _build_index(geom_out)[key]
+    assert _xs_raw_lines(geom_a, xs_a) == _xs_raw_lines(geom_out, xs_out)
+
+
+# ---------------------------------------------------------------------------
+# Bank Sta= formatting must match the #Sta/Elev= block's 8-char fields
+# ---------------------------------------------------------------------------
+
+def test_write_bank_sta_line_precision():
+    from hack_ras.geometry.merge import _write_bank_sta_line
+    # 8 significant characters survive intact (the old :g mangled these to
+    # 10251.8 / 10380.2)
+    assert _write_bank_sta_line((10251.75, 10380.25)) == "Bank Sta=10251.75,10380.25\n"
+    # A value that cannot fit an 8-char field is shortened exactly the way the
+    # #Sta/Elev= block's own formatter shortens it
+    assert _write_bank_sta_line((112421.75, 112421.75)) == "Bank Sta=112421.8,112421.8\n"
+
+
+@skip_if_no_data
+@pytest.mark.skipif(
+    not (DATA_DIR / "SterpCreek.g04").is_file(),
+    reason="SterpCreek.g04 (stretched-stationing fixture) not present — it was a "
+           "temporary file; retarget this test when g02 gains a stretched XS",
+)
+def test_bank_sta_matches_block_station_stretched_xs(tmp_path):
+    """
+    End-to-end on SterpCreek.g04's RS 43320 (stationing stretched to the limits
+    of HEC-RAS's 8-character fields, stations -350 .. 112421, banks at
+    44838/47099): after a rebuild, the Bank Sta= values must parse to stations
+    that exist exactly in the written #Sta/Elev= block.
+    """
+    parser = GeometryParser()
+    geom_a = parser.parse_file(str(DATA_DIR / "SterpCreek.g04"))
+    geom_b = parser.parse_file(str(DATA_DIR / "SterpCreek.g01"))
+    key = _norm_key("Sterp West", "Upper", "43320")
+    # Truncate slightly so the XS is genuinely rebuilt (not passed through)
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[-350.0, 112000.0],
+        segment_sources=["A"],
+    )}
+    out = tmp_path / "stretched.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    assert xs_out.sta_elev[-1][0] == 112000.0
+    stations = {s for s, _ in xs_out.sta_elev}
+    assert xs_out.bank_stations[0] in stations
+    assert xs_out.bank_stations[1] in stations
+
+
+# ---------------------------------------------------------------------------
+# Manning's n: at a snapped-station collision the later value wins
+# ---------------------------------------------------------------------------
+
+def test_merge_manning_boundary_collision_keeps_new_segment_value():
+    """
+    When the previous segment's last n-entry and the next segment's opening
+    n-entry snap to the same output station, the NEW segment's value must win
+    (matching the 'vertex belongs to the segment that starts there' rule).
+    """
+    from hack_ras.geometry.model import CrossSection, ManningDef
+    from hack_ras.geometry.merge import merge_manning
+
+    xs_a = CrossSection(
+        river="R", reach="RC", station="1",
+        manning_def=ManningDef(method=-1, entries=[(0.0, 0.05), (99.999, 0.06)]),
+    )
+    xs_b = CrossSection(
+        river="R", reach="RC", station="1",
+        manning_def=ManningDef(method=-1, entries=[(0.0, 0.03)]),
+    )
+    config = MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[0.0, 100.0, 200.0],
+        segment_sources=["A", "B"],
+    )
+    # Output block has a station at exactly 100.0; A's 99.999 entry and B's
+    # segment-opening entry at 100.0 both snap onto it.
+    merged_se = [(0.0, 1.0), (100.0, 1.0), (200.0, 1.0)]
+
+    result = merge_manning(xs_a, xs_b, config, merged_se)
+    entries = dict(result.entries)
+    assert entries[100.0] == 0.03  # B's opening value, not A's 0.06
