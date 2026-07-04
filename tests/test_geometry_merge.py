@@ -296,13 +296,13 @@ def test_full_extent_all_a_config_stays_verbatim(tmp_path, sterp_geoms):
 # ---------------------------------------------------------------------------
 
 def test_write_bank_sta_line_precision():
-    from hack_ras.geometry.merge import _write_bank_sta_line
+    from hack_ras.geometry.blocks.xs_bank_sta import write_bank_sta
     # 8 significant characters survive intact (the old :g mangled these to
     # 10251.8 / 10380.2)
-    assert _write_bank_sta_line((10251.75, 10380.25)) == "Bank Sta=10251.75,10380.25\n"
+    assert write_bank_sta((10251.75, 10380.25)) == "Bank Sta=10251.75,10380.25\n"
     # A value that cannot fit an 8-char field is shortened exactly the way the
     # #Sta/Elev= block's own formatter shortens it
-    assert _write_bank_sta_line((112421.75, 112421.75)) == "Bank Sta=112421.8,112421.8\n"
+    assert write_bank_sta((112421.75, 112421.75)) == "Bank Sta=112421.8,112421.8\n"
 
 
 @skip_if_no_data

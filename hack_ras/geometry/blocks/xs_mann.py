@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 from typing import List, Tuple
-from .base import read_fixed_fields
+from .base import read_fixed_fields, _write_triplet_lines
 from ..model import ManningDef
 
 
@@ -75,3 +75,22 @@ def parse_mann(lines: list, index: int) -> Tuple[ManningDef, int]:
         entries.append((station, n_val))
 
     return ManningDef(method=method, entries=entries), 1 + consumed
+
+
+def write_mann(mann_def: ManningDef) -> List[str]:
+    """Write a #Mann= block from a ManningDef.
+
+    All horizontal variation formats use (station, n_value, position_code)
+    triplets in 8-char fixed-width fields.  The method integer from the
+    ManningDef is written verbatim to preserve the original format.
+
+        #Mann= N ,<method> , 0
+        <station> <n_value> <0>  ...  (N triplets)
+    """
+    entries = mann_def.entries
+    lines = [f"#Mann= {len(entries)} ,{mann_def.method} , 0 \n"]
+    values: List[float] = []
+    for sta, n_val in entries:
+        values.extend([sta, n_val, 0.0])
+    lines.extend(_write_triplet_lines(values))
+    return lines

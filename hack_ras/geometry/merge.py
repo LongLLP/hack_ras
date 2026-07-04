@@ -20,11 +20,11 @@ from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
 from .model import CrossSection, GeometryFile, IneffArea, IneffFlowAreas, ManningDef, XSGISCutLine
-from .blocks.xs_sta_elev import parse_sta_elev
+from .blocks.xs_sta_elev import parse_sta_elev, write_sta_elev
 from .blocks.xs_gis import parse_cutline
-from .blocks.xs_mann import parse_mann
-from .blocks.xs_ineff import parse_ineff
-from .blocks.xs_bank_sta import parse_bank_sta
+from .blocks.xs_mann import parse_mann, write_mann
+from .blocks.xs_ineff import parse_ineff, write_ineff
+from .blocks.xs_bank_sta import write_bank_sta
 from .xs_interp import clip_xs_polyline, _cumulative_lengths
 from .xs_cutline_blend import try_blend_extension
 
@@ -529,96 +529,10 @@ def build_merged_cutline(
 
 
 # ---------------------------------------------------------------------------
-# Fixed-format writers
+# Fixed-format writers — GIS cut line only.  The 8-char XS block writers
+# (write_sta_elev, write_mann, write_ineff, write_bank_sta) live in blocks/
+# next to their parsers.
 # ---------------------------------------------------------------------------
-
-def _fmt(v: float, width: int = 8) -> str:
-    """Format *v* right-justified in *width* characters using 'g' notation."""
-    for prec in range(width - 1, 0, -1):
-        s = f"{v:.{prec}g}"
-        if len(s) <= width:
-            return s.rjust(width)
-    return f"{v:.2g}".rjust(width)
-
-
-def _write_sta_elev_block(sta_elev: List[Tuple[float, float]]) -> List[str]:
-    lines = [f"#Sta/Elev= {len(sta_elev)} \n"]
-    values = []
-    for sta, elev in sta_elev:
-        values.append(sta)
-        values.append(elev)
-    for i in range(0, len(values), 10):
-        lines.append("".join(_fmt(v, 8) for v in values[i : i + 10]) + "\n")
-    return lines
-
-
-def _fmt_or_blank(v: Optional[float], width: int = 8) -> str:
-    """Format *v* right-justified in *width* characters, or a blank field if None."""
-    return " " * width if v is None else _fmt(v, width)
-
-
-def _write_triplet_lines(values: List[Optional[float]]) -> List[str]:
-    """
-    Chunk a flat list of 3-field-per-record values (e.g. Manning's n or IFA
-    triplets) into 8-char fixed-width lines.  A value of None (e.g. a
-    "normal" IFA's blank/infinite-height elevation) is written as a blank
-    field rather than formatted.
-
-    HEC-RAS never splits a triplet across two lines — it packs whole triplets,
-    up to 3 per line (9 of the 10 available 8-char fields), then wraps.
-    Confirmed by exhaustive inspection of every #Mann= and #XS Ineff= block in
-    tests/data/Baxter/Baxter.g02 and tests/data/Beaver/beaver.g01: every data
-    line is 24, 48, or 72 chars — never 80. A flat 10-values-per-line chunk
-    (fine for 2-field #Sta/Elev= pairs) desyncs a triplet's fields across the
-    line break whenever the record count isn't a multiple of 10, which
-    HEC-RAS's own reader cannot recover from.
-    """
-    return [
-        "".join(_fmt_or_blank(v, 8) for v in values[i : i + 9]) + "\n"
-        for i in range(0, len(values), 9)
-    ]
-
-
-def _write_mann_block(mann_def: ManningDef) -> List[str]:
-    """Write a #Mann= block from a ManningDef.
-
-    All horizontal variation formats use (station, n_value, position_code)
-    triplets in 8-char fixed-width fields.  The method integer from the
-    ManningDef is written verbatim to preserve the original format.
-
-        #Mann= N ,<method> , 0
-        <station> <n_value> <0>  ...  (N triplets)
-    """
-    entries = mann_def.entries
-    lines = [f"#Mann= {len(entries)} ,{mann_def.method} , 0 \n"]
-    values: List[float] = []
-    for sta, n_val in entries:
-        values.extend([sta, n_val, 0.0])
-    lines.extend(_write_triplet_lines(values))
-    return lines
-
-
-def _write_ineff_block(ineff: IneffFlowAreas) -> List[str]:
-    """Write a #XS Ineff= block from an IneffFlowAreas (plus its paired
-    Permanent Ineff= line).
-
-    The flag (0 for 'normal', -1 for 'multiple_block') is written verbatim
-    from ineff.ifa_type, preserving whichever format the chosen source used
-    -- see merge_ineff() for why "normal" areas are not converted.  A None
-    elevation ("normal"-type infinite height) is written as a blank field.
-    """
-    areas = ineff.areas
-    flag = 0 if ineff.ifa_type == 'normal' else -1
-    lines = [f"#XS Ineff= {len(areas)} ,{flag} \n"]
-    values: List[Optional[float]] = []
-    for area in areas:
-        values.extend([area.start_sta, area.end_sta, area.elevation])
-    lines.extend(_write_triplet_lines(values))
-    lines.append("Permanent Ineff=\n")
-    flags = "".join(f"{'T' if a.permanent else 'F':>8}" for a in areas)
-    lines.append(flags + "\n")
-    return lines
-
 
 def _write_cutline_block(cutline: XSGISCutLine) -> List[str]:
     lines = [f"XS GIS Cut Line={cutline.n_points}\n"]
@@ -629,20 +543,6 @@ def _write_cutline_block(cutline: XSGISCutLine) -> List[str]:
     for i in range(0, len(values), 4):
         lines.append("".join(f"{v:>16.9g}" for v in values[i : i + 4]) + "\n")
     return lines
-
-
-def _write_bank_sta_line(bank_stations: Tuple[float, float]) -> str:
-    """Write the Bank Sta= line.
-
-    The line itself is comma-separated (not an 8-char block), but each value is
-    rendered with the same 8-char formatter as the #Sta/Elev= block so the bank
-    station text always matches a station in that block exactly, up to the same
-    precision limit the 8-char field imposes.  A plain ``:g`` here (6 significant
-    digits) mangled stations like 10251.75 into 10251.8 while the block said
-    10251.75.
-    """
-    left, right = bank_stations
-    return f"Bank Sta={_fmt(left, 8).strip()},{_fmt(right, 8).strip()}\n"
 
 
 # ---------------------------------------------------------------------------
@@ -1115,21 +1015,21 @@ def _build_merged_xs_lines(
             # Write the raw source lines verbatim to preserve original numeric
             # formatting (idiosyncratic spacing, ".07" vs "0.07", etc.).
             raw_se = _raw_sta_elev_lines(geom_a, xs_a)
-            out.extend(raw_se if raw_se else _write_sta_elev_block(merged_se))
+            out.extend(raw_se if raw_se else write_sta_elev(merged_se))
         else:
-            out.extend(_write_sta_elev_block(merged_se))
+            out.extend(write_sta_elev(merged_se))
     out.extend(trail_for.get("#Sta/Elev=", []))
 
     if merged_mann is not None:
-        out.extend(_write_mann_block(merged_mann))
+        out.extend(write_mann(merged_mann))
     out.extend(trail_for.get("#Mann=", []))
 
     if merged_ineff is not None:
-        out.extend(_write_ineff_block(merged_ineff))
+        out.extend(write_ineff(merged_ineff))
     out.extend(trail_for.get("#XS Ineff=", []))
 
     if merged_bank is not None:
-        out.append(_write_bank_sta_line(merged_bank))
+        out.append(write_bank_sta(merged_bank))
     out.extend(trail_for.get("Bank Sta=", []))
 
     return out

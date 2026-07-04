@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import List, Optional
 from ..model import IneffArea, IneffFlowAreas
-from .base import read_fixed_fields
+from .base import read_fixed_fields, _write_triplet_lines
 
 
 def _parse_station_field(raw: str) -> float:
@@ -80,3 +80,26 @@ def parse_ineff(lines, index):
         ))
 
     return IneffFlowAreas(ifa_type=ifa_type, areas=areas), consumed
+
+
+def write_ineff(ineff: IneffFlowAreas) -> List[str]:
+    """Write a #XS Ineff= block from an IneffFlowAreas (plus its paired
+    Permanent Ineff= line).
+
+    The flag (0 for 'normal', -1 for 'multiple_block') is written verbatim
+    from ineff.ifa_type, preserving whichever format the chosen source used
+    -- see merge_ineff() in geometry/merge.py for why "normal" areas are not
+    converted.  A None elevation ("normal"-type infinite height) is written
+    as a blank field.
+    """
+    areas = ineff.areas
+    flag = 0 if ineff.ifa_type == 'normal' else -1
+    lines = [f"#XS Ineff= {len(areas)} ,{flag} \n"]
+    values: List[Optional[float]] = []
+    for area in areas:
+        values.extend([area.start_sta, area.end_sta, area.elevation])
+    lines.extend(_write_triplet_lines(values))
+    lines.append("Permanent Ineff=\n")
+    flags = "".join(f"{'T' if a.permanent else 'F':>8}" for a in areas)
+    lines.append(flags + "\n")
+    return lines

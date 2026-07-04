@@ -39,6 +39,12 @@ organised and how to add new merge test cases.
 4. Add a test using the fixture at `tests/data/Beaver/beaver.g01` or a new fixture in
    `tests/data/`.
 
+If the block will be written (not just parsed), the write function belongs in the same
+block module as its parser, so read/write format knowledge stays in one place —
+`write_sta_elev()`, `write_mann()`, `write_ineff()`, and `write_bank_sta()` follow this
+pattern. Shared 8-char fixed-width helpers (`_fmt`, `_fmt_or_blank`,
+`_write_triplet_lines`) live in `blocks/base.py` next to `read_fixed_fields`.
+
 Implemented block parsers (as of 2026-06-23):
 - `blocks/xs_sta_elev.py` — `#Sta/Elev= N`: reads N station/elevation pairs from
   8-char fixed-width fields; returns `(List[Tuple[float,float]], lines_consumed)`.

@@ -674,6 +674,38 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   after the five session-7 regression tests).
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
+### Session 8 changes (2026-07-04): XS block writers moved from merge.py into blocks/
+
+Pure mechanical move, no behavior change: the fixed-format block writers that lived in
+`geometry/merge.py` now live in `geometry/blocks/` next to their parsers, so read/write
+format knowledge for each block is in one file:
+
+- `_write_sta_elev_block` → `write_sta_elev()` in `blocks/xs_sta_elev.py`
+- `_write_mann_block` → `write_mann()` in `blocks/xs_mann.py`
+- `_write_ineff_block` → `write_ineff()` in `blocks/xs_ineff.py`
+- `_write_bank_sta_line` → `write_bank_sta()` in `blocks/xs_bank_sta.py`
+- `_fmt` / `_fmt_or_blank` / `_write_triplet_lines` → `blocks/base.py`
+
+merge.py imports the writers; its unused `parse_bank_sta` import was dropped.
+`_write_cutline_block` deliberately stays in merge.py for now: shift.py has its own
+independent cutline writer (`_format_xs_gis_lines`) with a real line-wrap bug (see
+below), and unifying the two into a shared `write_cutline()` in `blocks/xs_gis.py`
+belongs to that bug fix, not to this move.
+
+**Known bug, not yet fixed — shift.py cutline line wrap.** `_format_xs_gis_lines`
+concatenates all 16-char coordinate fields into one flat string and slices it every
+65 characters. 65 is not a multiple of 16, so each data line starts one character
+deeper inside a field; from the 4th data line onward (≥7 XY pairs at typical 14-char
+value widths) digits are split across line breaks, producing corrupt coordinates that
+`parse_cutline` cannot read back (IndexError) and HEC-RAS would misread. Short cut
+lines (≤6 points) survive because the drift only consumes leading padding spaces —
+which is why the existing round-trip test (3-point cutline, RS 84816) never caught it.
+Fix deferred until the user provides HEC-RAS-authored fixtures: a cutline with >7 XY
+pairs, one with small coordinates (~45.2), one with large 7-digit coordinates.
+shift.py also formats values as `{:16.6f}` while HEC-RAS itself writes ~9 significant
+digits (`6451252.62`); merge.py's `_write_cutline_block` (`{:>16.9g}`, 4 values per
+64-char line) matches HEC-RAS native format.
+
 ### Session 7 changes to `geometry/merge.py` (2026-07-02, bug-review fixes)
 
 Four fixes from a code-review pass, each with regression tests in
