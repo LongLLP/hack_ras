@@ -3,7 +3,7 @@
 from __future__ import annotations
 from typing import List, Tuple
 from ..model import XSGISCutLine
-from .base import read_fixed_fields
+from .base import read_fixed_fields, _fmt
 
 def parse_cutline(lines, index):
     """
@@ -36,3 +36,32 @@ def parse_cutline(lines, index):
         i += 1
 
     return XSGISCutLine(n_pairs, points), consumed
+
+
+def write_cutline(cutline: XSGISCutLine) -> List[str]:
+    """Write an XS GIS Cut Line= block in HEC-RAS native format.
+
+    Format confirmed against the RAS-authored fixture
+    tests/data/XSCutLines stress test/XSCut_stress_test.g01 (coordinates
+    entered in the RAS GUI with more digits than a field can hold), which
+    this writer reproduces byte-for-byte:
+
+    - 16-char fixed-width fields, right-justified, 4 fields (2 XY pairs) per
+      64-char line.  Wrapping ALWAYS lands on a field boundary — a value is
+      never split across lines.  Adjacent full-width values have no
+      separating whitespace, so the block can only be read as fixed columns,
+      never whitespace-split.
+    - Each value carries as many digits as fit its field (up to 15
+      significant figures), trailing zeros stripped.  RAS itself *truncates*
+      digits that don't fit (...36345064855 → ...36345064) where _fmt
+      rounds; the difference can only show up on computed values carrying
+      more precision than any RAS-written file can store — every value
+      parsed from a file round-trips exactly.
+    """
+    lines = [f"XS GIS Cut Line={cutline.n_points}\n"]
+    values: List[float] = []
+    for x, y in cutline.points:
+        values.extend([x, y])
+    for i in range(0, len(values), 4):
+        lines.append("".join(_fmt(v, 16) for v in values[i : i + 4]) + "\n")
+    return lines

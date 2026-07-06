@@ -674,6 +674,60 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   after the five session-7 regression tests).
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
+### Session 9 changes (2026-07-06): shift.py cutline wrap bug fixed; shared `write_cutline()`
+
+The session-8 bug (below) is fixed. `blocks/xs_gis.py` now has `write_cutline()`,
+used by both `shift.py` (whose broken `_format_xs_gis_lines` is deleted) and
+`merge.py` (whose `_write_cutline_block` is deleted — it wrote only 9 significant
+figures, losing precision HEC-RAS itself keeps).
+
+**HEC-RAS native cut line format — confirmed against an organic fixture.** The user
+built `tests/data/XSCutLines stress test/XSCut_stress_test.g01` entirely in the RAS
+GUI (input values recorded in `XS_Cutline_input.csv`, some with more decimals than a
+field can hold; three XS with 11/9/12-point cut lines at 7-digit, 5-digit, and
+2-digit coordinate magnitudes):
+
+- 16-char fixed-width fields, right-justified, 4 fields (2 XY pairs) per 64-char
+  line; wrapping always lands on a field boundary.
+- Values with enough digits fill their field completely, leaving NO whitespace
+  between adjacent fields — the block can only be read as fixed columns, never
+  whitespace-split.
+- Each value carries as many digits as fit the 16-char field (up to ~15 significant
+  figures), trailing zeros stripped.  RAS *truncates* digits that don't fit
+  (`…36345064855` → `…36345064`, not `…065`); `_fmt` rounds instead, which can only
+  differ on computed values carrying more precision than any RAS-written file —
+  every value parsed from a file round-trips byte-for-byte
+  (`test_write_cutline_reproduces_organic_bytes` asserts this for all three blocks).
+
+Four regression tests added in `tests/test_xs_shift.py` (parse packed fields,
+byte-reproduce organic blocks, never split fields on 8-point write + re-parse,
+shift-and-roundtrip all three stress XS).
+
+**Shifted fixtures verified in RAS.** `XSCut_stress_test.g02` (shift right: RS 3000
++100 ft, RS 2000 +105 ft, RS 1000 +10 ft — all past the first GIS vertex) and `.g03`
+(same distances left) were generated with the fixed shifter and the user confirmed
+the shifted cut lines display correctly in HEC-RAS.  Note the sign convention: cut
+lines are digitized left bank → right bank, and a positive `shift_polyline` distance
+slides the line toward its own end point, i.e. toward the RIGHT bank (facing
+downstream) — which can be screen-LEFT in a north-up plan view.
+
+**Stretched-stationing fixture + 8-char station rounding (same day).** The user built
+`tests/data/Massive XS stations/Massive.g01` in the RAS GUI (input recorded in
+`RS_input_to_RAS.xlsx`): RS 1000 is a normal 219-point XS (−350..777.71); RS 500 is
+the same XS with LOB/Channel/ROB scaled ×1000 in RAS (−350..1127361, organically
+packed 8-char `#Sta/Elev=` fields like `870.9768549.99`).  Key finding: the user
+entered bank stations 451530.795 / 474140.825 and RAS saved both as `451530.8` /
+`474140.8` in BOTH `#Sta/Elev=` and `Bank Sta=` — **RAS never writes a station
+needing more than 8 chars; it ROUNDS to fit the field, matching `_fmt`'s behavior
+exactly** (contrast: 16-char cut line fields are truncated, not rounded).  Since
+RAS-authored files can therefore never contain overflowing stations, overflow only
+arises from our own pipeline (transforms/interpolation).
+`test_bank_sta_matches_block_station_stretched_xs` was retargeted from the deleted
+SterpCreek.g04 to this fixture (A = B = Massive.g01, config on RS 500 with
+h_offset=0.33 to force 9-char stations, truncated right end); its skip guard and
+sibling-repo dependency are gone.  Baseline: 106 passed / 1 known failure (stale
+SterpCreek.g03) / 0 skipped.
+
 ### Session 8 changes (2026-07-04): XS block writers moved from merge.py into blocks/
 
 Pure mechanical move, no behavior change: the fixed-format block writers that lived in
@@ -692,7 +746,7 @@ independent cutline writer (`_format_xs_gis_lines`) with a real line-wrap bug (s
 below), and unifying the two into a shared `write_cutline()` in `blocks/xs_gis.py`
 belongs to that bug fix, not to this move.
 
-**Known bug, not yet fixed — shift.py cutline line wrap.** `_format_xs_gis_lines`
+**Known bug (fixed in session 9, above) — shift.py cutline line wrap.** `_format_xs_gis_lines`
 concatenates all 16-char coordinate fields into one flat string and slices it every
 65 characters. 65 is not a multiple of 16, so each data line starts one character
 deeper inside a field; from the 4th data line onward (≥7 XY pairs at typical 14-char

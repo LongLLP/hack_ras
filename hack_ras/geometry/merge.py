@@ -21,7 +21,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .model import CrossSection, GeometryFile, IneffArea, IneffFlowAreas, ManningDef, XSGISCutLine
 from .blocks.xs_sta_elev import parse_sta_elev, write_sta_elev
-from .blocks.xs_gis import parse_cutline
+from .blocks.xs_gis import parse_cutline, write_cutline
 from .blocks.xs_mann import parse_mann, write_mann
 from .blocks.xs_ineff import parse_ineff, write_ineff
 from .blocks.xs_bank_sta import write_bank_sta
@@ -529,23 +529,6 @@ def build_merged_cutline(
 
 
 # ---------------------------------------------------------------------------
-# Fixed-format writers — GIS cut line only.  The 8-char XS block writers
-# (write_sta_elev, write_mann, write_ineff, write_bank_sta) live in blocks/
-# next to their parsers.
-# ---------------------------------------------------------------------------
-
-def _write_cutline_block(cutline: XSGISCutLine) -> List[str]:
-    lines = [f"XS GIS Cut Line={cutline.n_points}\n"]
-    values = []
-    for x, y in cutline.points:
-        values.extend([x, y])
-    # 16-char fields, 4 per line (2 XY pairs)
-    for i in range(0, len(values), 4):
-        lines.append("".join(f"{v:>16.9g}" for v in values[i : i + 4]) + "\n")
-    return lines
-
-
-# ---------------------------------------------------------------------------
 # Raw-line helpers for pass-through content
 # ---------------------------------------------------------------------------
 
@@ -1007,7 +990,7 @@ def _build_merged_xs_lines(
     #    (e.g. "Node Last Edited Time=" stays between cutline and #Sta/Elev=,
     #    "XS Rating Curve=" stays after Bank Sta=, etc.).
     if merged_cl is not None:
-        out.extend(_write_cutline_block(merged_cl))
+        out.extend(write_cutline(merged_cl))
     out.extend(trail_for.get("XS GIS Cut Line=", []))
 
     if merged_se:

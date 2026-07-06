@@ -9,6 +9,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Dict, List, Optional, Tuple
 
 from .model import GeometryFile, XSGISCutLine
+from .blocks.xs_gis import write_cutline
 
 _logger = logging.getLogger(__name__)
 
@@ -53,19 +54,6 @@ def _remove_consecutive_points(
         if _seg_len(x0, y0, x, y) > eps:
             cleaned.append((x, y))
     return cleaned
-
-
-def _format_xs_gis_lines(
-    points: List[Tuple[float, float]], line_width: int = 65
-) -> List[str]:
-    flat = "".join(f"{x:16.6f}{y:16.6f}" for x, y in points)
-    out: List[str] = []
-    s = flat
-    while len(s) > line_width:
-        out.append(s[:line_width] + "\n")
-        s = s[line_width:]
-    out.append(s + "\n")
-    return out
 
 
 # ---------------------------------------------------------------------------
@@ -313,14 +301,9 @@ def shift_xs_cutlines(
                     _logger.warning("Failed shifting XS %s; leaving unchanged.", key)
                     new_pts = pts
                 shifted_pts_by_key[key] = new_pts
-                new_count = len(new_pts)
-                header = (
-                    f"XS GIS Cut Line={new_count}\n"
-                    if new_count != num_pairs
-                    else line
+                modified_lines.extend(
+                    write_cutline(XSGISCutLine(len(new_pts), new_pts))
                 )
-                modified_lines.append(header)
-                modified_lines.extend(_format_xs_gis_lines(new_pts))
             else:
                 modified_lines.append(line)
                 modified_lines.extend(orig_coord_lines)

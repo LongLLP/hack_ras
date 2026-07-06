@@ -128,6 +128,27 @@ tests/data/
     Model.p02                           ← plan sidecar (used by read_plan_metadata)
     Features/
       Profile Lines.shp  (.dbf .shx .prj)  ← GIS profile line tests; line extends beyond mesh by design
+  XSCutLines stress test/
+    XSCut_stress_test.g01               ← HEC-RAS-authored cut line format fixture: three XS
+                                           (11/9/12-point cut lines at 7-digit, 5-digit, and
+                                           2-digit coordinates), incl. fully packed 16-char
+                                           fields with no whitespace; cut line writer tests
+    XSCut_stress_test.g02 / .g03        ← g01 shifted right/left with the fixed shifter
+                                           (RS 3000 ±100 ft, RS 2000 ±105 ft, RS 1000 ±10 ft);
+                                           user-verified to display correctly in HEC-RAS
+    XS_Cutline_input.csv                ← the exact values typed into the RAS GUI (some with
+                                           more decimals than a field holds — documents RAS's
+                                           truncate-to-fit behavior)
+  Massive XS stations/
+    Massive.g01                         ← HEC-RAS-authored stretched-stationing fixture:
+                                           RS 1000 (normal, -350..777.71) and RS 500 (same XS
+                                           with LOB/Ch/ROB scaled x1000 in RAS: -350..1127361,
+                                           banks 451530.8/474140.8, organically packed 8-char
+                                           #Sta/Elev fields); bank-station shortening test
+    RS_input_to_RAS.xlsx                ← the exact values typed into the RAS GUI (banks
+                                           entered as 451530.795/474140.825 — RAS ROUNDED them
+                                           to fit the 8-char field, unlike the 16-char cut
+                                           line fields where it truncates)
 ```
 
 Geometry merge tests reference fixtures from the sibling `RAS_xsedit` repo via a

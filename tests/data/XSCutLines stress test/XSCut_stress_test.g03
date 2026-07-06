@@ -1,0 +1,79 @@
+Geom Title=Stress Test Shift Left
+Program Version=7.00
+Viewing Rectangle=-16731.47 , 1692581.42 , 5660140.8 ,-56020.8 
+
+River Reach=FakeRiver       ,FakeReach       
+Reach XY= 6 
+        1675423.        5604100.        1675423.        5603400.
+          12345.          11200.          12345.           9800.
+             60.            130.             60.             20.
+Rch Text X Y=0.534153,0.7399818
+Reverse River Text= 0 
+
+Type RM Length L Ch R = 1 ,3000    ,,,
+XS GIS Cut Line=11
+1675922.913268355603800.46689563      1675823.45      5603790.12
+       1675750.2       5603782.5      1675671.88      5603775.25
+       1675590.5       5603770.11675511.414397225603765.76142893
+1675423.456138635603760.29095679 1675350.80435655603755.40098873
+1675270.363450645603750.720067581675191.68157868 5603745.2860491
+1675123.759513745603742.04469625
+Node Last Edited Time=Jul/06/2026 08:12:00
+#Sta/Elev= 3 
+       0     100      50      90     100     100
+#Mann= 3 ,0,0
+       0     .07       0       0    .035       0     100     .07       0
+Bank Sta=0,100
+XS Rating Curve= 0 ,0
+XS HTab Starting El and Incr=90.5,0.47, 20 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
+Exp/Cntr=0.3,0.1
+
+Type RM Length L Ch R = 1 ,2000    ,,,
+XS GIS Cut Line=9
+12850.480656223310525.3047927196         12745.6         10520.3
+        12650.25        10515.75         12551.8         10511.2
+         12455.5         10507.6        12345.55       10503.211
+         12250.4        10499.85         12150.9         10496.3
+12050.639629289410492.8100815765
+Node Last Edited Time=Jul/06/2026 08:12:00
+#Sta/Elev= 3 
+       0      90      50      80     100      90
+#Mann= 3 ,0,0
+       0     .07       0       0    .035       0     100     .07       0
+Bank Sta=0,100
+XS Rating Curve= 0 ,0
+XS HTab Starting El and Incr=80.5,0.47, 20 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
+Exp/Cntr=0.3,0.1
+
+Type RM Length L Ch R = 1 ,1000    ,,,
+XS GIS Cut Line=12
+109.86530766911272.0086548345735         99.8812         71.4451
+           92.35           71.02         85.6604         70.7143
+          78.244         70.4381            71.5           70.15
+         64.9273         69.8546           60.05           69.62
+           53.75         69.3325          47.244         69.0143
+         40.6118           68.7136.490960458369368.5248553561555
+Node Last Edited Time=Jul/06/2026 08:12:00
+#Sta/Elev= 3 
+       0      80      50      70     100      80
+#Mann= 3 ,0,0
+       0     .07       0       0    .035       0     100     .07       0
+Bank Sta=0,100
+XS Rating Curve= 0 ,0
+XS HTab Starting El and Incr=70.5,0.47, 20 
+XS HTab Horizontal Distribution= 5 , 5 , 5 
+Exp/Cntr=0.3,0.1
+
+LCMann Time=Dec/30/1899 00:00:00
+LCMann Region Time=Dec/30/1899 00:00:00
+LCMann Table=0
+Chan Stop Cuts=-1 
+
+
+
+Use User Specified Reach Order=0
+GIS Ratio Cuts To Invert=-1
+GIS Limit At Bridges=0
+Composite Channel Slope=5

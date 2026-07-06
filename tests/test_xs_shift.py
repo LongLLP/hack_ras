@@ -218,3 +218,88 @@ def test_shift_xs_cutlines_roundtrip(tmp_path):
     assert new_xs.cutline is not None
     assert new_xs.cutline.points[0] != orig_xs.cutline.points[0]
     assert abs(_arc_len(new_xs.cutline.points) - _arc_len(orig_xs.cutline.points)) < 1e-3
+
+
+# ---------------------------------------------------------------------------
+# Cut line writer — regression tests for the 65-char wrap bug, using the
+# HEC-RAS-authored stress-test fixture (all values entered in the RAS GUI)
+# ---------------------------------------------------------------------------
+
+STRESS = (
+    Path(__file__).parent / "data" / "XSCutLines stress test"
+    / "XSCut_stress_test.g01"
+)
+
+_STRESS_RIVER = "FakeRiver"
+_STRESS_REACH = "FakeReach"
+
+
+def _parse_stress():
+    return GeometryParser().parse_file(str(STRESS))
+
+
+def test_parse_organic_packed_cutline():
+    # The RS 3000 block has data lines where full-width values touch with no
+    # separating whitespace — readable only as fixed 16-char columns.
+    geom = _parse_stress()
+    xs3000, xs2000, xs1000 = (
+        geom.rivers[_STRESS_RIVER].reaches[_STRESS_REACH].cross_sections
+    )
+    assert [xs.cutline.n_points for xs in (xs3000, xs2000, xs1000)] == [11, 9, 12]
+    assert xs3000.cutline.points[4] == (1675511.41439722, 5603765.76142893)
+    assert xs1000.cutline.points[0] == (99.8812, 71.4451)
+
+
+def test_write_cutline_reproduces_organic_bytes():
+    # write_cutline must reproduce every RAS-authored cut line block
+    # byte-for-byte, including the fully packed high-precision lines.
+    from hack_ras.geometry.blocks.xs_gis import parse_cutline, write_cutline
+
+    geom = _parse_stress()
+    raw = geom.raw_lines
+    checked = 0
+    for i, line in enumerate(raw):
+        if line.startswith("XS GIS Cut Line="):
+            cl, consumed = parse_cutline(raw, i)
+            assert write_cutline(cl) == raw[i : i + consumed]
+            checked += 1
+    assert checked == 3
+
+
+def test_write_cutline_never_splits_fields():
+    # The old 65-char flat wrap split digits across line breaks for cut lines
+    # with 7+ points; parse_cutline could not read that output back.
+    from hack_ras.geometry.blocks.xs_gis import parse_cutline, write_cutline
+    from hack_ras.geometry.model import XSGISCutLine
+
+    pts = [(6451252.62 + i * 10.0, 2049658.46 + i * 7.0) for i in range(8)]
+    block = write_cutline(XSGISCutLine(len(pts), pts))
+    assert all(len(l.rstrip("\n")) % 16 == 0 for l in block[1:])
+    cl, consumed = parse_cutline(block, 0)
+    assert consumed == len(block)
+    assert cl.points == pts
+
+
+def test_shift_stress_cutlines_roundtrip(tmp_path):
+    # Shift all three stress-test XS (7-digit, 5-digit, and 2-digit
+    # coordinates; 11, 9, and 12 points) and re-parse the written file.
+    geom = _parse_stress()
+    trans = {
+        ("fakeriver", "fakereach", "3000"): 25.0,
+        ("fakeriver", "fakereach", "2000"): 25.0,
+        ("fakeriver", "fakereach", "1000"): 5.0,
+    }
+    result = shift_xs_cutlines(geom, trans)
+    out_path = tmp_path / "shifted.g01"
+    GeometryWriter().write(result, str(out_path))
+    re_parsed = GeometryParser().parse_file(str(out_path))
+
+    orig_reach = geom.rivers[_STRESS_RIVER].reaches[_STRESS_REACH]
+    new_reach = re_parsed.rivers[_STRESS_RIVER].reaches[_STRESS_REACH]
+    assert len(new_reach.cross_sections) == 3
+    for orig_xs, new_xs in zip(orig_reach.cross_sections, new_reach.cross_sections):
+        assert new_xs.cutline is not None
+        assert new_xs.cutline.points[0] != orig_xs.cutline.points[0]
+        assert abs(
+            _arc_len(new_xs.cutline.points) - _arc_len(orig_xs.cutline.points)
+        ) < 1e-3

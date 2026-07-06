@@ -1,0 +1,29 @@
+Proj Title=XSCut_stress_test
+Current Geom=g01
+Default Exp/Contr=0.3,0.1
+English Units
+Geom File=g01
+Geom File=g02
+Geom File=g03
+Y Axis Title=Elevation
+X Axis Title(PF)=Main Channel Distance
+X Axis Title(XS)=Station
+BEGIN DESCRIPTION:
+g01 is organically created from XS_Cutline_input.csv, showing how RAS RAS fills the 16-char XS CutLine field with as many digits as fit (~15 significant figures), stripping trailing zeros. RAS truncates rather than rounds. The input 1675270.36345064855 was saved as ...36345064 where rounding would give ...065. 
+
+g02 and g03 are shifted with  blocks/xs_gis.py, with RS 3000 shifted 100 ft, RS 2000 shifted 105 ft, RS 1000 shifted 10 ft. g02 shifts to the right and g03 shifts to the left.
+END DESCRIPTION:
+DSS Start Date=
+DSS Start Time=
+DSS End Date=
+DSS End Time=
+DSS Export Filename=
+DSS Export Rating Curves= 0 
+DSS Export Rating Curve Sorted= 0 
+DSS Export Volume Flow Curves= 0 
+DXF Filename=
+DXF OffsetX= 0 
+DXF OffsetY= 0 
+DXF ScaleX= 1 
+DXF ScaleY= 10 
+GIS Export Profiles= 0 

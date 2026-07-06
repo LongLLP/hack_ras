@@ -305,35 +305,36 @@ def test_write_bank_sta_line_precision():
     assert write_bank_sta((112421.75, 112421.75)) == "Bank Sta=112421.8,112421.8\n"
 
 
-@skip_if_no_data
-@pytest.mark.skipif(
-    not (DATA_DIR / "SterpCreek.g04").is_file(),
-    reason="SterpCreek.g04 (stretched-stationing fixture) not present — it was a "
-           "temporary file; retarget this test when g02 gains a stretched XS",
-)
+MASSIVE_G01 = Path(__file__).parent / "data" / "Massive XS stations" / "Massive.g01"
+
+
 def test_bank_sta_matches_block_station_stretched_xs(tmp_path):
     """
-    End-to-end on SterpCreek.g04's RS 43320 (stationing stretched to the limits
-    of HEC-RAS's 8-character fields, stations -350 .. 112421, banks at
-    44838/47099): after a rebuild, the Bank Sta= values must parse to stations
+    End-to-end on the RAS-authored 'Massive XS stations' fixture, RS 500
+    (LOB/Channel/ROB scaled x1000 in the RAS GUI: stations -350 .. 1127361,
+    banks 451530.8 / 474140.8).  RAS itself never writes a station that needs
+    more than 8 characters — it rounds to fit the field (the user entered
+    451530.795 and RAS saved 451530.8 in both #Sta/Elev= and Bank Sta=) — so
+    overflow can only come from our own pipeline: the h_offset below pushes
+    stations like 451530.8 to 451531.13, which no longer fits an 8-char
+    field.  After the rebuild the Bank Sta= values must parse to stations
     that exist exactly in the written #Sta/Elev= block.
     """
-    parser = GeometryParser()
-    geom_a = parser.parse_file(str(DATA_DIR / "SterpCreek.g04"))
-    geom_b = parser.parse_file(str(DATA_DIR / "SterpCreek.g01"))
-    key = _norm_key("Sterp West", "Upper", "43320")
-    # Truncate slightly so the XS is genuinely rebuilt (not passed through)
+    geom = GeometryParser().parse_file(str(MASSIVE_G01))
+    key = _norm_key("WideRiver", "WideReach", "500")
+    # Truncate the right end so the XS is genuinely rebuilt, and shift by a
+    # value that overflows the 8-char station fields.
     configs = {key: MergeConfig(
-        transform_a=Transform(),
+        transform_a=Transform(h_offset=0.33),
         transform_b=Transform(),
-        breakpoints=[-350.0, 112000.0],
+        breakpoints=[-349.67, 1127000.0],
         segment_sources=["A"],
     )}
     out = tmp_path / "stretched.g99"
-    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+    write_merged_geometry(geom, geom, configs, str(out), title="t")
 
     xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
-    assert xs_out.sta_elev[-1][0] == 112000.0
+    assert xs_out.sta_elev[-1][0] == 1127000.0
     stations = {s for s, _ in xs_out.sta_elev}
     assert xs_out.bank_stations[0] in stations
     assert xs_out.bank_stations[1] in stations
