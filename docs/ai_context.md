@@ -10,7 +10,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | Package | Purpose |
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
-| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass |
+| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, clone with edits) |
 | `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
@@ -103,6 +103,32 @@ Plan File=p14
 Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 `resolve_filenames(basename_map)` maps all IDs of each type to filenames, returning
 `{'geom': [...], 'plan': [...], 'unsteady': [...]}`.
+
+## Plan File Operations (`hack_ras/project/plans.py`)
+
+In-place plan management for a project. All functions take a `RasProject`, edit
+files losslessly (raw-line edits; untouched lines byte-identical, CRLF preserved),
+and treat the `.prj` as authoritative — orphan plan files on disk are rejected.
+
+```python
+from hack_ras import RasProject
+from hack_ras.project.plans import renumber_plan, insert_plan_gap, clone_plan
+
+project = RasProject(r"...\Model.prj")
+renumber_plan(project, "p25", "p30")     # renames .p## + .p##.hdf, updates Plan File= and Current Plan=
+insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5 (highest-first); returns {old: new}
+clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
+           line_edits={"Breach Start=": "Breach Start=False,,01JAN2025,1214,False,,,0"},
+           new_id="p25")                 # new_id optional — defaults to next free number
+```
+
+- `clone_plan` enforces plan-title uniqueness (`DuplicatePlanTitle`) and inserts the
+  new `Plan File=` entry in ascending numeric position in the `.prj`.
+- `line_edits` maps a line prefix to the full replacement line; each prefix must match
+  exactly one line (`ValueError` otherwise — a multi-breach plan needs a different tool).
+- Typed exceptions: `PlanFileNotFound`, `PlanIdInUse`, `DuplicatePlanTitle`.
+- `insert_plan_gap` validates every target ID (collisions with unshifted plans, orphan
+  files on disk, p99 overflow) before touching any file.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
@@ -673,6 +699,19 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 10 changes (2026-07-06): plan file operations — `project/plans.py`
+
+New module `hack_ras/project/plans.py` (see "Plan File Operations" section above for
+API): `renumber_plan`, `insert_plan_gap`, `clone_plan`, driven by the user's recurring
+need to insert new breach-timing plans into an existing numbered sequence. First
+production use: the 46A Hillside model — p25–p31 (L7 breaches) shifted to p30–p36,
+new L4 plans p25–p29 (breach 1214–1210) cloned from p24, new L7 plans p37–p40
+(breach 1203–1200) cloned from p36; renamed files verified byte-identical, clones
+verified to differ only in Plan Title / Short Identifier / Breach Start.
+14 tests added in `tests/test_plan_ops.py` (synthetic tmp-dir mini project — the
+operations mutate files, so a shared checked-in fixture doesn't fit).
+Baseline: **121 passed / 0 failed / 0 skipped**.
 
 ### Session 9 changes (2026-07-06): shift.py cutline wrap bug fixed; shared `write_cutline()`
 
