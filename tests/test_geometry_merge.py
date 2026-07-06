@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -16,6 +17,9 @@ DATA_DIR = (
     Path(__file__).parent.parent.parent
     / "RAS_xsedit" / "tests" / "data" / "Sterp Creek"
 )
+
+# The GUI "Save Config…" export that produced the known-good SterpCreek.g03.
+CONFIG_JSON = DATA_DIR.parent.parent / "xsedit_config.json"
 
 skip_if_no_data = pytest.mark.skipif(
     not DATA_DIR.is_dir(),
@@ -46,111 +50,52 @@ def _build_index(geom):
     return idx
 
 
-def _sterp_configs(geom_a):
+def _transform(d):
+    """Build a Transform from a config-JSON dict, ignoring unknown keys
+    (older configs may still carry e.g. h_scale — dropped, like the GUI does)."""
+    return Transform(
+        h_offset=d.get("h_offset", 0.0),
+        v_offset=d.get("v_offset", 0.0),
+        v_scale=d.get("v_scale", 1.0),
+    )
+
+
+def _sterp_configs():
     """
-    Full set of MergeConfigs matching xsedit_config.json (all 10 configured XS),
-    as recorded in 'Sterp Creek inputs and outputs.xlsx'.
+    Load (title, {norm_key: MergeConfig}) from the authoritative GUI config
+    record, RAS_xsedit/tests/xsedit_config.json — the exact "Save Config…"
+    export the user loaded in the XS Editor to produce the known-good
+    SterpCreek.g03, then verified in HEC-RAS (2026-07-06; see
+    RAS_xsedit/tests/Test_notes.txt for the per-XS review).
 
-    Geom A = g02 (master), Geom B = g01.
-
-    Four of the ten configs are trivial (_is_trivial_config returns True for
-    them: 43084, 42893, 42528, 41868) and will be written verbatim from g02.
-    The remaining six are genuinely merged.
+    Geom A = g02 (master), Geom B = g01.  Five configured XS:
+      43320 — B/A/B/A/gap/A/B, transform B h -349 / v -0.2, IFAs and cut line
+              from B (blend extension allowed; no extension expected)
+      43170 — A>B>A, no length change
+      42998 — A>B>A truncated on the right, IFAs from B, cut line preserved
+              verbatim
+      42893 — source B where B has no such XS; currently exports as a
+              verbatim copy of A (silent — warning discussion deferred)
+      42788 — extended flat to -50, truncated at 850, cut line from B with
+              blend extension
     """
-    T = Transform  # alias for brevity
-
-    return {
-        # --- Sterp West / Upper ---
-        _norm_key("Sterp West", "Upper", "43320"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(h_offset=-523.0),
-            breakpoints=[0.0, 111.0, 117.4, 455.8023],
-            segment_sources=["A", "B", "A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "43170"): MergeConfig(
-            transform_a=T(h_offset=-222.0, v_offset=-1.0),
-            transform_b=T(),
-            breakpoints=[0.0, 88.0, 107.0, 689.8838],
-            segment_sources=["A", "B", "A"],
-            cutline_source="A",
-            preserve_cutline=True,
-        ),
-        _norm_key("Sterp West", "Upper", "43084"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(),
-            breakpoints=[0.0, 100.0],
-            segment_sources=["A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "42998"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(h_offset=158.0, v_offset=-2.0),
-            breakpoints=[0.0, 261.5, 277.0, 300.0, 305.0, 669.6589],
-            segment_sources=["A", "B", "A", "B", "A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "42893"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(),
-            breakpoints=[0.0, 620.56],
-            segment_sources=["A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "42788"): MergeConfig(
-            transform_a=T(h_offset=-20.0),
-            transform_b=T(),
-            breakpoints=[0.0, 833.0729],
-            segment_sources=["A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "42528"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(),
-            breakpoints=[0.0, 1125.249],
-            segment_sources=["A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "42268"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(),
-            breakpoints=[0.0, 1366.524],
-            segment_sources=["A"],
-            cutline_source="B",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "41868"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(),
-            breakpoints=[0.0, 1643.446],
-            segment_sources=["A"],
-            cutline_source="A",
-            preserve_cutline=False,
-        ),
-        _norm_key("Sterp West", "Upper", "41468"): MergeConfig(
-            transform_a=T(),
-            transform_b=T(),
-            breakpoints=[0.0, 1966.335],
-            segment_sources=["B"],
-            cutline_source="B",
-            preserve_cutline=False,
-        ),
-    }
-
-
-# Keys for all XS that have an explicit config — excluded from the verbatim
-# pass-through test, which only checks unconfigured cross-sections.
-_CONFIGURED_KEYS = {
-    _norm_key("Sterp West", "Upper", rs)
-    for rs in ("43320", "43170", "43084", "42998", "42893",
-               "42788", "42528", "42268", "41868", "41468")
-}
+    cfg = json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
+    configs = {}
+    for x in cfg["cross_sections"]:
+        key = _norm_key(x["river"], x["reach"], x["station"])
+        configs[key] = MergeConfig(
+            transform_a=_transform(x.get("transform_a", {})),
+            transform_b=_transform(x.get("transform_b", {})),
+            breakpoints=x["breakpoints"],
+            segment_sources=x["segment_sources"],
+            cutline_source=x.get("cutline_source", "A"),
+            ineff_source=x.get("ineff_source", "A"),
+            preserve_cutline=x.get("preserve_cutline", False),
+            blend_cutline=x.get("blend_cutline", False),
+            blend_cutline_threshold_pct=x.get("blend_cutline_threshold_pct", 10.0),
+            blend_cutline_search_radius=x.get("blend_cutline_search_radius", 20.0),
+        )
+    return cfg["title"], configs
 
 
 # ---------------------------------------------------------------------------
@@ -163,12 +108,8 @@ def test_merge_matches_known_good_output(tmp_path, sterp_geoms):
     geom_a, geom_b = sterp_geoms
     out = tmp_path / "SterpCreek.g03"
 
-    write_merged_geometry(
-        geom_a, geom_b,
-        _sterp_configs(geom_a),
-        str(out),
-        title="Merged Geometry",
-    )
+    title, configs = _sterp_configs()
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title=title)
 
     expected = (DATA_DIR / "SterpCreek.g03").read_text(encoding="utf-8", errors="ignore")
     actual = out.read_text(encoding="utf-8", errors="ignore")
@@ -181,12 +122,8 @@ def test_reach_order_preserved(tmp_path, sterp_geoms):
     geom_a, geom_b = sterp_geoms
     out = tmp_path / "SterpCreek.g03"
 
-    write_merged_geometry(
-        geom_a, geom_b,
-        _sterp_configs(geom_a),
-        str(out),
-        title="Merged Geometry",
-    )
+    title, configs = _sterp_configs()
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title=title)
 
     def reach_order(path):
         prefix = "River Reach="
@@ -209,12 +146,8 @@ def test_unmodified_xs_pass_through_verbatim(tmp_path, sterp_geoms):
     geom_a, geom_b = sterp_geoms
     out = tmp_path / "SterpCreek.g03"
 
-    write_merged_geometry(
-        geom_a, geom_b,
-        _sterp_configs(geom_a),
-        str(out),
-        title="Merged Geometry",
-    )
+    title, configs = _sterp_configs()
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title=title)
 
     parser = GeometryParser()
     geom_out = parser.parse_file(str(out))
@@ -224,7 +157,7 @@ def test_unmodified_xs_pass_through_verbatim(tmp_path, sterp_geoms):
         for rch in river.reaches.values():
             for xs_a in rch.cross_sections:
                 k = _norm_key(xs_a.river, xs_a.reach, xs_a.station)
-                if k in _CONFIGURED_KEYS:
+                if k in configs:
                     continue
                 xs_out = idx_out[k]
                 lines_a = _xs_raw_lines(geom_a, xs_a)

@@ -665,13 +665,13 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   uses the `Hillside_Levee` conda environment.
 - `tests/test_geometry_merge.py` covers `write_merged_geometry` using Sterp Creek fixtures
   in the sibling `RAS_xsedit` repo. See `RAS_xsedit/tests/README.md` for how to add cases.
-- **`SterpCreek.g03` (in RAS_xsedit `tests/data/Sterp Creek/`) is stale** — it predates the
-  session 5 redesign (H Scale removal, always-interpolate-at-breakpoints, rounding,
-  bank/Manning's snapping) and will not byte-for-byte match new output.
-  `test_merge_matches_known_good_output` is expected to fail until that fixture is
-  regenerated; the other tests in `test_geometry_merge.py` don't depend on exact byte
-  content and pass.  Effective baseline: 102 passing, 1 known-failing (103 total,
-  after the five session-7 regression tests).
+- **`SterpCreek.g03` regenerated and verified (2026-07-06)** — the user exported a new
+  g03 from the GUI using a new 5-XS scenario (`RAS_xsedit/tests/xsedit_config.json`:
+  gap segment, B-sourced IFAs, cut-line blend, an extension + truncations) and
+  verified it XS-by-XS in HEC-RAS (`RAS_xsedit/tests/Test_notes.txt`).
+  `_sterp_configs()` in `test_geometry_merge.py` now loads that JSON directly at
+  runtime instead of hardcoding configs, so config/fixture/test can't drift apart
+  silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
 ### Session 9 changes (2026-07-06): shift.py cutline wrap bug fixed; shared `write_cutline()`
@@ -725,8 +725,22 @@ arises from our own pipeline (transforms/interpolation).
 `test_bank_sta_matches_block_station_stretched_xs` was retargeted from the deleted
 SterpCreek.g04 to this fixture (A = B = Massive.g01, config on RS 500 with
 h_offset=0.33 to force 9-char stations, truncated right end); its skip guard and
-sibling-repo dependency are gone.  Baseline: 106 passed / 1 known failure (stale
-SterpCreek.g03) / 0 skipped.
+sibling-repo dependency are gone.
+
+**Known-good g03 regenerated; test now JSON-driven (same day).** The user rebuilt the
+Sterp Creek scenario (5 configured XS; source B g01 was also edited — new title
+'old XS w new IFAs', RS 42893 removed from B to create a B-missing case), exported a
+new `SterpCreek.g03` via the GUI, and verified it in HEC-RAS
+(`RAS_xsedit/tests/Test_notes.txt`).  Independent checks confirmed: regenerating from
+the JSON via `write_merged_geometry` reproduces the exported g03 byte-for-byte; all
+73 unconfigured XS pass through verbatim; bank-station text matches the block text;
+IFA sentinel/transform behavior correct in both 'normal' (42998) and
+'multiple_block' (43320) forms.  `_sterp_configs()` was rewritten to load
+`RAS_xsedit/tests/xsedit_config.json` directly (title included) — no more
+transcription; `_CONFIGURED_KEYS` removed (derived from the JSON).  Known limitation
+recorded in Test_notes: a config whose segment source is 'B' where B has no such XS
+(RS 42893) silently exports a verbatim copy of A — a warning is wanted; **deferred**.
+Baseline: **107 passed / 0 failed / 0 skipped**.
 
 ### Session 8 changes (2026-07-04): XS block writers moved from merge.py into blocks/
 
