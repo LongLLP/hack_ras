@@ -88,7 +88,9 @@ def write_mann(mann_def: ManningDef) -> List[str]:
         <station> <n_value> <0>  ...  (N triplets)
     """
     entries = mann_def.entries
-    lines = [f"#Mann= {len(entries)} ,{mann_def.method} , 0 \n"]
+    # {:>2} pads positive methods to match RAS's own header spacing:
+    # "#Mann= 3 , 0 , 0" for method 0, "#Mann= 5 ,-1 , 0" for method -1.
+    lines = [f"#Mann= {len(entries)} ,{mann_def.method:>2} , 0 \n"]
     values: List[float] = []
     for sta, n_val in entries:
         values.extend([sta, n_val, 0.0])

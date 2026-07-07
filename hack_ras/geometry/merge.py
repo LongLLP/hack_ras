@@ -343,7 +343,52 @@ def merge_manning(
 
     if not result:
         return None
+
+    # HEC-RAS refuses to run a method -1 block with no n-value on the XS's
+    # first station.  An extension segment can start left of where its
+    # source's n-data begins (the step-function lookup finds nothing there),
+    # so extend the earliest known n-value to the edge — mirroring how the
+    # geometry extension flat-lines the edge elevation.
+    if merged_se and not _stations_equal(result[0][0], merged_se[0][0]):
+        result.insert(0, (merged_se[0][0], result[0][1]))
+
     return ManningDef(method=-1, entries=result)
+
+
+def _method0_manning(
+    xs_a: CrossSection,
+    config: MergeConfig,
+    merged_se: List[Tuple[float, float]],
+    merged_bank: Optional[Tuple[float, float]],
+) -> Optional[ManningDef]:
+    """
+    Preserve Manning method 0 (LOB/Channel/ROB, "Horizontal Variation" OFF)
+    when an all-A edit is applied to a method-0 cross-section.
+
+    Truncating, extending, or gapping A takes no Manning data from B and
+    doesn't change the LOB/Channel/ROB structure, so the user doesn't expect
+    the n-value method to flip to horizontal variation.  The output keeps
+    method 0: A's three n-values positionally, keyed to the merged left edge
+    and the output's own (already snapped) bank stations.  A bank cut off by
+    a truncation has been snapped to the surviving edge station — method 0 is
+    still kept; that side's region simply becomes zero-width.
+
+    Returns None when the shape doesn't apply and the caller should fall back
+    to the ordinary method -1 merge.
+    """
+    mann = xs_a.manning_def
+    if mann is None or mann.method != 0 or len(mann.entries) != 3:
+        return None
+    if merged_bank is None or not merged_se:
+        return None
+    if any(s not in ('A', None) for s in config.segment_sources):
+        return None
+    n_lob, n_ch, n_rob = (n for _, n in mann.entries)
+    return ManningDef(method=0, entries=[
+        (merged_se[0][0], n_lob),
+        (merged_bank[0], n_ch),
+        (merged_bank[1], n_rob),
+    ])
 
 
 # ---------------------------------------------------------------------------
@@ -947,39 +992,11 @@ def _build_merged_xs_lines(
         actual_sta_start = config.breakpoints[0]
         actual_sta_end = config.breakpoints[-1]
 
-    if config.mann_def_override is not None:
-        merged_mann = config.mann_def_override
-    else:
-        merged_mann = merge_manning(xs_a, xs_b, config, merged_se)
-
-    merged_ineff = merge_ineff(xs_a, xs_b, config)
-
-    if config.preserve_cutline:
-        source_xs = xs_a if config.cutline_source == 'A' else xs_b
-        merged_cl = source_xs.cutline
-    else:
-        if config.cutline_source == 'A':
-            merged_cl = build_merged_cutline(
-                xs_a, config.transform_a,
-                actual_sta_start, actual_sta_end,
-                other_xs=xs_b,
-                blend=config.blend_cutline,
-                blend_threshold_pct=config.blend_cutline_threshold_pct,
-                blend_search_radius=config.blend_cutline_search_radius,
-            )
-        else:
-            merged_cl = build_merged_cutline(
-                xs_b, config.transform_b,
-                actual_sta_start, actual_sta_end,
-                other_xs=xs_a,
-                blend=config.blend_cutline,
-                blend_threshold_pct=config.blend_cutline_threshold_pct,
-                blend_search_radius=config.blend_cutline_search_radius,
-            )
-
     # Bank stations are station-space values referencing the #Sta/Elev= array.
     # They must follow the geometry source (A = master), not the GIS cut line source.
     # Only fall back to B's bank stations when A has none and the entire geometry is from B.
+    # Computed before Manning's n because the method-0 pass-through below is
+    # keyed to the output's own snapped bank stations.
     all_from_b = bool(config.segment_sources) and all(
         s == 'B' for s in config.segment_sources
     )
@@ -1007,6 +1024,38 @@ def _build_merged_xs_lines(
             _snap_to_nearest_station(merged_bank[0], merged_se),
             _snap_to_nearest_station(merged_bank[1], merged_se),
         )
+
+    if config.mann_def_override is not None:
+        merged_mann = config.mann_def_override
+    else:
+        merged_mann = _method0_manning(xs_a, config, merged_se, merged_bank)
+        if merged_mann is None:
+            merged_mann = merge_manning(xs_a, xs_b, config, merged_se)
+
+    merged_ineff = merge_ineff(xs_a, xs_b, config)
+
+    if config.preserve_cutline:
+        source_xs = xs_a if config.cutline_source == 'A' else xs_b
+        merged_cl = source_xs.cutline
+    else:
+        if config.cutline_source == 'A':
+            merged_cl = build_merged_cutline(
+                xs_a, config.transform_a,
+                actual_sta_start, actual_sta_end,
+                other_xs=xs_b,
+                blend=config.blend_cutline,
+                blend_threshold_pct=config.blend_cutline_threshold_pct,
+                blend_search_radius=config.blend_cutline_search_radius,
+            )
+        else:
+            merged_cl = build_merged_cutline(
+                xs_b, config.transform_b,
+                actual_sta_start, actual_sta_end,
+                other_xs=xs_a,
+                blend=config.blend_cutline,
+                blend_threshold_pct=config.blend_cutline_threshold_pct,
+                blend_search_radius=config.blend_cutline_search_radius,
+            )
 
     # 4. Write each key block followed by its original interstitial lines.
     #    This preserves the exact position of every non-key line from the source

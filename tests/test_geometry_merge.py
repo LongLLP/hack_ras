@@ -281,6 +281,119 @@ def test_a_only_xs_b_referencing_config_passes_through_verbatim(tmp_path, sterp_
 
 
 # ---------------------------------------------------------------------------
+# Manning method 0 preserved for all-A edits of a method-0 cross-section
+# ---------------------------------------------------------------------------
+
+@skip_if_no_data
+def test_all_a_trim_keeps_manning_method0(tmp_path, sterp_geoms):
+    """
+    RS 42528's source A block is method 0 (LOB/Ch/ROB).  A pure trim takes
+    nothing from B, so the output must stay method 0 — three positional
+    n-values keyed to the merged left edge and the output bank stations —
+    instead of flipping to horizontal variation (-1).
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp West", "Upper", "42528")  # A: 0..1125.25, banks 266.81/304.83
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[47.0, 1100.0],
+        segment_sources=["A"],
+    )}
+    out = tmp_path / "m0_trim.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    mann = xs_out.manning_def
+    assert mann is not None and mann.method == 0
+    stations = [s for s, _ in mann.entries]
+    values = [n for _, n in mann.entries]
+    assert stations == [47.0, 266.81, 304.83]
+    assert values == [0.07, 0.045, 0.07]
+    assert xs_out.bank_stations == (266.81, 304.83)
+
+
+@skip_if_no_data
+def test_trim_through_bank_keeps_method0_bank_at_edge(tmp_path, sterp_geoms):
+    """
+    Truncating through the right bank (304.83) keeps method 0: the bank snaps
+    to the surviving right edge, the ROB region becomes zero-width, and the
+    third n-entry follows the snapped bank.
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp West", "Upper", "42528")
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[47.0, 300.0],
+        segment_sources=["A"],
+    )}
+    out = tmp_path / "m0_bankcut.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    mann = xs_out.manning_def
+    assert mann is not None and mann.method == 0
+    right_edge = xs_out.sta_elev[-1][0]
+    assert xs_out.bank_stations[1] == right_edge
+    assert mann.entries[2][0] == right_edge
+    assert mann.entries[1][0] == 266.81  # left bank untouched
+
+
+@skip_if_no_data
+def test_all_a_gap_keeps_manning_method0(tmp_path, sterp_geoms):
+    """A gap segment (source None) still takes nothing from B → method 0 kept."""
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp West", "Upper", "42528")
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[47.0, 500.0, 600.0, 1100.0],
+        segment_sources=["A", None, "A"],
+    )}
+    out = tmp_path / "m0_gap.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    mann = xs_out.manning_def
+    assert mann is not None and mann.method == 0
+    assert [s for s, _ in mann.entries] == [47.0, 266.81, 304.83]
+
+
+# ---------------------------------------------------------------------------
+# Method -1 blocks must define an n-value on the XS's first station
+# ---------------------------------------------------------------------------
+
+@skip_if_no_data
+def test_extension_gets_manning_entry_at_first_station(tmp_path, sterp_geoms):
+    """
+    RS 42788 extended flat to -50 (A's n-data starts at 0): HEC-RAS refuses
+    to run a method -1 block with no n-value on the first station, so the
+    earliest n-value must be extended to the new left edge.
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp West", "Upper", "42788")
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[-50.0, 0.0, 719.2291754477893, 850.0],
+        segment_sources=["A", "A", "B"],
+    )}
+    out = tmp_path / "ext_mann.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    mann = xs_out.manning_def
+    assert mann is not None and mann.method == -1
+    first_sta = xs_out.sta_elev[0][0]
+    assert first_sta == -50.0
+    assert mann.entries[0][0] == first_sta, "first station must carry an n-value"
+    # The inserted entry extends the earliest existing value (A's, at sta 0)
+    assert mann.entries[0][1] == mann.entries[1][1]
+    assert mann.entries[0][1] > 0
+
+
+# ---------------------------------------------------------------------------
 # Bank Sta= formatting must match the #Sta/Elev= block's 8-char fields
 # ---------------------------------------------------------------------------
 

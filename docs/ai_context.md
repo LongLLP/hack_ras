@@ -700,6 +700,44 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
+### Session 12 changes (2026-07-07): Manning method 0 preserved for all-A edits
+
+`merge_manning` always wrote method -1 for any rebuilt XS — by design for
+simplicity, but a user who merely truncates/extends/gaps a method-0 (LOB/Ch/ROB)
+cross-section doesn't expect the n-value METHOD to flip to horizontal variation.
+New `_method0_manning()` in merge.py runs before `merge_manning` and keeps
+method 0 when: A's input is method 0 (3 entries), every segment source is 'A'
+or a gap (None), and the output has bank stations.  Entries are A's three
+n-values positionally (LOB/Ch/ROB), keyed to the merged left edge and the
+output's own snapped bank stations — so truncating *through* a bank keeps
+method 0 with that bank (and its n-entry) snapped to the surviving edge,
+per the user's explicit rule.  Anything else falls back to method -1 as before.
+Bank-station computation moved above Manning in `_build_merged_xs_lines` (banks
+only need `merged_se`) so the pass-through can use the snapped banks.
+`write_mann` header now pads the method to 2 chars (`, 0 ,` like RAS's own
+spacing; no change for `-1`).  Three new tests (trim, trim-through-bank, gap).
+
+Fixture regenerated and HEC-RAS-verified by the user same day (config JSON
+gained a truncate-through-bank case); suite back to fully green at 126.
+
+**Second fix, same session — method -1 first-station n-value.** The user's
+HEC-RAS review caught that RS 42788's flat extension to -50 produced a
+method -1 block whose first entry sat at 0, not -50 — HEC-RAS refuses to run
+a method -1 block with no n-value on the XS's first station.  Cause:
+`_n_at_station` is a step-function lookup and returns None for stations left
+of the source's first n-entry, so an extension segment contributed no entry.
+Fix: `merge_manning` now checks its final entry list against `merged_se[0][0]`
+and, when the first station lacks an entry, prepends one carrying the earliest
+existing n-value (extends the edge roughness leftward, mirroring the flat
+geometry extension).  Deliberately NOT fixed by clamping `_n_at_station` —
+that would also stamp values at interior segment starts that legitimately
+inherit the previous segment's n.  New test pins RS 42788's shape.
+
+Fixture regenerated and HEC-RAS-verified by the user same day (RS 42788's
+`#Mann=` gained the `-50 0.07 0` triplet; Test_notes updated, including the
+new RS 42268 severe-truncation/bank-cut case).  Baseline:
+**127 passed / 0 failed / 0 skipped**.
+
 ### Session 11 changes (2026-07-07): merge.py honors A-only configs; GUI warnings
 
 The session-9 deferred limitation (a config referencing Geometry B for an XS that
