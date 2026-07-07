@@ -300,7 +300,7 @@ def _mann_def_to_entries_in_segment(
 
 def merge_manning(
     xs_a: CrossSection,
-    xs_b: CrossSection,
+    xs_b: Optional[CrossSection],
     config: MergeConfig,
     merged_se: List[Tuple[float, float]],
 ) -> Optional[ManningDef]:
@@ -327,7 +327,7 @@ def merge_manning(
 
         xs_src = xs_a if source == 'A' else xs_b
         t = config.transform_a if source == 'A' else config.transform_b
-        mann_def = xs_src.manning_def
+        mann_def = xs_src.manning_def if xs_src is not None else None
         if mann_def is None:
             continue
 
@@ -352,7 +352,7 @@ def merge_manning(
 
 def merge_ineff(
     xs_a: CrossSection,
-    xs_b: CrossSection,
+    xs_b: Optional[CrossSection],
     config: MergeConfig,
 ) -> Optional[IneffFlowAreas]:
     """
@@ -382,7 +382,7 @@ def merge_ineff(
     """
     xs_src = xs_a if config.ineff_source == 'A' else xs_b
     t = config.transform_a if config.ineff_source == 'A' else config.transform_b
-    src_ineff = xs_src.ineff
+    src_ineff = xs_src.ineff if xs_src is not None else None
     if src_ineff is None:
         return None
 
@@ -789,6 +789,10 @@ def write_merged_geometry(
     Geometry A is always the master: it provides the geometry header, reach
     headers, the output's XS structure (B-only XS are excluded), and any XS
     without a merge config (or with a trivial config that simply mirrors A).
+    An A-only XS with a non-trivial config referencing only A data (e.g. a
+    trim) is honored like any other merge; a config requesting Geometry B
+    data for an A-only XS is unsatisfiable and falls back to a raw Geometry A
+    pass-through.
     The GUI's "Swap A / B" physically exchanges the two files instead of
     flipping a master flag, so no master-selection parameter exists here.
 
@@ -820,12 +824,24 @@ def write_merged_geometry(
 
         config = merge_configs.get(_norm_key(river, reach, station))
 
-        if xs_b is None or config is None or _is_trivial_config(config, xs_a):
-            # Only in A, or no merge configured, or trivial (pass-through)
+        # A config that requests Geometry B data (segment source, cut line
+        # source, or IFA source) is only satisfiable when the XS exists in B.
+        # For A-only XS such a config falls back to a raw pass-through — the
+        # GUI warns about these at export time.  An all-A config (e.g. a
+        # trim) is honored even without a B counterpart.
+        b_unsatisfiable = xs_b is None and config is not None and (
+            'B' in config.segment_sources
+            or config.cutline_source == 'B'
+            or config.ineff_source == 'B'
+        )
+
+        if config is None or _is_trivial_config(config, xs_a) or b_unsatisfiable:
+            # No merge configured, trivial (pass-through), or requests B data
+            # that doesn't exist for this XS
             if xs_a._raw_line_start >= 0:
                 lines.extend(_xs_raw_lines(geom_master, xs_a))
         else:
-            # True merge: both present, non-trivial config
+            # Real merge; xs_b may be None when the config references only A
             lines.extend(
                 _build_merged_xs_lines(geom_a, xs_a, geom_b, xs_b, config)
             )
@@ -859,11 +875,16 @@ def _insert_bank_station(
 def _build_merged_xs_lines(
     geom_a: GeometryFile,
     xs_a: CrossSection,
-    geom_b: GeometryFile,
-    xs_b: CrossSection,
+    geom_b: Optional[GeometryFile],
+    xs_b: Optional[CrossSection],
     config: MergeConfig,
 ) -> List[str]:
-    """Generate all output lines for one merged cross-section."""
+    """Generate all output lines for one merged cross-section.
+
+    xs_b may be None only when *config* references no Geometry B data
+    (write_merged_geometry routes B-referencing configs on A-only XS to the
+    raw pass-through path instead).
+    """
     out: List[str] = []
 
     # 1. Type RM Length= header (from source A)
@@ -882,7 +903,9 @@ def _build_merged_xs_lines(
 
     # 3. Compute merged data
     sta_elev_a = transform_sta_elev(xs_a.sta_elev or [], config.transform_a)
-    sta_elev_b = transform_sta_elev(xs_b.sta_elev or [], config.transform_b)
+    sta_elev_b = transform_sta_elev(
+        (xs_b.sta_elev if xs_b is not None else None) or [], config.transform_b
+    )
 
     merged_se = merge_sta_elev(
         sta_elev_a, sta_elev_b, config.breakpoints, config.segment_sources,

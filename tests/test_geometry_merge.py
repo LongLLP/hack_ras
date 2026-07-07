@@ -68,16 +68,19 @@ def _sterp_configs():
     SterpCreek.g03, then verified in HEC-RAS (2026-07-06; see
     RAS_xsedit/tests/Test_notes.txt for the per-XS review).
 
-    Geom A = g02 (master), Geom B = g01.  Five configured XS:
+    Geom A = g02 (master), Geom B = g01.  Six configured XS:
       43320 — B/A/B/A/gap/A/B, transform B h -349 / v -0.2, IFAs and cut line
               from B (blend extension allowed; no extension expected)
       43170 — A>B>A, no length change
       42998 — A>B>A truncated on the right, IFAs from B, cut line preserved
               verbatim
-      42893 — source B where B has no such XS; currently exports as a
-              verbatim copy of A (silent — warning discussion deferred)
+      42893 — source B where B has no such XS: unsatisfiable, exports as a
+              verbatim copy of A (the GUI warns about these at export time)
       42788 — extended flat to -50, truncated at 850, cut line from B with
               blend extension
+      42528 — A-only XS (not in g01), all-A config truncated on both sides
+              (47..1100 of 0..1125.25) — exercises the honored-A-only-trim
+              path added 2026-07-07 (user-verified in HEC-RAS)
     """
     cfg = json.loads(CONFIG_JSON.read_text(encoding="utf-8"))
     configs = {}
@@ -216,6 +219,59 @@ def test_full_extent_all_a_config_stays_verbatim(tmp_path, sterp_geoms):
         segment_sources=["A"],
     )}
     out = tmp_path / "fullspan.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    geom_out = GeometryParser().parse_file(str(out))
+    xs_a = _build_index(geom_a)[key]
+    xs_out = _build_index(geom_out)[key]
+    assert _xs_raw_lines(geom_a, xs_a) == _xs_raw_lines(geom_out, xs_out)
+
+
+# ---------------------------------------------------------------------------
+# A-only XS (no B counterpart): all-A configs honored, B-referencing configs
+# fall back to a raw pass-through
+# ---------------------------------------------------------------------------
+
+@skip_if_no_data
+def test_a_only_xs_all_a_config_is_honored(tmp_path, sterp_geoms):
+    """
+    RS 42893 exists in A (g02) but not in B (g01).  A truncating all-A config
+    on it is fully satisfiable from A's own data and must be honored, not
+    silently discarded because the XS lacks a B counterpart.
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp West", "Upper", "42893")  # A spans 0 .. 620.56
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[50.0, 600.0],
+        segment_sources=["A"],
+    )}
+    out = tmp_path / "a_only_trim.g99"
+    write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
+
+    xs_out = _build_index(GeometryParser().parse_file(str(out)))[key]
+    assert xs_out.sta_elev[0][0] == 50.0
+    assert xs_out.sta_elev[-1][0] == 600.0
+
+
+@skip_if_no_data
+def test_a_only_xs_b_referencing_config_passes_through_verbatim(tmp_path, sterp_geoms):
+    """
+    A config that requests Geometry B data for an A-only XS is unsatisfiable:
+    the XS must be written as a verbatim copy of A (never with B segments
+    silently emptied or substituted).  The GUI warns about these at export.
+    """
+    geom_a, geom_b = sterp_geoms
+    key = _norm_key("Sterp West", "Upper", "42893")
+    configs = {key: MergeConfig(
+        transform_a=Transform(),
+        transform_b=Transform(),
+        breakpoints=[50.0, 600.0],   # non-trivial on its own...
+        segment_sources=["A"],
+        ineff_source="B",            # ...but requests B data
+    )}
+    out = tmp_path / "a_only_b_ref.g99"
     write_merged_geometry(geom_a, geom_b, configs, str(out), title="t")
 
     geom_out = GeometryParser().parse_file(str(out))

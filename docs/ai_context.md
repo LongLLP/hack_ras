@@ -700,6 +700,30 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
+### Session 11 changes (2026-07-07): merge.py honors A-only configs; GUI warnings
+
+The session-9 deferred limitation (a config referencing Geometry B for an XS that
+exists only in A silently exported a verbatim copy of A) is addressed from both sides:
+
+- **`write_merged_geometry` no longer discards every config on an A-only XS.** The
+  old `xs_b is None` short-circuit is replaced by an unsatisfiability rule: an A-only
+  XS with a non-trivial config referencing **only A data** (a trim/extension via
+  breakpoints) now goes through the real merge pipeline like any paired XS; only a
+  config that actually **requests B data** (`'B'` in segment_sources, or
+  cutline/ineff source = 'B') keeps the raw Geometry A pass-through — never B
+  segments silently emptied, never A silently substituted per-segment.
+  `_build_merged_xs_lines`, `merge_manning`, and `merge_ineff` now accept
+  `xs_b=None` (guarded; reachable only for all-A configs). RS 42893's output is
+  unchanged (all-B config → still pass-through), so the known-good `SterpCreek.g03`
+  byte-comparison stayed green with no re-verification needed. Two new tests in
+  `test_geometry_merge.py` pin both halves. Baseline: **123 passed / 0 failed / 0 skipped**.
+- **The GUI (`RAS_xsedit/xsedit.py`) now warns** instead of staying silent: a
+  persistent amber label in the Navigation box flags A-only XS while B is loaded, and
+  export scans all states for unsatisfiable B references — a Continue/Cancel dialog
+  lists offenders (≤10; generic wording above that), Cancel navigates to the first
+  one. See `RAS_xsedit/CLAUDE.md` for GUI details (also added this session:
+  Save Config / Save Config As… / Ctrl+S direct-save flow).
+
 ### Session 10 changes (2026-07-06): plan file operations — `project/plans.py`
 
 New module `hack_ras/project/plans.py` (see "Plan File Operations" section above for
