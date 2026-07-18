@@ -1,9 +1,9 @@
-Plan Title=Test Model
+Plan Title=Continue higher IA and nvals
 Program Version=7.00
-Short Identifier=Test Model                                                      
-Simulation Date=01JAN2025,1000,01JAN2025,1400
-Geom File=g02
-Flow File=u02
+Short Identifier=Continue higher IA and nvals                                    
+Simulation Date=01JAN2025,1000,01JAN2025,1600
+Geom File=g03
+Flow File=u04
 Subcritical Flow
 K Sum by GR= 0 
 Std Step Tol= 0.01 
@@ -258,7 +258,7 @@ Write IC File= 0
 Write IC File at Fixed DateTime=0
 IC Time=,,
 Write IC File Reoccurance=
-Write IC File at Sim End=-1
+Write IC File at Sim End=0
 Echo Input=False
 Echo Parameters=False
 Echo Output=False
@@ -271,26 +271,6 @@ HDF Chunk Size= 1
 HDF Spatial Parts= 1 
 HDF Use Max Rows=0
 HDF Fixed Rows= 1 
-Breach Loc=                ,                ,        ,True,Levee           
-Breach Method= 0 
-Breach Geom=2010,100,745,0,0,False,0.5,,0.5,2.6
-Breach Start=True,756.8,,,False,,,0
-Breach Progression= 2 
-       0       0       1       1
-Simplified Physical Breach Downcutting= 2 
-       0       0       1       1
-Simplified Physical Breach Widening= 2 
-       0       0       1       1
-Mass Wasting Options= 0 
-Breach Use User Defined Growth Ratio=-1
-Breach User Defined Growth Ratio=1
-DLBreach Methods=0,0
-DLBreach SoilType=0
-DLBreach Soil Properties=,,2.65,,,,6, 3.402823E+38, 3.402823E+38
-DLBreach Core SoilType=0
-DLBreach Cover Option=0
-DLBreach Cover Soil Properties=,,2.65,,,, 3.402823E+38, 3.402823E+38
-DLBreach Breach Direction=0
 Calibration Method= 0 
 Calibration Iterations= 20 
 Calibration Max Change=0.05

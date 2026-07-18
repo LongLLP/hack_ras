@@ -1,0 +1,89 @@
+ 
+                                              HEC-RAS - River Analysis System
+ 
+ 
+Project File:  C:\Users\2161jap\Desktop\hack_ras_local\hack_ras\tests\data\2D culvert bridge levee precip pipes\Model.prj
+ 
+Project Name:  Small_Model
+ 
+ 
+Plan Name:     Test higher IA and nvals
+ 
+Short ID:      Test higher IA and nvals
+ 
+
+Starting Time:   01Jan2025 1000
+
+Ending Time:     01Jan2025 1600
+
+
+                ################################################
+                #                                              #
+                #                                              #
+                #       1D and 2D Unsteady Flow Module         #
+                #                                              #
+                #                                              #
+                #          HEC-RAS 7.0 April 2026              #
+                #                                              #
+                #             17JUL26 at 18:57:51              #
+                #                                              #
+                ################################################
+                
+ 
+ 
+ 
+
+         US Inflow      DS Outflow       Lat Hydro        SA Hydro     Groundwater      Diversions   Precip Excess   Precip Excess
+                                                                                                       (Acre Feet)        (Inches)
+         *********      **********       *********        ********     ***********      **********   *************   *************
+                                                                                                                      0.0000000000
+
+    Start 1D Reach  Final 1D Reach   Starting SA's      Final SA's
+    **************  **************   *************      **********
+                                                                  
+
+
+
+                 ***   Volume Accounting for 2D Flow Areas in Acre Feet   ***
+
+           2D Area    Starting Vol      Ending Vol      Cum Inflow     Cum Outflow           Error   Percent Error   Precip Excess   Precip Excess
+                                                    (incl. precip)                                                     (Acre Feet)        (Inches)
+           *******    ************      **********      **********     ***********           *****   *************   *************   *************
+ 
+ 
+          Interior         0.08800          0.7567           4.227           3.552       -0.006894          0.1598           2.620          0.9025
+         Watershed          0.9915           9.330           83.13           74.79        0.001302        0.001547           83.13           24.59
+ 
+ 
+ 
+
+
+
+                 ***   Volume Accounting for Pipe Network in Acre Feet   ***
+
+      Pipe Network    Starting Vol      Ending Vol      Cum Inflow     Cum Outflow           Error   Percent Error
+           *******    ************      **********      **********     ***********           *****   *************
+ 
+ 
+              Base        0.003910          0.1026           3.559           3.466        0.006036          0.1696
+
+
+
+                 ***   Total Volume Accounting (for the entire model) in Acre Feet   ***
+
+Total Boundary Flux of Water In            85.75
+Total Boundary Flux of Water Out           74.79
+
+Starting Volume                            1.083
+Ending Volume                              10.19
+
+Precipitation Excess (Acre Feet)           85.75
+Precipitation Excess (inches)              13.65
+
+
+                             Error   Percent Error
+                             *****   *************
+                         -0.001231        0.001418
+
+
+

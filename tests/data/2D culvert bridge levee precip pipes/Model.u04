@@ -1,12 +1,13 @@
-Flow Title=Test Precip
+Flow Title=Continue with RST from higher
 Program Version=7.00
-Use Restart= 0 
+Use Restart=-1 
+Restart Filename=Model.p04.01JAN2025 1600.rst
 Boundary Location=                ,                ,        ,        ,                ,Watershed       ,                ,DSBC                            ,                                ,                                
 Friction Slope=0.01
 Boundary Location=                ,                ,        ,        ,                ,Interior        ,                ,                                ,                                ,                                
 Interval=1HOUR
 Precipitation Hydrograph= 2 
-     1.5     1.5
+     2.3     2.3
 DSS Path=
 Use DSS=False
 Use Fixed Start Time=False
@@ -15,8 +16,8 @@ Is Critical Boundary=False
 Critical Boundary Flow=
 Boundary Location=                ,                ,        ,        ,                ,Watershed       ,                ,                                ,                                ,                                
 Interval=1HOUR
-Precipitation Hydrograph= 5 
-     6.5     6.5     6.5     6.5     6.5
+Precipitation Hydrograph= 2 
+     1.7     1.7
 DSS Path=
 Use DSS=False
 Use Fixed Start Time=False
@@ -27,18 +28,6 @@ Boundary Location=                ,                ,        ,        ,          
 Interval=1DAY
 Stage Hydrograph= 2 
        0       0
-DSS Path=
-Use DSS=False
-Use Fixed Start Time=False
-Fixed Start Date/Time=,
-Is Critical Boundary=False
-Critical Boundary Flow=
-Boundary Location=                ,                ,        ,        ,                ,Watershed       ,                ,Channel_Inflow                  ,                                ,                                
-Interval=1HOUR
-Flow Hydrograph= 5 
-     100    1000    2000    3600    3600
-Stage Hydrograph TW Check=0
-Flow Hydrograph Slope= 0.1 
 DSS Path=
 Use DSS=False
 Use Fixed Start Time=False
@@ -101,20 +90,20 @@ Met BC=Air Pressure|Mode=Constant
 Met BC=Air Pressure|Expanded View=0
 Met BC=Air Pressure|Constant Value=1013.2
 Met BC=Air Pressure|Constant Units=mb
-Met BC=Air Pressure|Point Interpolation=Inv Distance
+Met BC=Air Pressure|Point Interpolation=
 Met BC=Air Pressure|Gridded Source=DSS
 Met BC=Air Pressure|Gridded Interpolation=
-Non-Newtonian Method= 0 ,     
+Non-Newtonian Method= 0 ,      
 Non-Newtonian Constant Vol Conc=0
-Non-Newtonian Yield Method= 0 ,     
+Non-Newtonian Yield Method= 0 ,      
 Non-Newtonian Yield Coef=0, 0
 User Yeild=   0
-Non-Newtonian Sed Visc= 0 ,     
+Non-Newtonian Sed Visc= 0 ,      
 Non-Newtonian Obrian B=0
 User Viscosity=0
 User Viscosity Ratio=0
 Herschel-Bulkley Coef=0, 0
-Clastic Method= 0 ,     
+Clastic Method= 0 ,      
 Coulomb Phi=0
 Voellmy X=0
 Non-Newtonian Hindered FV= 0 

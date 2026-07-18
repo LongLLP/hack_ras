@@ -1,10 +1,16 @@
-Proj Title=NKC_Hillside_Levee
-Current Plan=p02
+Proj Title=Small_Model
+Current Plan=p05
 Default Exp/Contr=0.3,0.1
 English Units
 Geom File=g02
+Geom File=g03
 Unsteady File=u02
+Unsteady File=u03
+Unsteady File=u04
 Plan File=p02
+Plan File=p03
+Plan File=p04
+Plan File=p05
 Y Axis Title=Elevation
 X Axis Title(PF)=Main Channel Distance
 X Axis Title(XS)=Station

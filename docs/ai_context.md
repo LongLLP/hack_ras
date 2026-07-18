@@ -50,17 +50,67 @@ required config key and exits with an error if it is missing.
 
 ## File Naming Conventions
 HEC-RAS uses a base name plus a typed numeric suffix:
-| Suffix | File type |
-|--------|-----------|
-| `.prj` | Project file (key=value pairs, links to all others) |
-| `.g##` | Geometry file (rivers, reaches, cross-sections, GIS cut lines) |
-| `.p##` | Plan file (text sidecar — plan title, geometry reference) |
-| `.p##.hdf` | Plan results file (HDF5 — cell geometry, WSE, pipe network results) |
-| `.u##` | Unsteady flow file |
-| `.f##` | Steady flow file |
+| Suffix | File type | Keyed to |
+|--------|-----------|----------|
+| `.prj` | Project file (key=value pairs, links to all others) | — |
+| `.g##` | Geometry file (rivers, reaches, cross-sections, GIS cut lines) | — |
+| `.g##.hdf` | Geometry preprocessor output (HDF5), regenerated per run | geometry |
+| `.p##` | Plan file (text sidecar — plan title, geometry + flow reference) | — |
+| `.p##.hdf` | Plan results file (HDF5 — cell geometry, WSE, pipe network results) | plan |
+| `.p##.tmp.hdf` | In-progress results — RENAMED to `.p##.hdf` by RAS at run end; its presence means a run is ACTIVE on that plan | plan |
+| `.p##.<DDMMMYYYY HHMM>.rst` | Restart file WRITTEN by plan `##` ("Write IC File at Sim End"); the stamp uses RAS's 2400 convention (see below) | plan |
+| `.b##` | UNET run/boundary input, regenerated each run; text; embeds plan/project TITLES but not the plan number — the suffix is the only plan link | plan |
+| `.bco##` | Unsteady computation log (text; 0 bytes until flushed at run end) | plan |
+| `.ic.o##` | Binary initial-conditions output; embeds the plan title, not the number | plan |
+| `.x##` | Preprocessor run file — keyed to GEOMETRY `g##`, NOT the plan (user-confirmed; line 3 carries the title of the last plan run with that geometry, which misleads) | geometry |
+| `.u##` | Unsteady flow file | — |
+| `.u##.hdf` | Flow preprocessor output (HDF5), regenerated | flow |
+| `.f##` | Steady flow file | — |
+| `.dss` | Shared DSS output — ALL plans write into the one file | — |
+| `.rasmap` (+`.backup`) | RAS Mapper layer config (XML); `.backup` = the previous save state | — |
 
 `##` is a two-digit number (`01`, `02`, …). A project may have multiple geometry or plan files.
 Multiple plans may share the same geometry (same `g##` ID), which is important for grouping.
+The plan-keyed rows are exactly the family that `renumber_plans` / `delete_plan` handle.
+
+## HEC-RAS Runtime & GUI Behavior (empirical — GMF_DFA live runs, 2026-07-17)
+
+**Restart (.rst) semantics.** A plan's simulation may start at ANY time regardless of
+the restart file's timestamp — a rst snapshotted at 02JAN 2400 legitimately
+initializes plans starting 01JAN 0000 (user-proven). Filenames use the 2400
+convention: a run ending 02JAN 0000 writes `...01JAN2026 2400.rst`. Consumption is
+via `Restart Filename=<verbatim filename>` in the `.u` file (`Use Restart=-1`);
+restart files can also have arbitrary names (`banana.rst`) with no plan number.
+
+**Hydrograph timing in .u files.** `Use Fixed Start Time=True` anchors a
+`Flow Hydrograph=` to its `Fixed Start Date/Time=` line (sim entering mid-hydrograph
+is normal — RAS interpolates at sim time); `False` aligns ordinate 1 to the
+simulation start. RAS holds the last ordinate when a hydrograph ends before the
+window does.
+
+**Stored-but-unused fields are a general RAS pattern.** Plan and flow files keep ALL
+alternative-mode values in the file with flags selecting the active one. Never read a
+value without checking its mode flag. Two decoded examples:
+- `Breach Start=F1,F2,F3,F4,F5,F6,F7,F8` — F1 True → "WS Elev" mode (F2 = trigger
+  WS); F5 True → "WS Elev + Duration" (F2 = Immediate Initiation WS, F6 = Threshold
+  WS, F7 = Duration Above Threshold in hours, F8 = Accumulate Duration checkbox,
+  -1 checked / 0 unchecked); both False → "Set Time" using F3,F4 (date, HHMM).
+  Inactive fields (including F2 in Set Time mode) are stored but ignored; RAS also
+  writes blank inactive fields (`Breach Start=True,756.8,,,False,,,0`).
+- `Use Fixed Start Time=False` keeps its `Fixed Start Date/Time=` line populated.
+
+**GUI resave normalization.** Opening and saving a hand-edited `.u` file in the RAS
+GUI rewrites only whitespace padding (e.g. trailing spaces on Non-Newtonian lines) —
+RAS fully accepts hand-renamed/edited files; expect a few spurious whitespace diffs
+in ExamDiff after a GUI touch.
+
+**RAS Mapper / .rasmap.** Mapper does NOT rewrite the .rasmap on open (saves on
+close/save; `.rasmap.backup` = previous save state). Layer display names refresh
+from the actual files' titles at load, so stale names in the XML are cosmetic.
+Layers whose referenced file is missing render italic + red-asterisk and are purged
+by Tools > "remove missing layers"; result layers re-create themselves when a plan
+runs. Hand-edited `<Plans>`/`<Results>` sections survive a GUI save round-trip
+verbatim — which is why `project/rasmap.py` only remaps filename tokens.
 
 ## Project Entry Point — `RasProject`
 
@@ -104,31 +154,69 @@ Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 `resolve_filenames(basename_map)` maps all IDs of each type to filenames, returning
 `{'geom': [...], 'plan': [...], 'unsteady': [...]}`.
 
-## Plan File Operations (`hack_ras/project/plans.py`)
+## Plan File Operations (`hack_ras/project/plans.py`, `project/sync.py`, `project/rasmap.py`)
 
 In-place plan management for a project. All functions take a `RasProject`, edit
 files losslessly (raw-line edits; untouched lines byte-identical, CRLF preserved),
 and treat the `.prj` as authoritative — orphan plan files on disk are rejected.
+Shared raw-line I/O helpers live in `hack_ras/utils/lines.py`
+(`read_lines` / `write_lines` / `eol_of` / `content_of`).
 
 ```python
 from hack_ras import RasProject
-from hack_ras.project.plans import renumber_plan, insert_plan_gap, clone_plan
+from hack_ras.project.plans import (
+    renumber_plan, renumber_plans, insert_plan_gap, clone_plan, delete_plan)
+from hack_ras.project.sync import sort_prj_entries, sync_prj
 
 project = RasProject(r"...\Model.prj")
-renumber_plan(project, "p25", "p30")     # renames .p## + .p##.hdf, updates Plan File= and Current Plan=
-insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5 (highest-first); returns {old: new}
+sync_prj(project)                        # drop prj entries whose files are missing; fix Current Plan
+renumber_plans(project, {"p20": "p02",   # bulk renumber: chains/cycles auto-ordered
+                         "p02": "p06"})  #   ('<name>.renumtmp' hop breaks cycles)
+renumber_plan(project, "p25", "p30")     # single-plan case of the same machinery
+insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5; returns {old: new}
+sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Steady File=
+                                         #   lines ascending; kinds=("plan",) etc. to limit
+delete_plan(project, "p08",              # deletes plan + outputs; optional unused-file cleanup
+            delete_unused_geom=True, delete_unused_flow=True)
 clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
            line_edits={"Breach Start=": "Breach Start=False,,01JAN2025,1214,False,,,0"},
            new_id="p25")                 # new_id optional — defaults to next free number
 ```
 
+Renumbering/deleting covers the whole plan-keyed file family — `.p##`, `.p##.hdf`,
+run artifacts `.b##` / `.bco##` / `.ic.o##`, and `Base.p##.<stamp>.rst` restart
+files — plus cross-file references: `Restart Filename=` lines in the `.u` files and
+`Base.p##` tokens in the `.rasmap` (`project/rasmap.py`, token remap only — RAS
+Mapper self-heals display names and purges missing-file layers). All reference
+updates are applied in ONE pass with the complete mapping; sequential per-plan
+application would corrupt chained mappings (p02→p06 while p06→p12). `.x##` run
+files are keyed to GEOMETRY, not plans, and are never touched. Restart references
+that carry no plan number (e.g. `banana.rst`) are left alone.
+
+- A `.p##.tmp.hdf` means HEC-RAS is mid-run on that plan — operations raise
+  `PlanRunActive` instead of touching files.
+- `sync_prj` is removal-only (it never adopts orphans); it is the fix for
+  `PlanIdInUse` caused by prj-listed-but-missing plan IDs.
+- `delete_plan` warns (logging + report) when a surviving `.u` file references the
+  deleted plan's restart output; with the optional flags it also removes the plan's
+  geometry / flow file (plus `.hdf` sidecars and the geometry's `.x##`) when no
+  other listed plan references it. The `.rasmap` is left alone by design — but note
+  that deleting a plan and later REUSING its number leaves the old rasmap layer
+  pointing at the new file (observed GMF_DFA validation 2026-07-17; RAS Mapper
+  self-heals names, so impact is limited to possible duplicate layer entries).
 - `clone_plan` enforces plan-title uniqueness (`DuplicatePlanTitle`) and inserts the
-  new `Plan File=` entry in ascending numeric position in the `.prj`.
+  new `Plan File=` entry in ascending numeric position in the `.prj`. After writing
+  it sanity-checks breach triggers: an ACTIVE Set Time trigger dated outside the
+  plan's `Simulation Date=` window logs a WARNING (never an error — placeholder
+  triggers are a legitimate workflow). Trigger field layout: `Breach Start=`
+  F1 True → "WS Elev" mode, F5 True → "WS Elev + Duration", both False → "Set Time"
+  (F3/F4); inactive fields are stored but unused.
 - `line_edits` maps a line prefix to the full replacement line; each prefix must match
   exactly one line (`ValueError` otherwise — a multi-breach plan needs a different tool).
-- Typed exceptions: `PlanFileNotFound`, `PlanIdInUse`, `DuplicatePlanTitle`.
-- `insert_plan_gap` validates every target ID (collisions with unshifted plans, orphan
-  files on disk, p99 overflow) before touching any file.
+- Typed exceptions: `PlanFileNotFound`, `PlanIdInUse`, `DuplicatePlanTitle`,
+  `PlanRunActive`.
+- `insert_plan_gap` delegates to `renumber_plans` — every target ID is validated
+  (collisions, orphan files on disk, p99 overflow) before any file is touched.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
@@ -399,6 +487,15 @@ Path: `Plan Data/Plan Information` — HDF5 group with scalar **attributes** (no
 | `Geometry Title` | `b'FC gravity flow'` | |
 | `Base Output Interval` | `b'30MIN'` | Output time-step interval |
 | `Computation Time Step Base` | `b'1SEC'` | Computational sub-step |
+| `Plan Filename` | `b'GMF_DFA.p01'` | Basename of the .p## the run used (RAS 7.0; verified live) |
+| `Flow Filename` / `Geometry Filename` | `b'GMF_DFA.u01'` / `b'GMF_DFA.g01'` | Same, for the flow/geometry files |
+| `Project Filename` | absolute path | Full path of the .prj at run time |
+
+The four `*Filename` attributes mean a renamed/renumbered results HDF carries
+stale internal filenames (fixed-length `np.bytes_`). Whether RAS/RAS Mapper cares
+is untested — RAS Mapper loaded renamed projects fine in the GMF_DFA job — so
+`renumber_plans` deliberately leaves HDF internals alone; revisit with h5py attr
+updates only if evidence appears that something reads them.
 
 Use `read_simulation_start_time(hdf_path)` from `hack_ras.results.reader` to get a
 `datetime` object parsed from `Simulation Start Time`.
@@ -543,8 +640,14 @@ Results/Computation Block/Global/Time                    (86401,)    # decimal d
 Results/Computation Block/Global/Time Date Stamp (ms)    (86401,)    # b'01JAN2025 00:00:01:000'
 ```
 
-### Results/Summary (run-level metadata)
-Path: `Results/Summary/` — **attributes** on this group (not datasets):
+### Results/Summary (run-level metadata) — LOCATION MOVED IN RAS 7.0
+
+**RAS 7.0 (April 2026) relocated these attributes** (verified live, GMF_DFA
+2026-07-17): `Results/Summary` group attrs are now EMPTY and the run summary
+lives at **`Results/Unsteady/Summary`** (plus run-identity attrs on
+`Results/Unsteady` itself: Plan Title, Program Version, Short ID, Simulation
+Time Window, Type of Run). Files written by 6.x keep the old location — any
+reader must check both. The attribute names are unchanged:
 
 | Attribute | Example | Notes |
 |-----------|---------|-------|
@@ -553,6 +656,7 @@ Path: `Results/Summary/` — **attributes** on this group (not datasets):
 | `Maximum WSEL Error` | `0.0` | Max residual at end of run |
 | `Run Time Window` | `'20MAY2026 14:52:34 to …'` | When RAS executed the plan |
 | `Time Solution Went Unstable` | `nan` | NaN if stable throughout |
+| `Computation Time DSS` / `Maximum number of cores` / `Time Stamp Solution Went Unstable` | | Also present at the 7.0 location |
 
 Volume accounting totals are nested in `Results/Summary/Volume Accounting/` and its
 sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{network}/`):
@@ -668,7 +772,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-07-02, session 6)*
+*(Last updated: 2026-07-17, session 13)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -699,6 +803,46 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 13 changes (2026-07-17): plan-ops suite — sync, bulk renumber, delete, rasmap, breach check
+
+Implemented all six items from `docs/TODO.md` (user-approved same day; see the
+updated "Plan File Operations" section above for the API): `sync_prj`
+(project/sync.py), `renumber_plans` bulk core with plan-keyed artifact families /
+one-pass restart-ref + rasmap updates / cycle-safe ordering (renumber_plan and
+insert_plan_gap now delegate to it), `renumber_plans_in_rasmap`
+(project/rasmap.py), `delete_plan` with optional unused-geom/flow cleanup, the
+advisory breach-trigger check in `clone_plan`, and `PlanRunActive` guards on
+`.p##.tmp.hdf`. Raw-line helpers promoted from plans.py privates to
+`hack_ras/utils/lines.py`. 19 new tests in test_plan_ops.py (RichProjectBase
+synthetic fixture with artifacts, rst files, restart refs, rasmap).
+Validated end-to-end on a copy of the full 25-plan GMF_DFA model
+(Model_PCA/03_hack_ras_test): 14 plans deleted (g02/g03 + x02/x03 auto-removed
+with their last users), 10-plan chained renumber (53 files, 3 restart refs,
+140 rasmap tokens), 3 breach clones with expected placeholder-trigger warnings.
+Renumber replaces `Plan File=` entries in place; the optional
+`sort_prj_entries(project, kinds=...)` in project/sync.py (added same session
+after the user saw p01, p06, ..., p05, p14 in the plan-open dialog, then
+generalized to geom/unsteady/steady at the user's request) re-sorts each kind's
+entries ascending, moving only those lines. Stale rasmap layers after
+delete-then-reuse of a plan number are out of scope per the user — RAS Mapper
+was observed self-healing them.
+
+The user then rebuilt the '2D culvert bridge levee precip pipes' fixture in the
+RAS 7.0 GUI as a full runnable mini model — final shape: 3 plans (p02 with a
+real levee breach, WS Elev trigger; p04 writing the restart u04 consumes; p05),
+2 geometries, all run artifacts, PLUS deliberately-kept stale .prj entries
+(Plan File=p03 / Unsteady File=u03, files deleted in the GUI) — see the
+dev_rules.md fixture table; the stale entries are load-bearing.
+`tests/test_plan_ops_fixture.py` runs the whole sequence on a temp copy:
+stale-slot renumber refusal -> sync_prj on the genuine GUI leftover -> 3-link
+renumber chain (breach plan + rst files follow) -> sort/sync no-ops -> clone of
+the real breach plan (WS mode: no warning; Set Time outside window via
+line_edits: warning) -> delete with unused-flow cleanup -> restart-orphan
+warning. This verifies our assumptions about RAS-authored files rather than
+synthetic mocks. The ESRI CRS projection file moved to Terrain/ in the rebuild
+— test_ras_project / test_find_crs_prj constants updated.
+Baseline: **152 passed / 0 failed / 0 skipped**.
 
 ### Session 12 changes (2026-07-07): Manning method 0 preserved for all-A edits
 
@@ -1073,6 +1217,10 @@ good enough — landing a breakpoint exactly on a wall is a modeling error on th
 part, not a case worth adding branching for.
 
 ## Future Features — Not Yet Implemented
+
+See also `docs/TODO.md` — the approved-for-consideration work-item list (plan
+renumbering gaps: restart-file awareness, .prj sync, bulk renumber, .rasmap
+renumbering, breach-trigger validity check). Ask the user before implementing.
 
 ### `#Block Obstruct=` (Blocked Obstructions)
 
