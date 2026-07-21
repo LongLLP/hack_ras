@@ -51,6 +51,38 @@ class IneffFlowAreas:
     areas: List[IneffArea] = field(default_factory=list)
 
 @dataclass
+class Levee:
+    """Levee markers for a cross-section (from the `Levee=` line).
+
+    A side is present only when its station is not None.  A levee at station S
+    with crest elevation E makes the ground on its *outboard* side (left of S
+    for the left levee, right of S for the right levee) unavailable until the
+    water surface exceeds E (the levee is overtopped).
+    """
+    left_sta: Optional[float] = None
+    left_elev: Optional[float] = None
+    right_sta: Optional[float] = None
+    right_elev: Optional[float] = None
+    name: str = ""
+
+@dataclass
+class BlockObstructArea:
+    start_sta: float           # left station; 0.0 = XS leftmost only for "normal" type
+    end_sta: float             # right station; 0.0 = XS rightmost only for "normal" type
+    elevation: Optional[float] # top-of-obstruction elevation; None = blank field
+
+@dataclass
+class BlockedObstructions:
+    """Blocked obstructions for a cross-section (from the `#Block Obstruct=` block).
+
+    obstr_type mirrors the IFA convention: "normal" (flag=0) means one area left
+    of the channel and one right (with 0.0 station sentinels for the XS edges);
+    "multiple_block" (flag=-1) means 1-N arbitrary blocks with literal stations.
+    """
+    obstr_type: str            # "normal" (flag=0) or "multiple_block" (flag=-1)
+    areas: List[BlockObstructArea] = field(default_factory=list)
+
+@dataclass
 class CrossSection:
     river: str
     reach: str
@@ -63,6 +95,8 @@ class CrossSection:
     manning_def: Optional[ManningDef] = None
     ineff: Optional[IneffFlowAreas] = None
     bank_stations: Optional[Tuple[float, float]] = None
+    levee: Optional[Levee] = None
+    blocked_obstructions: Optional[BlockedObstructions] = None
 
     # Raw line range within GeometryFile.raw_lines (set by parser; not semantic)
     _raw_line_start: int = field(default=-1, repr=False, compare=False)

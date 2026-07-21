@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 152 passing tests (plus any added in the current
+All tests must pass. The baseline is 217 passing tests (plus any added in the current
 session). If a new test is added, the new count becomes the baseline.
 
 The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
@@ -166,6 +166,27 @@ tests/data/
                                            entered as 451530.795/474140.825 — RAS ROUNDED them
                                            to fit the 8-char field, unlike the 16-char cut
                                            line fields where it truncates)
+  Wisconsin Floodway/
+    SterpCreek.g02 / .p02 / .p02.hdf     ← carbon copy of g01/p01 built in RAS 5.0.3, then
+                                           run in RAS 7.0 -> a real 7.0 steady results fixture
+                                           (compound geometry layout: Cross Sections/Attributes,
+                                           no flat River Names). Same features as g01. Used to
+                                           exercise the version-aware WSE reader's compound path
+                                           on genuine data (test_levee_obstruct parameterizes the
+                                           active-flow check over both 5.0.3 p01 and 7.0 p02).
+    SterpCreek.g01 / .p01 / .p01.hdf / .prj / .f01   ← RAS 5.0.3 steady model; the
+                                           'Sterp West / Upper' reach carries hand-placed
+                                           LEVEES (RS 43320 both, 42528 L overtopped, 40641 R
+                                           behind IFA), a NORMAL blocked obstruction (41868 R,
+                                           overtopped), a MULTIPLE-BLOCK obstruction (40813,
+                                           one submerged + one piercing), and a multiple-block
+                                           IFA (41868 L). Ground truth for the active-flow
+                                           tests = plan HDF Additional Variables/Top Width
+                                           Total (= active top width). Feature behaviour is
+                                           documented in Model_DCRA/Images (screenshots +
+                                           Image log.xlsx). Two Type-3 bridge nodes (43084,
+                                           40447) have no #Sta/Elev and are skipped by the
+                                           active-flow check. Used by test_levee_obstruct.py.
 ```
 
 Geometry merge tests reference fixtures from the sibling `RAS_xsedit` repo via a

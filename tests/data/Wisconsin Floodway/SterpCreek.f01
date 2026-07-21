@@ -1,0 +1,41 @@
+Flow Title=Flow
+Program Version=5.03
+Number of Profiles= 1 
+Profile Names=100-year
+River Rch & RM=Sterp Main,Main Branch     ,2381.333
+    1400
+River Rch & RM=Sterp East,East Branch     ,17318.34
+     400
+River Rch & RM=Sterp West,Upper           ,43320   
+     260
+River Rch & RM=Sterp West,Trib            ,9466.276
+     540
+River Rch & RM=Sterp West,Lower           ,34344   
+     380
+Boundary for River Rch & Prof#=Sterp Main,Main Branch     , 1 
+Up Type= 0 
+Dn Type= 1 
+Dn Known WS=846.2
+Boundary for River Rch & Prof#=Sterp East,East Branch     , 1 
+Up Type= 3 
+Up Slope=0.01
+Dn Type= 0 
+Boundary for River Rch & Prof#=Sterp West,Upper           , 1 
+Up Type= 3 
+Up Slope=0.0001
+Dn Type= 0 
+Boundary for River Rch & Prof#=Sterp West,Trib            , 1 
+Up Type= 3 
+Up Slope=0.01
+Dn Type= 0 
+Boundary for River Rch & Prof#=Sterp West,Lower           , 1 
+Up Type= 0 
+Dn Type= 0 
+DSS Import StartDate=
+DSS Import StartTime=
+DSS Import EndDate=
+DSS Import EndTime=
+DSS Import GetInterval= 0 
+DSS Import Interval=
+DSS Import GetPeak= 0 
+DSS Import FillOption= 0 

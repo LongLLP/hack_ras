@@ -4,7 +4,7 @@ from __future__ import annotations
 from typing import List, Optional
 from .model import GeometryFile, CrossSection, XSGISCutLine
 from .blocks import river_reach, xs_metadata, xs_gis, xs_sta_elev, xs_ineff
-from .blocks import xs_mann, xs_bank_sta
+from .blocks import xs_mann, xs_bank_sta, xs_levee, xs_block_obstruct
 
 class GeometryParser:
     """
@@ -100,6 +100,24 @@ class GeometryParser:
                     raise ValueError("Found #XS Ineff= before an XS was created.")
                 ineff, consumed = xs_ineff.parse_ineff(lines, i)
                 current_xs.ineff = ineff
+                i += consumed
+                continue
+
+            # --- Levee= ---
+            if line.startswith("Levee="):
+                if current_xs is None:
+                    raise ValueError("Found Levee= before an XS was created.")
+                levee, consumed = xs_levee.parse_levee(lines, i)
+                current_xs.levee = levee
+                i += consumed
+                continue
+
+            # --- #Block Obstruct= ---
+            if line.startswith("#Block Obstruct="):
+                if current_xs is None:
+                    raise ValueError("Found #Block Obstruct= before an XS was created.")
+                obstr, consumed = xs_block_obstruct.parse_block_obstruct(lines, i)
+                current_xs.blocked_obstructions = obstr
                 i += consumed
                 continue
 

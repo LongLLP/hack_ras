@@ -197,3 +197,44 @@ class Sa2dConnection:
     timestamps: np.ndarray
     hw_cells: list
     tw_cells: list
+
+
+@dataclass
+class SteadyProfileResults:
+    """
+    Per-cross-section water-surface elevations for a 1D steady-flow plan,
+    read from the ``/Results/Steady`` block of a plan HDF5 file.
+
+    Alignment note
+    --------------
+    WSE is read from the standalone ``.../Steady Profiles/Cross Sections/
+    Water Surface`` dataset, which is indexed in the same order as the
+    ``/Geometry/Cross Sections`` River/Reach/Station name arrays.  The
+    ``Cross Section Variables`` dataset's WSEL column is *not* used: its values
+    are index-misaligned with geometry and do not match the RAS GUI output.
+
+    Attributes
+    ----------
+    profile_names : list[str]
+        Steady profile names in HDF order, e.g. ['100-year', 'Floodway', ...].
+    wse : dict[tuple[str, str, str], np.ndarray]
+        Maps (river, reach, station) -> array of WSE, one value per profile
+        (same order as ``profile_names``).  River/reach/station keys are
+        stripped of surrounding whitespace.
+    """
+    profile_names: list
+    wse: dict
+
+    def profile_index(self, profile: str) -> int:
+        """Return the index of *profile* in ``profile_names`` (raises if absent)."""
+        return self.profile_names.index(profile)
+
+    def get_wse(self, river: str, reach: str, station: str, profile: str):
+        """
+        WSE for one cross section on one profile, or ``None`` if that
+        cross section has no result entry.
+        """
+        arr = self.wse.get((river.strip(), reach.strip(), str(station).strip()))
+        if arr is None:
+            return None
+        return float(arr[self.profile_index(profile)])

@@ -1,6 +1,7 @@
 # hack_ras/results/reader.py
 # Requires: pip install hack_ras[results]
 from __future__ import annotations
+import logging
 import re
 from datetime import datetime
 from pathlib import Path
@@ -8,6 +9,7 @@ from pathlib import Path
 import h5py
 import numpy as np
 
+from ..version import RasVersion
 from .model import (
     AreaGeometry,
     CellVolumeTable,
@@ -860,3 +862,104 @@ def read_conduit_timeseries(
         vel_us=vel_us,
         vel_ds=vel_ds,
     )
+
+
+# ---------------------------
+# 1D steady-flow profile results
+# ---------------------------
+
+_STEADY_XS_BASE = (
+    "/Results/Steady/Output/Output Blocks/Base Output/"
+    "Steady Profiles/Cross Sections"
+)
+_STEADY_PROFILE_NAMES = (
+    "/Results/Steady/Output/Output Blocks/Base Output/"
+    "Steady Profiles/Profile Names"
+)
+
+
+_GEOM_XS = "/Geometry/Cross Sections"
+
+
+def _xs_index_from_attributes(attrs) -> list:
+    """(river, reach, station) tuples from a 6.0+ compound Cross Sections/Attributes."""
+    return [(_decode(r["River"]), _decode(r["Reach"]), _decode(r["RS"])) for r in attrs]
+
+
+def read_xs_name_index(hdf, hdf_path: str = "") -> list:
+    """
+    Return the ``[(river, reach, station), ...]`` index for the geometry cross
+    sections in an open HEC-RAS HDF handle, aligned to the results arrays.
+
+    This is version-aware by *structural probing* — it uses whichever known
+    layout is actually present, so a new HEC-RAS version that keeps an existing
+    schema needs no code change:
+
+    * 5.x flat layout  -> ``Cross Sections/River Names`` / ``Reach Names`` /
+      ``River Stations``.
+    * 6.0+ compound layout -> ``Cross Sections/Attributes`` (fields ``River``,
+      ``Reach``, ``RS``).
+
+    If neither known layout is present, the most recent known layout (compound)
+    is assumed and a warning is logged with the detected ``File Version``; if the
+    assumed datasets are also absent the underlying ``KeyError`` propagates, so a
+    genuinely unknown schema fails loudly rather than returning wrong data.
+    """
+    # 5.x flat layout
+    if f"{_GEOM_XS}/River Names" in hdf:
+        rivers = [_decode(v) for v in hdf[f"{_GEOM_XS}/River Names"][()]]
+        reaches = [_decode(v) for v in hdf[f"{_GEOM_XS}/Reach Names"][()]]
+        stations = [_decode(v) for v in hdf[f"{_GEOM_XS}/River Stations"][()]]
+        return list(zip(rivers, reaches, stations))
+
+    # 6.0+ compound layout
+    if f"{_GEOM_XS}/Attributes" in hdf:
+        return _xs_index_from_attributes(hdf[f"{_GEOM_XS}/Attributes"][()])
+
+    # No known layout matched: assume latest known layout (compound) and warn.
+    ver = RasVersion.from_hdf(hdf_path) if hdf_path else None
+    logging.warning(
+        "Cross Sections name index: no recognised geometry layout in %r "
+        "(File Version=%s); assuming latest known (compound 'Attributes') layout.",
+        hdf_path, ver,
+    )
+    return _xs_index_from_attributes(hdf[f"{_GEOM_XS}/Attributes"][()])
+
+
+def read_steady_profile_wse(hdf_path: str):
+    """
+    Read per-cross-section water-surface elevations for a 1D steady-flow plan.
+
+    WSE comes from the standalone ``Water Surface`` dataset (shape
+    ``(n_profiles, n_xs)``), aligned by index to the geometry cross-section name
+    index (see :func:`read_xs_name_index`, which is version-aware across the
+    5.x flat and 6.0+ compound geometry layouts).  The misaligned
+    ``Cross Section Variables`` WSEL column (5.x) is deliberately not used.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the ``.p##.hdf`` plan results file.
+
+    Returns
+    -------
+    SteadyProfileResults
+
+    Raises
+    ------
+    KeyError
+        If the steady-profile results datasets are not present (e.g. the plan
+        was not run, or is not a steady-flow plan).
+    """
+    from .model import SteadyProfileResults
+
+    with h5py.File(hdf_path, "r") as hdf:
+        profile_names = [_decode(v) for v in hdf[_STEADY_PROFILE_NAMES][()]]
+        water_surface = hdf[f"{_STEADY_XS_BASE}/Water Surface"][()].astype(np.float64)
+        keys = read_xs_name_index(hdf, hdf_path)
+
+    wse = {}
+    for i, key in enumerate(keys):
+        wse[key] = water_surface[:, i]
+
+    return SteadyProfileResults(profile_names=profile_names, wse=wse)

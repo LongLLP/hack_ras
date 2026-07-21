@@ -73,6 +73,34 @@ def _station_fraction(station: float, min_sta: float, max_sta: float) -> float:
 # Public API
 # ---------------------------------------------------------------------------
 
+def cutline_arc_length(xs: CrossSection) -> float:
+    """
+    Total 2D arc length of the cross-section's GIS cut line, in projected map
+    units.
+
+    Raises ValueError if the cross-section has no GIS cut line.
+    """
+    if xs.cutline is None:
+        raise ValueError(
+            f"CrossSection {xs.station!r} has no XS GIS Cut Line."
+        )
+    return _cumulative_lengths(xs.cutline.points)[-1]
+
+
+def station_length(xs: CrossSection) -> float:
+    """
+    Station span of the cross-section, ``max_sta - min_sta``, taken from the
+    station-elevation profile.
+
+    Raises ValueError if the cross-section has no Sta/Elev data.
+    """
+    if xs.sta_elev is None:
+        raise ValueError(
+            f"CrossSection {xs.station!r} has no Sta/Elev data."
+        )
+    return xs.sta_elev[-1][0] - xs.sta_elev[0][0]
+
+
 def station_to_xy(xs: CrossSection, station: float) -> Tuple[float, float]:
     """
     Return the (X, Y) position on a cross-section's GIS cut line corresponding

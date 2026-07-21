@@ -238,6 +238,8 @@ from `hack_ras/geometry/blocks/base.py` to split data lines.
 | `#XS Ineff=` | `blocks/xs_ineff.py` | `ineff: IneffFlowAreas` | 8-char fields; see IFA section below |
 | `#Mann=` | `blocks/xs_mann.py` | `manning_def: ManningDef` | Two formats — see below |
 | `Bank Sta=` | `blocks/xs_bank_sta.py` | `bank_stations: Tuple[float,float]` | left bank, right bank stations |
+| `Levee=` | `blocks/xs_levee.py` | `levee: Levee` | single line; left/right sta+elev, `None` per absent side |
+| `#Block Obstruct=` | `blocks/xs_block_obstruct.py` | `blocked_obstructions: BlockedObstructions` | 8-char triplets `[start,end,elev]`; `normal` (flag 0) / `multiple_block` (flag -1); no `Permanent` follower |
 
 ### Manning's n formats
 
@@ -335,6 +337,40 @@ pairs the cross-section has.
 
 Use these functions (not ad-hoc arc-length arithmetic) whenever a script needs
 to place any station-referenced XS feature in GIS space.
+
+## HEC-RAS Version Detection (`hack_ras/version.py`)
+
+HEC-RAS **rewrites the HDF5 schema between major versions** (e.g. 5.0.3 → 7.0 moved
+the XS name arrays into a compound `Cross Sections/Attributes`, dropped
+`Cross Section Variables`, and relocated `Results/Summary`). The text files
+(`.g##/.f##/.u##/.p##`) change far less, so version-gating is an **HDF concern only** —
+text parsers do not need it.
+
+**Authoritative version = the HDF root attribute `File Version`** (e.g.
+`"HEC-RAS 7.0 April 2026"`). Do **not** use the plan text `Program Version=` line (not
+updated consistently — a model re-run in 7.0 can still read `5.03`) or the HDF
+`File Type` attr (a 7.0 geometry HDF was observed mislabelled `"HEC-RAS Results"`).
+
+```python
+from hack_ras.version import RasVersion
+ver = RasVersion.from_hdf(hdf_path)      # -> RasVersion(7, 0) or None if absent/unparseable
+if ver and ver >= RasVersion(6, 0):
+    ...   # compound layout
+```
+
+**Pattern for version-sensitive HDF reads — structural probing, not exact-version match.**
+Select the layout by which known dataset is actually present (see
+`read_xs_name_index` in `results/reader.py` as the reference): probe the 5.x flat
+datasets, then the 6.0+ compound dataset. A new version number that keeps an existing
+schema then needs no code change. If **no** known layout matches, assume the latest
+known layout and log a loud warning with the detected `File Version`; if the assumed
+datasets are also absent, let the `KeyError` propagate so an unknown schema fails loudly
+rather than returning wrong data. The parsed version is for warning/error context and for
+the rare case where the same path means different things across versions.
+
+Adopt this incrementally: convert an HDF reader when it is next touched, not in a sweep.
+`read_steady_profile_wse` / `read_xs_name_index` are the first converted example
+(verified against both the 5.0.3 and 7.0 Starkweather DCRA models).
 
 ## HEC-RAS HDF5 Structure (`.p##.hdf`)
 
@@ -1222,16 +1258,30 @@ See also `docs/TODO.md` — the approved-for-consideration work-item list (plan
 renumbering gaps: restart-file awareness, .prj sync, bulk renumber, .rasmap
 renumbering, breach-trigger validity check). Ask the user before implementing.
 
-### `#Block Obstruct=` (Blocked Obstructions)
+### `#Block Obstruct=` (Blocked Obstructions) — now PARSED (read-only)
 
-Still parsed into `raw_lines` and passed through verbatim from source A unconditionally
-via `_scan_xs_content` — the same state IFAs were in before session 6 (see above). The
-same pattern (a `MergeConfig.obstruct_source` field, a `_KEY_PREFIXES`/`_KEY_PARSERS`
-entry, a `merge_obstruct()`-shaped function reusing `_write_triplet_lines()`, GUI wiring,
-an `_is_trivial_config` check) would apply if support is added later — but note this
-block's own format conventions (sentinel fields, if any) haven't been verified against
-real HEC-RAS output the way Manning's n and IFAs now have, and shouldn't be assumed to
-match either one without doing that verification first.
+As of 2026-07-21 `#Block Obstruct=` and `Levee=` are parsed into the model
+(`blocks/xs_block_obstruct.py` → `CrossSection.blocked_obstructions`;
+`blocks/xs_levee.py` → `CrossSection.levee`) for the active-flow work.  Parsing is
+read-only (on top of `raw_lines`, so the lossless roundtrip is unchanged); **no writer /
+`merge.py` support yet**.  Verified against real 5.0.3 output
+(`tests/data/Wisconsin Floodway/SterpCreek.g01`): blocked obstructions use the same 8-char
+`[start, end, elevation]` triplet layout as IFAs, with `normal` (flag 0, left/right +
+0.0-edge sentinels) vs `multiple_block` (flag -1, literal stations) — but with **no**
+`Permanent` follower line (obstructions are always solid).  If merge/write support is
+added later, the old plan (a `MergeConfig.obstruct_source` field, `_KEY_PREFIXES` entry,
+a `merge_obstruct()` reusing `_write_triplet_lines()`, GUI wiring) still applies.
+
+### Active-flow feature semantics (`geometry/active_flow.py`)
+
+For **active** top width, IFAs, levees, and blocked obstructions all reduce to a *blocking
+range* removed from the wetted extent, governed by one overtopping rule: a feature blocks
+while `wse <= elevation` (a blank/`None` elevation always blocks); once `wse > elevation`
+it has no active-top-width effect.  Levee (not overtopped) clips outboard
+(`[min_sta, left_sta]` / `[right_sta, max_sta]`); obstruction (not submerged) removes its
+`[start, end]`.  Levees and obstructions also reduce *inactive*/total width (IFAs don't),
+but `active_flow.py` computes active width only.  The `0.0`→edge sentinel is resolved
+**only for "normal"** features (`_resolve_area`); "multiple_block" stations are literal.
 
 ### `geometry/merge.py` — design notes (2026-06-24)
 
