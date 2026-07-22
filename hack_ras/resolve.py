@@ -121,6 +121,72 @@ def _ids_from_paths(paths: Iterable[str]) -> list[str]:
             out.append(ext[1:].lower()) # 'g07'
     return sorted(out)
 
+_ID_KINDS = ("g", "p", "u", "f")
+
+
+def _parse_id_number(token: str, kind: str) -> int:
+    """Parse one id/endpoint token to its integer number (prefix letter optional)."""
+    s = token.strip().lower()
+    if s.startswith(kind):
+        s = s[len(kind):]
+    else:
+        s = s.lstrip("gpuf")            # tolerate a mismatched prefix letter
+    if not s.isdigit():
+        raise ValueError(f"Invalid {kind}-file id token: {token!r}")
+    n = int(s)
+    if not 1 <= n <= 99:
+        raise ValueError(f"{kind}-file id out of range 1-99: {token!r} (-> {n})")
+    return n
+
+
+def expand_id_spec(spec, kind: str = "p") -> list[str]:
+    """
+    Expand a HEC-RAS file-id selection list into sorted, unique, normalised ids.
+
+    Each entry of ``spec`` may be:
+      * a number (int or str)              1, "01", "3"      -> p01, p01, p03
+      * a prefixed id                      "p03", "P3"       -> p03, p03
+      * an inclusive numeric range "A-B"   "01-9", "14-16"   -> p01..p09, p14..p16
+        (a prefix letter is allowed on either endpoint, e.g. "p14-p16")
+
+    ``kind`` is the single-letter type prefix: 'p' (plan), 'g' (geometry),
+    'u' (unsteady), 'f' (steady).  Returns a sorted list of unique two-digit
+    ids such as ``['p01', 'p03', 'p14']``.
+
+    This function is pure (no filesystem access): callers validate the returned
+    ids against the files that actually exist.  A ``str`` or ``int`` is accepted
+    directly as a one-element spec.
+
+    Raises ValueError on a malformed token, an id outside 1-99, or a reversed
+    range (A > B).
+    """
+    if kind not in _ID_KINDS:
+        raise ValueError(f"Unknown file-id kind {kind!r}; expected one of {_ID_KINDS}.")
+    if spec is None:
+        return []
+    if isinstance(spec, (str, int)):
+        spec = [spec]
+
+    numbers: set[int] = set()
+    for entry in spec:
+        token = str(entry).strip()
+        if not token:
+            continue
+        if "-" in token:
+            parts = token.split("-")
+            if len(parts) != 2 or not parts[0].strip() or not parts[1].strip():
+                raise ValueError(f"Invalid {kind}-file range: {entry!r}")
+            start = _parse_id_number(parts[0], kind)
+            end = _parse_id_number(parts[1], kind)
+            if start > end:
+                raise ValueError(f"Reversed {kind}-file range: {entry!r} ({start} > {end})")
+            numbers.update(range(start, end + 1))
+        else:
+            numbers.add(_parse_id_number(token, kind))
+
+    return [f"{kind}{n:02d}" for n in sorted(numbers)]
+
+
 def list_available_ids(prj_path: str) -> dict[str, list[str]]:
     """
     For this project base, return available ids per type ('g??','p??','u??','f??').

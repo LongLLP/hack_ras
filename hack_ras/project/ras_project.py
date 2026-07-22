@@ -9,6 +9,7 @@ from hack_ras.resolve import (
     CrsProjectionFileNotFound,
     PlanHdfNotFound,
     discover_family,
+    expand_id_spec,
     find_crs_prj,
     is_hecras_prj,
     list_available_ids,
@@ -73,9 +74,11 @@ class RasProject:
         that are not referenced by the project are excluded. From those, only
         plans that have a corresponding .p##.hdf file are returned.
 
-        If plan_ids is given (e.g. ['p14', 'p15']), only those plans are
-        returned. Raises PlanHdfNotFound if no HDF files exist for listed plans,
-        or if a requested plan ID is missing.
+        If plan_ids is given, only those plans are returned. Entries accept the
+        flexible id syntax of `expand_id_spec` — bare numbers, `p`-prefixed ids,
+        and inclusive ranges, e.g. ['01', 'p03', '14-16']. Raises PlanHdfNotFound
+        if no HDF files exist for listed plans, or if any requested plan ID is
+        missing (every expanded id must exist — ranges are not filtered).
         """
         listed = self.model.plan_file_ids
         found: dict[str, str] = {}
@@ -92,11 +95,10 @@ class RasProject:
 
         if plan_ids:
             result: dict[str, str] = {}
-            for raw in plan_ids:
-                pid = "p" + str(raw).strip().lower().lstrip("p").zfill(2)
+            for pid in expand_id_spec(plan_ids, "p"):
                 if pid not in found:
                     raise PlanHdfNotFound(
-                        f"Plan '{raw}' (-> '{pid}') not found or not listed in "
+                        f"Plan '{pid}' not found or not listed in "
                         f"{self.base_name}.prj. Available HDFs: {sorted(found.keys())}"
                     )
                 result[pid] = found[pid]

@@ -126,6 +126,7 @@ project.title         # project title string from the .prj
 project.model         # ProjectModel — parsed .prj content (list fields below)
 project.plan_hdfs()               # all .p##.hdf files listed in the .prj that exist on disk
 project.plan_hdfs(['p14','p15'])   # filtered subset
+project.plan_hdfs(['01', 'p03', '14-16'])  # flexible spec (see expand_id_spec)
 project.crs_prj()     # ESRI .prj CRS file (via RAS Mapper or folder search)
 project.family()      # {'geom': [...], 'plan': [...], ...} — filesystem-based
 project.available_ids()           # same, as ID strings
@@ -153,6 +154,20 @@ Plan File=p14
 Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 `resolve_filenames(basename_map)` maps all IDs of each type to filenames, returning
 `{'geom': [...], 'plan': [...], 'unsteady': [...]}`.
+
+## Flexible file-id selection — `resolve.expand_id_spec(spec, kind='p')`
+
+Config `plan_files` lists (and any future geom/unsteady/steady selection) go
+through `expand_id_spec`, which normalises a mixed list of tokens into sorted,
+unique two-digit ids. A token may be a bare number (`01`, `3`), a prefixed id
+(`p03`, `P7`), or an inclusive range (`01-9`, `14-16`, `p14-p16`). `kind` is the
+type-prefix letter (`'p'`/`'g'`/`'u'`/`'f'`). The function is **pure** (no disk
+access) — callers validate the returned ids against real files. Selection is
+**strict**: `RasProject.plan_hdfs` requires every expanded id (including every
+number inside a range) to exist, raising `PlanHdfNotFound` otherwise — ranges are
+not silently filtered to what happens to be present. `ValueError` is raised on a
+malformed token, an id outside 1–99, or a reversed range. `export_xs_gis.py` uses
+the same helper; the four `extract_*` scripts get it for free via `plan_hdfs`.
 
 ## Plan File Operations (`hack_ras/project/plans.py`, `project/sync.py`, `project/rasmap.py`)
 
