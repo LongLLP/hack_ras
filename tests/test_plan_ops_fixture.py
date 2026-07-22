@@ -30,6 +30,7 @@ from hack_ras.project.plans import (
     PlanIdInUse,
     clone_plan,
     delete_plan,
+    plan_short_ids,
     renumber_plans,
 )
 from hack_ras.project.sync import sort_prj_entries, sync_prj
@@ -61,6 +62,16 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
     def read(self, name):
         with open(self.path(name), encoding="latin-1", newline="") as f:
             return f.read()
+
+    def test_plan_short_ids_reads_sidecars_and_skips_missing(self):
+        # prj lists p02, p03, p04, p05 — but p03's file was deleted in the GUI,
+        # so it is skipped (not mapped to an empty short id).
+        self.assertEqual(
+            plan_short_ids(self.project),
+            {"p02": "Test Model",
+             "p04": "Test higher IA and nvals",
+             "p05": "Continue higher IA and nvals"},
+        )
 
     def test_full_sequence_on_ras_authored_files(self):
         # fixture sanity: prj lists 4 plans but p03/u03 files are gone

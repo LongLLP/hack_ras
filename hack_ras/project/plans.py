@@ -104,6 +104,24 @@ def _read_plan_ref(path: str, key: str) -> str | None:
     return None
 
 
+def plan_short_ids(project: RasProject) -> dict[str, str]:
+    """Map each plan listed in the .prj to its 'Short Identifier=' value.
+
+    The short identifier is the label RAS Mapper uses to name the plan's stored-
+    results subfolder, so this is the key to matching those folders back to plans.
+    The .prj is authoritative: plans it lists whose .p## file is missing on disk
+    are skipped; a plan with no 'Short Identifier=' line maps to ''. Returns
+    {plan_id: short_id} in .prj order.
+    """
+    result: dict[str, str] = {}
+    for pid in project.model.plan_file_ids:
+        path = plan_path(project, pid)
+        if not os.path.exists(path):
+            continue
+        result[pid] = _read_plan_ref(path, "Short Identifier") or ""
+    return result
+
+
 # ---------------------------
 # Plan-keyed file families
 # ---------------------------

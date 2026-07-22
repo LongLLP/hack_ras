@@ -110,7 +110,9 @@ from the actual files' titles at load, so stale names in the XML are cosmetic.
 Layers whose referenced file is missing render italic + red-asterisk and are purged
 by Tools > "remove missing layers"; result layers re-create themselves when a plan
 runs. Hand-edited `<Plans>`/`<Results>` sections survive a GUI save round-trip
-verbatim — which is why `project/rasmap.py` only remaps filename tokens.
+verbatim — which is why `renumber_plans_in_rasmap` only remaps filename tokens.
+(`project/rasmap.py` also exposes the read-only `source_data_folders` query —
+see Plan File Operations.)
 
 ## Project Entry Point — `RasProject`
 
@@ -180,10 +182,13 @@ Shared raw-line I/O helpers live in `hack_ras/utils/lines.py`
 ```python
 from hack_ras import RasProject
 from hack_ras.project.plans import (
-    renumber_plan, renumber_plans, insert_plan_gap, clone_plan, delete_plan)
+    renumber_plan, renumber_plans, insert_plan_gap, clone_plan, delete_plan,
+    plan_short_ids)
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 
 project = RasProject(r"...\Model.prj")
+plan_short_ids(project)                  # {plan_id: 'Short Identifier='} in prj order;
+                                         #   skips plans whose .p## file is missing
 sync_prj(project)                        # drop prj entries whose files are missing; fix Current Plan
 renumber_plans(project, {"p20": "p02",   # bulk renumber: chains/cycles auto-ordered
                          "p02": "p06"})  #   ('<name>.renumtmp' hop breaks cycles)
@@ -232,6 +237,15 @@ that carry no plan number (e.g. `banana.rst`) are left alone.
   `PlanRunActive`.
 - `insert_plan_gap` delegates to `renumber_plans` — every target ID is validated
   (collisions, orphan files on disk, p99 overflow) before any file is touched.
+- Read-only queries used by GIS post-processing: `plan_short_ids(project)` (plans.py)
+  maps each prj-listed plan to its `Short Identifier=` — the label RAS Mapper uses to
+  name that plan's stored-results subfolder; `source_data_folders(rasmap_path)`
+  (rasmap.py) returns the subfolders a `.rasmap` references via non-`RASResultsMap`
+  layers (terrain, land-cover, feature layers) — i.e. the source-data folders to
+  protect (never delete) when collecting result GIS. A folder referenced by BOTH a
+  results map and a source layer (a plan whose Short ID collides with, say, the
+  terrain folder) stays protected. Consumed by
+  `Scripts/Results_GIS/copy_results_gis.py`.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
@@ -823,7 +837,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-07-17, session 13)*
+*(Last updated: 2026-07-22, session 14)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -854,6 +868,23 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 14 changes (2026-07-22): read-only Short-ID / rasmap queries for GIS post-processing
+
+Added two read-only helpers so a standalone results-GIS collection script
+(`Scripts/Results_GIS/copy_results_gis.py`) doesn't re-implement HEC-RAS file
+parsing: `plan_short_ids(project)` in `project/plans.py` (prj-authoritative
+`{plan_id: Short Identifier}`, reuses `plan_path` + `_read_plan_ref`, skips
+plans whose `.p##` is missing) and `source_data_folders(rasmap_path)` in
+`project/rasmap.py` (subfolders referenced by any non-`RASResultsMap` layer —
+terrain, land-cover, features — with the collision rule that a folder referenced
+by BOTH a results map and a source layer stays protected). The copy/rename/vrt-
+patch/delete mechanics stayed in the script (pure filesystem, not the library's
+charter). New `tests/test_rasmap.py` (4 tests: real 2D-culvert `Model.rasmap`
+plus a synthetic rasmap for the RASResultsMap-exclusion and collision cases) and
+one test in `test_plan_ops_fixture.py` (`plan_short_ids` on the real model,
+asserting the stale-`p03` slot is skipped). Baseline: **241 passed / 0 failed /
+0 skipped**.
 
 ### Session 13 changes (2026-07-17): plan-ops suite — sync, bulk renumber, delete, rasmap, breach check
 
