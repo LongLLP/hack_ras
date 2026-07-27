@@ -837,7 +837,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-07-22, session 14)*
+*(Last updated: 2026-07-27, session 15)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -868,6 +868,67 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 15 changes (2026-07-27): Storage Area 2D Points block + Mesh_Health cell-seed snapper
+
+First 2D-mesh (non-XS) geometry block parsed. `blocks/storage_area_2d.py`
+reads `Storage Area 2D Points= N` — a storage area's 2D **cell-seed points**
+(cell centers) in the SAME 16-char fixed-width layout as `XS GIS Cut Line=`
+(2 XY pairs / 64-char line, field-boundary wrap). `parse_2d_points(lines, idx)`
+returns `(points, consumed)`; N=0 (a 1D storage area) is header-only.
+`format_2d_points_lines(points)` reuses the shared `_fmt(v,16)` formatter, so
+rewriting an unchanged block is byte-identical (verified on GMF_DFA.g01's
+11,970-point block) — an edit that moves a few seeds diffs only those lines.
+The parser now dispatches `Storage Area=` (name) and `Storage Area 2D Points=`
+into `GeometryFile.storage_areas_2d: List[StorageArea2D]` (name, points, and
+`_header_line`/`_data_start`/`_data_end` raw-line span). XS parsing and the
+lossless roundtrip are untouched (these lines previously fell through). New
+`tests/test_storage_area_2d.py` (6 tests) uses the two-area
+`2D culvert bridge levee precip pipes/Model.g02` (Interior=32, Watershed=29)
+and the zero-point `Baxter/Baxter.g02`. Baseline 241 → **247**.
+
+Consumer: `Scripts/Mesh_Health/snap_cell_centers.py` (+ `config.yaml`) —
+YAML-driven tool that snaps hand-digitized 2D cell seeds in the vicinity of a
+user shapefile (polygon/polyline/point) onto the lattice inferred from the
+surrounding seeds. Lattice = per-axis modal spacing (auto or configured) +
+phase from a wrap-safe **median** of `coord mod spacing` over a reference ring
+(median, not mean — one refined-zone outlier otherwise biased the phase;
+learned empirically: 61/62 ref cells were on the 200-ft lattice, the median
+nailed 7.107/25.850 while the mean gave 7.006). Seeds already within 0.01 ft of
+a node are left byte-untouched; a move beyond `max_move_ft` (default 0.75·spacing)
+or a collision (two seeds → one node, or onto an occupied node) leaves that seed
+in place with a warning. Output: new geom + `Geom File=` appended to .prj
+(default, requires new `Geom Title`), or in-place overwrite with a one-time
+`.bak`. Verified on a copy of Model_PCA/02_GMF_DFA_v7.0 g01 (Mesh_Health.shp):
+28 in-region seeds → 20 moved (max 33.98 ft) onto the exact 200-ft lattice, 8
+already aligned, 0 collisions, all out-of-region seeds byte-identical. User
+must re-open the geometry in HEC-RAS to regenerate the computed mesh (.g0x.hdf).
+The tool is intended to expand (more 2D mesh-health operations).
+
+### Session 16 changes (2026-07-27): mesh-snapper mesh-refresh, collisions, grid source, prj fix
+
+Library: added `format_2d_points_header(n)` to `blocks/storage_area_2d.py` (reproduces
+RAS's `Storage Area 2D Points= {n} ` spacing byte-for-byte) for when the seed count
+changes; +2 tests -> baseline **249**. Everything else was in
+`Scripts/Mesh_Health/snap_cell_centers.py`:
+
+- **Mesh-refresh trigger (verified live).** Editing the seeds alone does not make RAS
+  regenerate — it compares the text `Storage Area 2D PointsPerimeterTime=` stamp to the
+  geometry HDF's `Data Date` / `Geometry Time`. The script now bumps that stamp to now.
+  Do NOT delete `.g0x.hdf` to force regen: pipe networks and other features live ONLY in
+  the HDF (the HDF also stores the input seeds as `Geometry/2D Flow Areas/Cell Points`).
+- **`on_collision: leave|drop`.** A surplus hand-digitized seed whose nearest node is
+  already occupied is left in place (`leave`, default) or removed keeping the nearest
+  (`drop`, reduces N + rewrites the header + writes `<qc>_dropped.shp`).
+- **`grid_source: local|master|explicit`** + a discrepancy warning. SPACING always comes
+  from the sparse ring or config — inferring spacing from the whole dense area returns
+  rounding noise (~0.1 ft), which was a real bug caught in dry-run. `master` takes the
+  phase from all area seeds; `explicit` uses `spacing` + `anchor`.
+- **PRJ registration bug fixed.** The old append rewrote the whole .prj in text mode,
+  downgrading CRLF->LF (RAS then refused to load) and appended at EOF. Now uses
+  `utils.lines` (latin-1, endings preserved) and inserts in ascending order among the
+  `Geom File=` lines. Backups increment (`.bak`, `.bak2`, ...) so iterative overwrite
+  runs never clobber an earlier one.
 
 ### Session 14 changes (2026-07-22): read-only Short-ID / rasmap queries for GIS post-processing
 

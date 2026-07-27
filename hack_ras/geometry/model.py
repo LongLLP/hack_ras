@@ -103,6 +103,27 @@ class CrossSection:
     _raw_line_end: int = field(default=-1, repr=False, compare=False)
 
 @dataclass
+class StorageArea2D:
+    """A storage area's 2D-mesh cell-seed points (from ``Storage Area 2D Points=``).
+
+    ``points`` are the cell centers HEC-RAS uses to (re)generate the 2D mesh
+    when the geometry is opened.  A storage area that is 1D (or a 2D area whose
+    mesh has not been generated) has an empty ``points`` list.
+
+    The three ``_raw_*`` indices locate the block within
+    ``GeometryFile.raw_lines`` so an editor can rewrite only the coordinate
+    data lines and leave every other byte untouched.  They are positional
+    bookkeeping set by the parser, not semantic fields.
+    """
+    name: str
+    points: List[Tuple[float, float]] = field(default_factory=list)
+
+    _header_line: int = field(default=-1, repr=False, compare=False)  # 'Storage Area 2D Points=' line
+    _data_start: int = field(default=-1, repr=False, compare=False)   # first coordinate line
+    _data_end: int = field(default=-1, repr=False, compare=False)     # one past the last coordinate line
+
+
+@dataclass
 class Reach:
     name: str
     cross_sections: List[CrossSection] = field(default_factory=list)
@@ -116,6 +137,7 @@ class River:
 class GeometryFile:
     title: Optional[str] = None
     rivers: Dict[str, River] = field(default_factory=dict)
+    storage_areas_2d: List[StorageArea2D] = field(default_factory=list)
 
     raw_lines: List[str] = field(default_factory=list)  # for passthrough/editing
 

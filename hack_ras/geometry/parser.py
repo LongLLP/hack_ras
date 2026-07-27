@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 from typing import List, Optional
-from .model import GeometryFile, CrossSection, XSGISCutLine
+from .model import GeometryFile, CrossSection, XSGISCutLine, StorageArea2D
 from .blocks import river_reach, xs_metadata, xs_gis, xs_sta_elev, xs_ineff
 from .blocks import xs_mann, xs_bank_sta, xs_levee, xs_block_obstruct
+from .blocks import storage_area_2d
 
 class GeometryParser:
     """
@@ -23,6 +24,7 @@ class GeometryParser:
         current_river = None
         current_reach = None
         current_xs = None
+        current_storage_area = None  # name of the storage area currently being read
 
         # Track (xs, start_line) for post-loop end-line assignment
         _xs_starts: List[tuple] = []  # (CrossSection, start_line_index)
@@ -45,6 +47,28 @@ class GeometryParser:
                 current_river = river
                 current_reach = reach
                 i += 1
+                continue
+
+            # --- Storage Area= (2D flow area name header) ---
+            # Matches only the name line ("Storage Area=Perimeter 1  ,,"), not
+            # the sibling "Storage Area <thing>=" lines (Surface Line, Type,
+            # 2D Points, Mannings, ...) or "BC Line Storage Area=".
+            if line.startswith("Storage Area="):
+                current_storage_area = line.split("=", 1)[1].split(",")[0].strip()
+                i += 1
+                continue
+
+            # --- Storage Area 2D Points= (2D-mesh cell seeds) ---
+            if line.startswith("Storage Area 2D Points="):
+                pts, consumed = storage_area_2d.parse_2d_points(lines, i)
+                geom.storage_areas_2d.append(StorageArea2D(
+                    name=current_storage_area or "",
+                    points=pts,
+                    _header_line=i,
+                    _data_start=i + 1,
+                    _data_end=i + consumed,
+                ))
+                i += consumed
                 continue
 
             # --- Type RM Length (XS metadata header) ---
