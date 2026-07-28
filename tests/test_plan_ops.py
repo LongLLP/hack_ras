@@ -18,7 +18,9 @@ from hack_ras.project.plans import (
     PlanRunActive,
     _warn_breach_triggers,
     clone_plan,
+    compact_plans,
     delete_plan,
+    delete_plans,
     insert_plan_gap,
     renumber_plan,
     renumber_plans,
@@ -504,6 +506,51 @@ class TestDeletePlan(RichProjectBase):
         _write(self.path("Mini.p09"), _rich_plan_lines("Orphan", "g01", "u01"))
         with self.assertRaises(ValueError):
             delete_plan(self.project, "p09")
+
+
+class TestCompactPlans(RichProjectBase):
+    def test_compact_fills_gap(self):
+        delete_plan(self.project, "p02")          # p01, p03 remain (gap at p02)
+        mapping = compact_plans(self.project)
+        self.assertEqual(mapping, {"p03": "p02"})
+        self.assertEqual(self.project.model.plan_file_ids, ["p01", "p02"])
+        self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p02")))
+
+    def test_compact_noop_when_contiguous(self):
+        self.assertEqual(compact_plans(self.project), {})
+
+
+class TestDeletePlansBulk(RichProjectBase):
+    def test_bulk_delete_by_spec_string(self):
+        report = delete_plans(self.project, "01,03")
+        self.assertEqual(report["deleted_plans"], ["p01", "p03"])
+        self.assertEqual(self.project.model.plan_file_ids, ["p02"])
+        self.assertFalse(os.path.exists(self.path("Mini.p01")))
+        self.assertFalse(os.path.exists(self.path("Mini.p03")))
+        # Current Plan was p03 -> repointed to the surviving p02 (net change)
+        self.assertEqual(report["current_plan"], ("p03", "p02"))
+
+    def test_bulk_delete_by_range(self):
+        report = delete_plans(self.project, "01-02")
+        self.assertEqual(report["deleted_plans"], ["p01", "p02"])
+        self.assertEqual(self.project.model.plan_file_ids, ["p03"])
+
+    def test_bulk_delete_is_fail_fast(self):
+        # p09 is not present -> the whole call is refused up front
+        with self.assertRaises(PlanFileNotFound):
+            delete_plans(self.project, "01,09")
+        self.assertTrue(os.path.isfile(self.path("Mini.p01")))   # nothing deleted
+
+    def test_bulk_delete_consolidates_rasmap_and_unused_files(self):
+        report = delete_plans(self.project, "02",
+                              delete_unused_geom=True, delete_unused_flow=True)
+        self.assertEqual(report["deleted_plans"], ["p02"])
+        self.assertEqual(report["rasmap_removed"]["plans"], ["p02"])
+        self.assertEqual(report["rasmap_removed"]["results"], ["p02"])
+        self.assertEqual(report["rasmap_removed"]["event_conditions"], ["u02"])
+        self.assertEqual(report["rasmap_removed"]["geometries"], ["g02"])
+        self.assertFalse(os.path.exists(self.path("Mini.g02")))
+        self.assertFalse(os.path.exists(self.path("Mini.u02")))
 
 
 class TestSortPrjEntries(RichProjectBase):

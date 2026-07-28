@@ -198,6 +198,8 @@ renumber_plans(project, {"p20": "p02",   # bulk renumber: chains/cycles auto-ord
                          "p02": "p06"})  #   ('<name>.renumtmp' hop breaks cycles)
 renumber_plan(project, "p25", "p30")     # single-plan case of the same machinery
 insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5; returns {old: new}
+compact_plans(project)                    # renumber survivors to contiguous p01..pN
+delete_plans(project, "16-17,21-26,30-35")  # bulk delete by id-spec (fail-fast)
 sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Steady File=
                                          #   lines ascending; kinds=("plan",) etc. to limit
 delete_plan(project, "p08",              # deletes plan + outputs; optional unused-file cleanup
@@ -280,6 +282,16 @@ alone.
   `PlanRunActive`.
 - `insert_plan_gap` delegates to `renumber_plans` — every target ID is validated
   (collisions, orphan files on disk, p99 overflow) before any file is touched.
+- `compact_plans(project)` renumbers the listed plans to a contiguous p01..pN by
+  ascending number (fills gaps; the plan-side twin of `geoms.compact_geoms`) — the
+  "...and renumber the rest sequentially" half of the common delete-then-compact
+  request. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
+  bulk-deletes by a flexible id-spec (`'16-17,21-26,30-35'` string, or a list —
+  via `resolve.expand_id_spec`); it validates every id up front (exists, listed,
+  not mid-run) so a bad spec deletes NOTHING, then loops `delete_plan` and returns
+  one consolidated report (`deleted_plans`, `deleted`, `prj_removed`, `warnings`,
+  net `current_plan`, merged `rasmap_removed`). A geometry/flow shared by several
+  deleted plans is still removed once, when its last user goes.
 - Read-only queries used by GIS post-processing: `plan_short_ids(project)` (plans.py)
   maps each prj-listed plan to its `Short Identifier=` — the label RAS Mapper uses to
   name that plan's stored-results subfolder; `source_data_folders(rasmap_path)`
@@ -311,6 +323,7 @@ compact_geoms(project)                                 # g01,g03,g05 -> g01,g02,
 clone_geom(project, "g01", "New Geom Title", new_id="g07")  # copy .g## + new title
 delete_geom(project, "g04")                            # refuses if a plan uses it
 delete_geom(project, "g04", force=True)                # deletes anyway (+warns)
+delete_geoms(project, "g04-g06", force=True)           # bulk delete by id-spec
 ```
 
 Renumbering covers the geometry family (`.g##`, `.g##.hdf`, `.x##` — the `.x##`
@@ -333,6 +346,11 @@ stale plan title on `.x##` line 3. There is **no "Current Geometry"** key in the
   their `GeometryHDF=` in the rasmap dangling, by design; the plans still exist).
 - `compact_geoms` builds the fill-the-gaps mapping and delegates to
   `renumber_geoms`; `insert_geom_gap` is the inverse (mirrors `insert_plan_gap`).
+- `delete_geoms(project, spec, force=)` bulk-deletes by id-spec (mirrors
+  `delete_plans`): validates every id up front and, unless force, refuses the
+  whole call with `GeomInUse` if ANY target is still referenced — so nothing is
+  deleted on a bad spec. Consolidated report: `deleted_geoms`, `deleted`,
+  `prj_removed`, `referencing_plans` (per gid), `warnings`, `rasmap_removed`.
 - `clone_geom` copies only the `.g##` text with a new (unique) `Geom Title=`
   (`DuplicateGeomTitle` otherwise) and inserts the `Geom File=` entry ascending;
   RAS regenerates the `.g##.hdf` on the next run (mirrors `clone_plan`).
@@ -340,6 +358,36 @@ stale plan title on `.x##` line 3. There is **no "Current Geometry"** key in the
   `DuplicateGeomTitle`, `GeomRunActive` (a plan using the geometry is mid-run —
   a `.p##.tmp.hdf` exists). Orphan geometries (on disk but not in the `.prj`) are
   rejected, mirroring the plan ops.
+
+## Project Health / Status Inspector (`hack_ras/project/health.py`)
+
+Read-only snapshot of a project — the thing to run to verify state after an
+operation (it retired the ad-hoc, escaping-fragile inspection scripts) and to
+answer "what's in this model / what's inconsistent?".
+
+```python
+from hack_ras.project.health import project_health, format_health
+h = project_health(project)          # -> ProjectHealth dataclass
+print(format_health(h))              # readable multi-line text summary
+h.ok                                 # True when no consistency issue found
+h.issues                             # {field: [...]} for every non-empty issue
+```
+
+`ProjectHealth` carries an **inventory** — `current_plan`; `plans`
+(`PlanInfo`: id, title, geom, flow, has_results); `geometries` / `flows`
+(`FileInfo`: id, title, `used_by` plan-ids) — and these **issue lists** (all
+empty ⇒ `ok`): `orphan_files` (on disk, not in .prj), `stale_prj_entries`
+(listed, file missing), `rasmap_duplicate_layers` (same token twice in a
+section — the zombie case), `rasmap_missing_file_layers`, `unlisted_results`
+(computed `.p##.hdf` with no `<Results>` layer — RAS Mapper will append them out
+of order), `duplicate_titles` (RAS requires unique per kind), `unused_geometries`
+/ `unused_flows`, `active_runs` (`.p##.tmp.hdf` present). Nothing here writes.
+`has_results` / `unlisted_results` read the plan HDFs via h5py (imported lazily;
+absent h5py ⇒ those are `None` / skipped, the rest still works). Backed by the
+read-only `rasmap.rasmap_layer_refs()` and `rasmap.result_plan_ids()` queries.
+
+The companion dry-run/preview (show a mutating op's change-set before applying)
+is the paired, still-open TODO item — see docs/TODO.md.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
@@ -1058,6 +1106,22 @@ is truly vacant before any renumber can adopt a zombie.
   rasmap test); validated on a copy of the real 2D-culvert fixture (compact
   g02,g03->g01,g02 rewrote plan Geom File= + rasmap Geometries/GeometryHDF, left
   the plan-keyed nested Results RASGeometry untouched). Baseline 264 -> **284**.
+- Ergonomics for the "user asks Claude to run these conversationally" workflow:
+  `compact_plans` (plan-side twin of `compact_geoms` — was missing), and bulk
+  `delete_plans` / `delete_geoms` taking a flexible id-spec ('16-17,21-26,30-35'
+  string or list, via `resolve.expand_id_spec`, comma-split first). Both bulk
+  deletes validate every id up front (fail-fast: a bad spec deletes nothing;
+  delete_geoms additionally refuses the whole call if any target is referenced,
+  unless force) and return one consolidated report. +10 tests. Baseline 284 ->
+  **294**. Two paired follow-ups the user deferred to the TODO: a read-only
+  project status/health inspector, and dry-run/preview on the mutating ops (see
+  docs/TODO.md).
+- Built TODO item A (read-only status/health inspector, `project/health.py`:
+  `project_health` -> `ProjectHealth` + `format_health`; new read-only rasmap
+  queries `rasmap_layer_refs` / `result_plan_ids`). Confirmed with the user that
+  A stands alone (no dependency on B; B only ever reuses A's rendering) and that
+  their always-backup habit makes B optional. +3 tests (`test_health.py`).
+  Baseline 294 -> **297**. B (dry-run/preview) remains the one open TODO.
 - Ran the full real job twice at the user's request. Session-first run (delete +
   renumber only) validated end-to-end on the live model and a copy of
   `02_GMF_DFA_v7.0 - backup1`: Plans p01-p21 / Results both contiguous, ZERO
@@ -1527,9 +1591,13 @@ part, not a case worth adding branching for.
 
 ## Future Features — Not Yet Implemented
 
-See also `docs/TODO.md` — the approved-for-consideration work-item list (plan
-renumbering gaps: restart-file awareness, .prj sync, bulk renumber, .rasmap
-renumbering, breach-trigger validity check). Ask the user before implementing.
+**`docs/TODO.md` is the authoritative open-items list.** As of 2026-07-28 it has
+exactly two OPEN items: (A) writer / `merge.py` support for Blocked Obstructions
+(`#Block Obstruct=`) and `Levee=` — described just below, currently parse-only;
+and (B) dry-run/preview on the mutating ops (LOW PRIORITY). Everything else once
+listed there (the session-13 plan-file-op gaps, the session-17 geometry
+subsystem / rasmap cleanup / health inspector) is DONE. Ask the user before
+implementing.
 
 ### `#Block Obstruct=` (Blocked Obstructions) — now PARSED (read-only)
 

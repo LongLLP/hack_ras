@@ -402,6 +402,32 @@ def result_plan_ids(rasmap_path: str, base_name: str) -> set:
     return ids
 
 
+_REF_SECTIONS = ("Geometries", "Plans", "EventConditions", "Results")
+
+
+def rasmap_layer_refs(rasmap_path: str) -> list:
+    """(section, layer_type, basename) for every top-level `<Layer>` (that has a
+    Filename) in the Geometries / Plans / EventConditions / Results sections.
+
+    Read-only inventory for consistency checks: duplicate layers are repeated
+    (section, basename) pairs; a missing-file layer is one whose basename has no
+    file on disk. `basename` is the trailing filename token, e.g.
+    'GMF_DFA.p16', 'GMF_DFA.p16.hdf', 'GMF_DFA.g01.hdf', 'GMF_DFA.u09.hdf'."""
+    with open(rasmap_path, "r", encoding="latin-1", newline="") as f:
+        text = f.read()
+    out = []
+    for section in _REF_SECTIONS:
+        inner = _section_inner(text, section)
+        if not inner:
+            continue
+        for bstart, bend, tag in _top_level_layer_blocks(text, *inner):
+            type_m = _TYPE_RE.search(tag)
+            basename = _layer_basename(tag)
+            if type_m and basename:
+                out.append((section, type_m.group(1), basename))
+    return out
+
+
 def sort_rasmap_layers(
     rasmap_path: str, base_name: str, sections: tuple = ("Plans", "Results")
 ) -> dict:

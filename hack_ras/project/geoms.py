@@ -39,6 +39,7 @@ from hack_ras.project.rasmap import (
     remove_geoms_from_rasmap,
     renumber_geoms_in_rasmap,
 )
+from hack_ras.resolve import expand_id_spec
 from hack_ras.utils.lines import content_of, eol_of, read_lines, write_lines
 
 logger = logging.getLogger(__name__)
@@ -490,3 +491,66 @@ def delete_geom(
     return {"deleted": deleted, "prj_removed": prj_removed,
             "referencing_plans": referencing, "warnings": warnings,
             "rasmap_removed": rasmap_removed}
+
+
+def delete_geoms(
+    project: RasProject,
+    spec,
+    *,
+    force: bool = False,
+    clean_rasmap: bool = True,
+) -> dict:
+    """Delete several geometries given a flexible id spec, e.g. 'g02,g04-g05'
+    or ['02', 'g04', '5'] (see resolve.expand_id_spec). A comma-separated
+    string is accepted directly.
+
+    All ids are validated up front (each must exist, be listed in the .prj, and
+    have no plan of theirs mid-run) and, unless force=True, the whole call is
+    refused with GeomInUse if ANY target is still referenced by a plan — so a
+    bad spec fails before any geometry is deleted. Then each is removed via
+    delete_geom.
+
+    Returns a consolidated report:
+        {'deleted_geoms': [gid, ...], 'deleted': [filenames],
+         'prj_removed': [entries], 'referencing_plans': {gid: [pid, ...]},
+         'warnings': [...], 'rasmap_removed': [gid, ...]}
+    """
+    if isinstance(spec, str):
+        spec = spec.split(",")
+    gids = expand_id_spec(spec, kind="g")
+
+    listed = project.model.geom_file_ids
+    referenced = {}
+    for gid in gids:
+        if not os.path.isfile(geom_path(project, gid)):
+            raise GeomFileNotFound(f"Geometry file not found: {geom_path(project, gid)}")
+        if gid not in listed:
+            raise ValueError(
+                f"Geometry '{gid}' exists on disk but is not listed in "
+                f"{project.base_name}.prj (orphan) — refusing to delete it."
+            )
+        _assert_no_geom_run_active(project, gid)
+        refs = _plans_using_geom(project, gid)
+        if refs:
+            referenced[gid] = refs
+    if referenced and not force:
+        raise GeomInUse(
+            f"Geometr(ies) {sorted(referenced)} still referenced by plan(s) "
+            f"{referenced} — refusing to delete. Pass force=True to delete "
+            "anyway (those plans will then point at a missing geometry)."
+        )
+
+    report = {
+        "deleted_geoms": [], "deleted": [], "prj_removed": [],
+        "referencing_plans": {}, "warnings": [], "rasmap_removed": [],
+    }
+    for gid in gids:
+        r = delete_geom(project, gid, force=force, clean_rasmap=clean_rasmap)
+        report["deleted_geoms"].append(gid)
+        report["deleted"].extend(r["deleted"])
+        report["prj_removed"].extend(r["prj_removed"])
+        if r["referencing_plans"]:
+            report["referencing_plans"][gid] = r["referencing_plans"]
+        report["warnings"].extend(r["warnings"])
+        report["rasmap_removed"].extend(r["rasmap_removed"])
+    return report

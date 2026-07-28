@@ -33,6 +33,7 @@ from hack_ras.project.rasmap import (
     renumber_plans_in_rasmap,
     result_plan_ids,
 )
+from hack_ras.resolve import expand_id_spec
 from hack_ras.utils.lines import content_of, eol_of, read_lines, write_lines
 
 logger = logging.getLogger(__name__)
@@ -431,6 +432,23 @@ def insert_plan_gap(project: RasProject, at_id: str, count: int) -> dict:
     return mapping
 
 
+def compact_plans(project: RasProject) -> dict:
+    """Renumber the listed plans to a contiguous p01..pN by ascending number,
+    filling any gaps (e.g. p01,p03,p06 -> p01,p02,p03). This is the plan-side
+    analogue of geoms.compact_geoms, and the "...and renumber the rest
+    sequentially" half of a typical delete-then-compact request. Returns the
+    {old_id: new_id} mapping of what moved (empty if already contiguous)."""
+    sorted_ids = sorted(project.model.plan_file_ids, key=_plan_num)
+    mapping = {}
+    for i, pid in enumerate(sorted_ids, start=1):
+        target = f"p{i:02d}"
+        if pid != target:
+            mapping[pid] = target
+    if mapping:
+        renumber_plans(project, mapping)
+    return mapping
+
+
 def delete_plan(
     project: RasProject,
     plan_id: str,
@@ -589,6 +607,74 @@ def delete_plan(
     return {"deleted": deleted, "prj_removed": prj_removed,
             "warnings": warnings, "current_plan": current_change,
             "rasmap_removed": rasmap_removed}
+
+
+def delete_plans(
+    project: RasProject,
+    spec,
+    *,
+    delete_unused_geom: bool = False,
+    delete_unused_flow: bool = False,
+    clean_rasmap: bool = True,
+) -> dict:
+    """Delete several plans given a flexible id spec, e.g.
+    '16-17,21-26,30-35' or ['16-17', 21, 'p22'] (see resolve.expand_id_spec).
+    A comma-separated string is accepted directly.
+
+    All ids are validated up front (each must exist, be listed in the .prj, and
+    not be mid-run) so a bad spec fails before ANY plan is deleted — no partial
+    deletion. Then each is removed via delete_plan (see there for what each
+    delete covers and the optional unused-geom/flow cleanup, all applied per
+    plan). A geometry/flow shared by several deleted plans is removed once, when
+    its last user goes (delete_plan's own unused-check handles this).
+
+    Returns a consolidated report:
+        {'deleted_plans': [pid, ...], 'deleted': [filenames],
+         'prj_removed': [entries], 'warnings': [...],
+         'current_plan': (orig, final) or None,
+         'rasmap_removed': {'plans': [...], 'results': [...],
+                            'event_conditions': [...], 'geometries': [...]}}
+    """
+    if isinstance(spec, str):
+        spec = spec.split(",")
+    pids = expand_id_spec(spec, kind="p")
+
+    listed = project.model.plan_file_ids
+    for pid in pids:
+        if not os.path.isfile(plan_path(project, pid)):
+            raise PlanFileNotFound(f"Plan file not found: {plan_path(project, pid)}")
+        if pid not in listed:
+            raise ValueError(
+                f"Plan '{pid}' exists on disk but is not listed in "
+                f"{project.base_name}.prj (orphan) — refusing to delete it."
+            )
+        _assert_no_active_run(project, pid)
+
+    report = {
+        "deleted_plans": [], "deleted": [], "prj_removed": [],
+        "warnings": [], "current_plan": None,
+        "rasmap_removed": {"plans": [], "results": [],
+                           "event_conditions": [], "geometries": []},
+    }
+    for pid in pids:
+        r = delete_plan(
+            project, pid,
+            delete_unused_geom=delete_unused_geom,
+            delete_unused_flow=delete_unused_flow,
+            clean_rasmap=clean_rasmap,
+        )
+        report["deleted_plans"].append(pid)
+        report["deleted"].extend(r["deleted"])
+        report["prj_removed"].extend(r["prj_removed"])
+        report["warnings"].extend(r["warnings"])
+        for k in report["rasmap_removed"]:
+            report["rasmap_removed"][k].extend(r["rasmap_removed"][k])
+        if r["current_plan"]:
+            report["current_plan"] = (
+                (report["current_plan"] or r["current_plan"])[0],
+                r["current_plan"][1],
+            )
+    return report
 
 
 def clone_plan(

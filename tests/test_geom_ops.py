@@ -22,6 +22,7 @@ from hack_ras.project.geoms import (
     clone_geom,
     compact_geoms,
     delete_geom,
+    delete_geoms,
     insert_geom_gap,
     renumber_geom,
     renumber_geoms,
@@ -247,6 +248,34 @@ class TestDeleteGeom(GeomProjectBase):
     def test_delete_missing_raises(self):
         with self.assertRaises(GeomFileNotFound):
             delete_geom(self.project, "g08")
+
+
+class TestDeleteGeomsBulk(GeomProjectBase):
+    def test_bulk_delete_unreferenced_by_spec(self):
+        # g03 is unused; delete via a spec string
+        report = delete_geoms(self.project, "g03")
+        self.assertEqual(report["deleted_geoms"], ["g03"])
+        self.assertEqual(self.project.model.geom_file_ids, ["g01", "g02"])
+        self.assertEqual(report["rasmap_removed"], ["g03"])
+
+    def test_bulk_refuses_if_any_referenced_and_nothing_deleted(self):
+        with self.assertRaises(GeomInUse):
+            delete_geoms(self.project, "g02,g03")   # g02 is referenced
+        # fail-fast: neither was deleted
+        self.assertTrue(os.path.isfile(self.path("Mini.g02")))
+        self.assertTrue(os.path.isfile(self.path("Mini.g03")))
+
+    def test_bulk_force_deletes_referenced(self):
+        report = delete_geoms(self.project, "02-03", force=True)
+        self.assertEqual(report["deleted_geoms"], ["g02", "g03"])
+        self.assertEqual(report["referencing_plans"], {"g02": ["p03", "p04"]})
+        self.assertTrue(report["warnings"])
+        self.assertEqual(self.project.model.geom_file_ids, ["g01"])
+
+    def test_bulk_fail_fast_on_missing(self):
+        with self.assertRaises(GeomFileNotFound):
+            delete_geoms(self.project, "03,09")   # g09 absent
+        self.assertTrue(os.path.isfile(self.path("Mini.g03")))
 
 
 if __name__ == "__main__":
