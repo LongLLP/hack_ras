@@ -31,8 +31,10 @@ from hack_ras.project.plans import (
     clone_plan,
     delete_plan,
     plan_short_ids,
+    plans_with_unlisted_results,
     renumber_plans,
 )
+from hack_ras.project.rasmap import remove_plans_from_rasmap
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "data",
@@ -165,6 +167,23 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         self.assertIn("Geom File=g03", text)
         self.assertEqual(result["warnings"], [])
         self.assertEqual(result["current_plan"], ("p03", "p01"))
+        # rasmap: the deleted plan's RASPlan/RASResults layers are removed, and
+        # the unused flow's (u04) EventConditions layer with it
+        self.assertEqual(result["rasmap_removed"]["plans"], ["p03"])
+        self.assertEqual(result["rasmap_removed"]["event_conditions"], ["u04"])
+        rasmap = self.read("Model.rasmap")
+        self.assertNotIn("Model.p03", rasmap)
+        self.assertNotIn("Model.u04.hdf", rasmap)
+
+    def test_flags_computed_results_missing_from_rasmap(self):
+        # All computed results (p02, p04, p05) are listed in the rasmap Results
+        # section -> nothing flagged.
+        self.assertEqual(plans_with_unlisted_results(self.project), [])
+        # Drop p04's rasmap layers, simulating a plan that was run headlessly
+        # and never added to RAS Mapper's Results tree. Its .p04.hdf has a
+        # Results group, so it is now flagged as "would be auto-appended".
+        remove_plans_from_rasmap(self.path("Model.rasmap"), "Model", ["p04"])
+        self.assertEqual(plans_with_unlisted_results(self.project), ["p04"])
 
     def test_delete_warns_when_restart_source_is_deleted(self):
         # u04 consumes p04's restart; deleting p04 orphans it.

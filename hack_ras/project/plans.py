@@ -26,7 +26,13 @@ import os
 from datetime import datetime, timedelta
 
 from hack_ras.project.ras_project import RasProject
-from hack_ras.project.rasmap import renumber_plans_in_rasmap
+from hack_ras.project.rasmap import (
+    remove_flows_from_rasmap,
+    remove_geoms_from_rasmap,
+    remove_plans_from_rasmap,
+    renumber_plans_in_rasmap,
+    result_plan_ids,
+)
 from hack_ras.utils.lines import content_of, eol_of, read_lines, write_lines
 
 logger = logging.getLogger(__name__)
@@ -120,6 +126,48 @@ def plan_short_ids(project: RasProject) -> dict[str, str]:
             continue
         result[pid] = _read_plan_ref(path, "Short Identifier") or ""
     return result
+
+
+def plans_with_unlisted_results(project: RasProject) -> list[str]:
+    """Plan IDs whose .p##.hdf holds computed results but which have NO
+    RASResults layer in the .rasmap.
+
+    These are the results RAS Mapper auto-generates and APPENDS to its Results
+    tree — out of numeric order — the next time the project is opened. That is a
+    very common state after running plans headlessly (HEC-RAS computes and
+    writes the .p##.hdf, but nothing adds a Results layer until RAS Mapper is
+    opened). Knowing in advance lets you, e.g., defer sort_rasmap_layers until
+    after opening RAS Mapper once (so it has materialized every result), or just
+    understand why the Results order will shift.
+
+    A plan HDF "has results" if it contains a top-level 'Results' group (needs
+    h5py, imported lazily; a plan whose HDF cannot be opened is skipped). Only
+    plans listed in the .prj are considered. Returns the flagged plan IDs in
+    ascending numeric order; empty if there is no .rasmap or nothing is
+    unlisted.
+    """
+    rasmap_path = os.path.join(project.folder, f"{project.base_name}.rasmap")
+    if not os.path.isfile(rasmap_path):
+        return []
+    listed = result_plan_ids(rasmap_path, project.base_name)
+
+    import h5py  # lazy: keeps the module importable without h5py installed
+
+    flagged = []
+    for pid in project.model.plan_file_ids:
+        if pid in listed:
+            continue
+        hdf = plan_path(project, pid) + ".hdf"
+        if not os.path.isfile(hdf):
+            continue
+        try:
+            with h5py.File(hdf, "r") as h:
+                has_results = "Results" in h
+        except OSError:
+            continue
+        if has_results:
+            flagged.append(pid)
+    return sorted(flagged, key=_plan_num)
 
 
 # ---------------------------
@@ -389,6 +437,7 @@ def delete_plan(
     *,
     delete_unused_geom: bool = False,
     delete_unused_flow: bool = False,
+    clean_rasmap: bool = True,
 ) -> dict:
     """Delete a plan and everything keyed to its number: the .p## file, the
     .p##.hdf results, run artifacts (.b##, .bco##, .ic.o##), restart files it
@@ -399,15 +448,27 @@ def delete_plan(
     file (plus .hdf sidecar, and the geometry's .x## run file) is also
     deleted IF no other listed plan references it, along with its .prj entry.
 
-    The .rasmap is deliberately left alone: RAS Mapper flags layers whose
-    files are missing and purges them via Tools > "remove missing layers".
+    With clean_rasmap (default True), the plan's RASPlan and RASResults layers
+    are removed from the .rasmap. Relying on RAS Mapper's "remove missing
+    layers" alone is unsafe: if the freed plan number is later reused (delete
+    p16, then renumber a survivor onto p16) the stale layer points at an
+    existing file again, so it is neither purged nor correctable — RAS Mapper
+    refreshes its name to the new file's title, leaving a duplicate layer.
+    Removing the layers now keeps the number truly free. (RASResultsMap raster
+    layers and any CalculatedLayers built on the plan are still left to RAS
+    Mapper — they live in result subfolders, not as plan-keyed .rasmap layers.)
+    When delete_unused_flow / delete_unused_geom also removes a flow / geometry
+    file, clean_rasmap likewise drops that flow's RASEventConditions layer /
+    that geometry's <Geometries> RASGeometry layer from the .rasmap.
 
     Logs a warning (and reports it) when a surviving .u file's
     'Restart Filename=' references the deleted plan's restart output — those
     flow files lose their initial-conditions source.
 
     Returns {'deleted': [filenames], 'prj_removed': [entries],
-    'warnings': [...], 'current_plan': (old, new) or None}.
+    'warnings': [...], 'current_plan': (old, new) or None,
+    'rasmap_removed': {'plans': [...], 'results': [...],
+    'event_conditions': [...], 'geometries': [...]}}.
     """
     pid = _normalize_plan_id(plan_id)
     ppath = plan_path(project, pid)
@@ -475,6 +536,7 @@ def delete_plan(
                 prj_removed.append(content_of(kept.pop(i)))
                 return
 
+    removed_geom_id = None
     if delete_unused_geom and geom_id and \
             not _still_referenced("Geom File", geom_id):
         for name in (f"{base}.{geom_id}", f"{base}.{geom_id}.hdf",
@@ -484,7 +546,9 @@ def delete_plan(
                 os.remove(path)
                 deleted.append(name)
         _drop_entry("Geom File=", geom_id)
+        removed_geom_id = geom_id
 
+    removed_flow_id = None
     if delete_unused_flow and flow_id and \
             not _still_referenced("Flow File", flow_id):
         for name in (f"{base}.{flow_id}", f"{base}.{flow_id}.hdf"):
@@ -493,13 +557,38 @@ def delete_plan(
                 os.remove(path)
                 deleted.append(name)
         _drop_entry("Unsteady File=", flow_id)
+        removed_flow_id = flow_id
 
     write_lines(project.prj_path, kept)
+
+    rasmap_removed = {"plans": [], "results": [],
+                      "event_conditions": [], "geometries": []}
+    if clean_rasmap:
+        rasmap_path = os.path.join(folder, f"{base}.rasmap")
+        if os.path.isfile(rasmap_path):
+            rp = remove_plans_from_rasmap(rasmap_path, base, [pid])
+            rasmap_removed["plans"] = rp["plans"]
+            rasmap_removed["results"] = rp["results"]
+            # If a flow / geometry file was just removed as unused, drop its
+            # EventConditions / Geometries layer too (flow and geometry numbers
+            # are never renumbered, so this is pure tidy-up, not a reuse fix).
+            if removed_flow_id:
+                rasmap_removed["event_conditions"] = remove_flows_from_rasmap(
+                    rasmap_path, base, [removed_flow_id])
+            if removed_geom_id:
+                rasmap_removed["geometries"] = remove_geoms_from_rasmap(
+                    rasmap_path, base, [removed_geom_id])
+
     _invalidate_model(project)
-    logger.info("deleted plan %s: %d file(s), %d prj entrie(s)",
-                pid, len(deleted), len(prj_removed))
+    logger.info(
+        "deleted plan %s: %d file(s), %d prj entrie(s), "
+        "%d rasmap layer(s)",
+        pid, len(deleted), len(prj_removed),
+        sum(len(v) for v in rasmap_removed.values()),
+    )
     return {"deleted": deleted, "prj_removed": prj_removed,
-            "warnings": warnings, "current_plan": current_change}
+            "warnings": warnings, "current_plan": current_change,
+            "rasmap_removed": rasmap_removed}
 
 
 def clone_plan(

@@ -10,7 +10,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | Package | Purpose |
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
-| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, clone with edits) |
+| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, clone, delete); `geoms.py` — the geometry-file analogue (renumber, insert gap, compact, clone, delete) |
 | `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
@@ -183,8 +183,12 @@ Shared raw-line I/O helpers live in `hack_ras/utils/lines.py`
 from hack_ras import RasProject
 from hack_ras.project.plans import (
     renumber_plan, renumber_plans, insert_plan_gap, clone_plan, delete_plan,
-    plan_short_ids)
+    plan_short_ids, plans_with_unlisted_results)
 from hack_ras.project.sync import sort_prj_entries, sync_prj
+from hack_ras.project.rasmap import (              # .rasmap-specific ops
+    remove_plans_from_rasmap, remove_flows_from_rasmap,  # (delete_plan calls
+    remove_geoms_from_rasmap, result_plan_ids,           #  the remove_* fns)
+    sort_rasmap_layers)
 
 project = RasProject(r"...\Model.prj")
 plan_short_ids(project)                  # {plan_id: 'Short Identifier='} in prj order;
@@ -201,17 +205,21 @@ delete_plan(project, "p08",              # deletes plan + outputs; optional unus
 clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
            line_edits={"Breach Start=": "Breach Start=False,,01JAN2025,1214,False,,,0"},
            new_id="p25")                 # new_id optional — defaults to next free number
+sort_rasmap_layers(project.folder + r"\Model.rasmap", project.base_name)
+                                         # optional: re-sort .rasmap RASPlan/RASResults
+                                         #   layers into ascending plan-number order
 ```
 
 Renumbering/deleting covers the whole plan-keyed file family — `.p##`, `.p##.hdf`,
 run artifacts `.b##` / `.bco##` / `.ic.o##`, and `Base.p##.<stamp>.rst` restart
 files — plus cross-file references: `Restart Filename=` lines in the `.u` files and
-`Base.p##` tokens in the `.rasmap` (`project/rasmap.py`, token remap only — RAS
-Mapper self-heals display names and purges missing-file layers). All reference
-updates are applied in ONE pass with the complete mapping; sequential per-plan
-application would corrupt chained mappings (p02→p06 while p06→p12). `.x##` run
-files are keyed to GEOMETRY, not plans, and are never touched. Restart references
-that carry no plan number (e.g. `banana.rst`) are left alone.
+the `.rasmap` (`project/rasmap.py`). `renumber_plans` remaps `Base.p##` tokens
+there; `delete_plan` removes the deleted plan's RASPlan/RASResults layer subtrees
+(see below). All reference updates are applied in ONE pass with the complete
+mapping; sequential per-plan application would corrupt chained mappings (p02→p06
+while p06→p12). `.x##` run files are keyed to GEOMETRY, not plans, and are never
+touched. Restart references that carry no plan number (e.g. `banana.rst`) are left
+alone.
 
 - A `.p##.tmp.hdf` means HEC-RAS is mid-run on that plan — operations raise
   `PlanRunActive` instead of touching files.
@@ -220,10 +228,45 @@ that carry no plan number (e.g. `banana.rst`) are left alone.
 - `delete_plan` warns (logging + report) when a surviving `.u` file references the
   deleted plan's restart output; with the optional flags it also removes the plan's
   geometry / flow file (plus `.hdf` sidecars and the geometry's `.x##`) when no
-  other listed plan references it. The `.rasmap` is left alone by design — but note
-  that deleting a plan and later REUSING its number leaves the old rasmap layer
-  pointing at the new file (observed GMF_DFA validation 2026-07-17; RAS Mapper
-  self-heals names, so impact is limited to possible duplicate layer entries).
+  other listed plan references it. It now also cleans the `.rasmap` by default
+  (`clean_rasmap=True`): `remove_plans_from_rasmap` splices out the plan's RASPlan
+  (`<Plans>`) and RASResults (`<Results>`) layer subtrees. This replaces the old
+  "leave it to RAS Mapper's remove-missing-layers" design, which was unsafe under
+  number reuse — deleting a plan then renumbering a survivor ONTO its number left
+  the stale layer pointing at an existing file, so it was neither purged nor
+  correctable and RAS Mapper refreshed its name to the new file's title, leaving a
+  visible duplicate (observed live, GMF_DFA 2026-07-28 — this is what motivated the
+  fix). RASResultsMap rasters and CalculatedLayers built on the plan still live in
+  result subfolders, not as plan-keyed `.rasmap` layers, so they are still left to
+  RAS Mapper. Pass `clean_rasmap=False` to restore the old leave-it-alone behavior.
+  When `delete_unused_flow` / `delete_unused_geom` also removes a now-orphaned
+  flow / geometry file, `clean_rasmap` additionally drops that flow's
+  RASEventConditions layer (`remove_flows_from_rasmap`, keyed on `Base.u##.hdf`)
+  / that geometry's `<Geometries>` RASGeometry layer (`remove_geoms_from_rasmap`,
+  keyed on `Base.g##.hdf`). Both are section-scoped and token-keyed, so the
+  RASEventConditions / RASGeometry sub-layers INSIDE a RASResults block (which
+  name `Base.p##.hdf`) are never touched — those go with their result. Flow and
+  geometry numbers are never renumbered by hack_ras, so this is pure tidy-up (the
+  leftover layer would point at a genuinely-missing file), not a reuse-safety fix.
+  The `rasmap_removed` report field is `{'plans': [...], 'results': [...],
+  'event_conditions': [...], 'geometries': [...]}`. (There is no geometry
+  renumber/delete operation in hack_ras today — only this delete_unused_geom
+  side-path; a full geometry-file renumber/delete subsystem would be a separate
+  addition.)
+- `plans_with_unlisted_results(project)` flags plan IDs whose `.p##.hdf` has a
+  top-level `Results` group but which have NO RASResults layer in the `.rasmap`
+  (uses `result_plan_ids(rasmap_path, base)`; h5py imported lazily). These are
+  the results RAS Mapper auto-generates and APPENDS out of numeric order the next
+  time the project is opened — the common state after running plans headlessly.
+  Use it to know before opening (e.g. run `sort_rasmap_layers` only AFTER opening
+  RAS Mapper once, so it has materialized every result). Read-only.
+- `sort_rasmap_layers(rasmap_path, base_name, sections=("Plans","Results"))` is the
+  `.rasmap` analogue of `sort_prj_entries`: it re-sorts the RASPlan/RASResults
+  layers into ascending plan-number order (each redistributed across the positions
+  its kind already occupies; other layers — e.g. CalculatedLayer siblings — and
+  `<EventConditions>`, which is keyed to `.u##`, stay put). Standalone/optional; not
+  called by delete or renumber. Note `<Results>` is otherwise stored by RAS in
+  run order, not numeric order.
 - `clone_plan` enforces plan-title uniqueness (`DuplicatePlanTitle`) and inserts the
   new `Plan File=` entry in ascending numeric position in the `.prj`. After writing
   it sanity-checks breach triggers: an ACTIVE Set Time trigger dated outside the
@@ -246,6 +289,57 @@ that carry no plan number (e.g. `banana.rst`) are left alone.
   results map and a source layer (a plan whose Short ID collides with, say, the
   terrain folder) stays protected. Consumed by
   `Scripts/Results_GIS/copy_results_gis.py`.
+
+## Geometry File Operations (`hack_ras/project/geoms.py`)
+
+The geometry-file analogue of `plans.py`, added when the need arose to compact /
+reorder geometry numbering and delete geometries directly (not just as the
+`delete_plan(delete_unused_geom=True)` side-path). A geometry is a **shared
+dependency** — many plans point at one via `Geom File=g##` — so renumbering a
+geometry rewrites that reference in **every plan file**, which is the piece that
+makes it more than a rename.
+
+```python
+from hack_ras.project.geoms import (
+    renumber_geom, renumber_geoms, insert_geom_gap, compact_geoms,
+    clone_geom, delete_geom)
+
+renumber_geoms(project, {"g03": "g02", "g05": "g03"})  # bulk, chain/cycle-safe
+renumber_geom(project, "g05", "g02")                   # single-entry case
+insert_geom_gap(project, "g02", 1)                     # shift g>=02 up by 1
+compact_geoms(project)                                 # g01,g03,g05 -> g01,g02,g03
+clone_geom(project, "g01", "New Geom Title", new_id="g07")  # copy .g## + new title
+delete_geom(project, "g04")                            # refuses if a plan uses it
+delete_geom(project, "g04", force=True)                # deletes anyway (+warns)
+```
+
+Renumbering covers the geometry family (`.g##`, `.g##.hdf`, `.x##` — the `.x##`
+preprocessor run file is geometry-keyed) plus, in ONE pass with the complete
+mapping: the `.prj` `Geom File=` entries, the `Geom File=g##` line in **every
+plan that uses a renumbered geometry**, and `Base.g##` tokens in the `.rasmap`
+(`renumber_geoms_in_rasmap` — the `<Geometries>` layer's `Filename` and every
+plan layer's `GeometryHDF=`; RASGeometry sub-layers inside `<Results>` name
+`Base.p##.hdf`, so they are never matched). Chains/cycles use the same
+`.renumtmp` hop as plan renumbering. Left alone (cosmetic, same policy as plans):
+`.g##.hdf` internals, the `Geometry Filename` attr in each `.p##.hdf`, and the
+stale plan title on `.x##` line 3. There is **no "Current Geometry"** key in the
+`.prj` (geometry is chosen per-plan), so nothing global to repoint.
+
+- `delete_geom` removes the family + `.prj Geom File=` entry, and (default
+  `clean_rasmap=True`) the `<Geometries>` RASGeometry layer via
+  `remove_geoms_from_rasmap`. It **refuses (`GeomInUse`)** if any listed plan
+  still references the geometry, unless `force=True` — which deletes anyway and
+  warns that those plans now point at a missing geometry (a forced delete leaves
+  their `GeometryHDF=` in the rasmap dangling, by design; the plans still exist).
+- `compact_geoms` builds the fill-the-gaps mapping and delegates to
+  `renumber_geoms`; `insert_geom_gap` is the inverse (mirrors `insert_plan_gap`).
+- `clone_geom` copies only the `.g##` text with a new (unique) `Geom Title=`
+  (`DuplicateGeomTitle` otherwise) and inserts the `Geom File=` entry ascending;
+  RAS regenerates the `.g##.hdf` on the next run (mirrors `clone_plan`).
+- Typed exceptions: `GeomFileNotFound`, `GeomIdInUse`, `GeomInUse`,
+  `DuplicateGeomTitle`, `GeomRunActive` (a plan using the geometry is mid-run —
+  a `.p##.tmp.hdf` exists). Orphan geometries (on disk but not in the `.prj`) are
+  rejected, mirroring the plan ops.
 
 ## Parsing Strategy — Geometry
 - **Block-driven**: `GeometryParser` dispatches to specialized handlers per block type
@@ -904,6 +998,78 @@ in place with a warning. Output: new geom + `Geom File=` appended to .prj
 already aligned, 0 collisions, all out-of-region seeds byte-identical. User
 must re-open the geometry in HEC-RAS to regenerate the computed mesh (.g0x.hdf).
 The tool is intended to expand (more 2D mesh-health operations).
+
+### Session 17 changes (2026-07-28): delete_plan cleans the .rasmap; sort_rasmap_layers
+
+Driven by a real GMF_DFA job: the user deleted 14 plans (16-17, 21-26, 30-35)
+and renumbered the survivors to a contiguous p01-p21. Some renumber TARGETS
+(p16, p17, p21) were also just-deleted NUMBERS, so RAS Mapper's
+"remove missing layers" left duplicate/garbled `<Plans>` and `<Results>` layers
+— the exact number-reuse footgun the old docs only warned about. Fixed at the
+source: `delete_plan` now removes the plan's `.rasmap` layers so a freed number
+is truly vacant before any renumber can adopt a zombie.
+
+- `project/rasmap.py` gained `remove_plans_from_rasmap(rasmap_path, base, pids)`
+  (splices the RASPlan `<Plans>` block and the RASResults `<Results>` subtree via
+  balanced `<Layer>`/`</Layer>` depth matching; keyed by Type + the exact
+  `Base.p##` / `Base.p##.hdf` filename token so nested "Plan" sub-layers and other
+  sections are untouched; removes all matches so an already-self-healed duplicate is
+  cleaned too), `remove_flows_from_rasmap(rasmap_path, base, flow_ids)` (same for
+  RASEventConditions layers in `<EventConditions>`, keyed on `Base.u##.hdf`), and
+  `sort_rasmap_layers(rasmap_path, base, sections)` (numeric re-sort of the
+  plan-keyed layers into the positions their kind already occupies, mirroring
+  `sort_prj_entries`; leaves CalculatedLayer siblings and `<EventConditions>` put).
+  All preserve encoding + CRLF and touch nothing else.
+- `delete_plan` gained `clean_rasmap=True` (default on) and a `rasmap_removed`
+  report field `{plans, results, event_conditions}`. It removes the plan's
+  RASPlan/RASResults layers, and — when `delete_unused_flow` removes an orphaned
+  flow file — that flow's RASEventConditions layer too. `renumber_plans` is
+  unchanged (still token-remap only — with delete cleaning up first, no zombie
+  remains for it to collide with).
+- Tests: +11 (6 in `test_rasmap.py` for the three new fns on a RAS-shaped synthetic
+  rasmap incl. EventConditions + a nested Event-Conditions sub-layer; delete cleans
+  rasmap / leave-alone / delete-then-reuse-no-zombie / unused-flow-cleans-EC in
+  `test_plan_ops.py`; rasmap assertions in `test_plan_ops_fixture.py`). Baseline
+  249 -> **260**.
+- Follow-ups (same session, after a live-open surprise): opening RAS Mapper on the
+  finished GMF_DFA showed the Results tree disordered at the end. Root cause (NOT
+  `.rasmap.backup` — that was just the prior save-state): three computed plans
+  (Increment02 + Increment02/03 Breach) had result HDFs but NO RASResults layer in
+  the original rasmap, so `sort_rasmap_layers` (which only reorders EXISTING layers)
+  couldn't place them; RAS Mapper auto-generated + appended them on open. Fix: with
+  all 21 result layers now present, re-running `sort_rasmap_layers` ordered the
+  complete set (stable thereafter — RAS Mapper only appends MISSING results). This
+  motivated two additions: (a) `plans_with_unlisted_results(project)` +
+  `result_plan_ids()` — flag computed-but-unlisted results before opening RAS Mapper
+  (common after headless runs); (b) `remove_geoms_from_rasmap()` wired into
+  `delete_plan`'s `delete_unused_geom` path (symmetric with the flow/EventConditions
+  cleanup) — since hack_ras has NO geometry renumber/delete, this delete-unused
+  side-path was the only place a geometry file left a stale `<Geometries>` layer.
+  +4 tests. Baseline 260 -> **264**.
+- New geometry-file subsystem `project/geoms.py` (user-requested after confirming
+  hack_ras had NO geometry renumber/delete — only the delete_plan side-path):
+  `renumber_geoms`/`renumber_geom` (bulk + single, chain/cycle-safe, rewrites
+  `Geom File=` in the .prj AND in every referencing plan, remaps `.g##` rasmap
+  tokens via new `renumber_geoms_in_rasmap`), `insert_geom_gap`, `compact_geoms`
+  (fill-the-gaps), `clone_geom` (DuplicateGeomTitle), `delete_geom`
+  (refuse-if-referenced + `force=True`, clean_rasmap default). Family = `.g##` /
+  `.g##.hdf` / `.x##`. No "Current Geometry" in the .prj. +20 tests
+  (`test_geom_ops.py` synthetic 3-geom/4-plan fixture + a `renumber_geoms_in_rasmap`
+  rasmap test); validated on a copy of the real 2D-culvert fixture (compact
+  g02,g03->g01,g02 rewrote plan Geom File= + rasmap Geometries/GeometryHDF, left
+  the plan-keyed nested Results RASGeometry untouched). Baseline 264 -> **284**.
+- Ran the full real job twice at the user's request. Session-first run (delete +
+  renumber only) validated end-to-end on the live model and a copy of
+  `02_GMF_DFA_v7.0 - backup1`: Plans p01-p21 / Results both contiguous, ZERO
+  duplicates. Second run (user restored the model to 35 plans) added a NEW task —
+  delete the Increment04-09 unsteady flow files: done via
+  `delete_plan(..., delete_unused_flow=True)` on the p21-p26 + p30-p35 deletions,
+  which orphaned and removed exactly u12-u17 (u06/u08, shared with survivors, kept).
+  Then the EC-cleanup + `sort_rasmap_layers` were applied to the live file, leaving
+  Plans/Results numerically sorted (no dups) and EventConditions u01-u11 with zero
+  missing-file layers. (Plan/flow mapping for this model: u09/u10/u11 = Increment01/
+  02/03, u12-u17 = Increment04-09; each Increment shares one u-file between its plain
+  and Breach plan.)
 
 ### Session 16 changes (2026-07-27): mesh-snapper mesh-refresh, collisions, grid source, prj fix
 

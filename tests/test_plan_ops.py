@@ -221,12 +221,21 @@ def _u_lines(title, restart=None):
 
 _RASMAP = [
     "<RASMapper>",
+    "  <Geometries>",
+    '    <Layer Name="Geom One" Type="RASGeometry" Filename=".\\Mini.g01.hdf" />',
+    '    <Layer Name="Geom Two" Type="RASGeometry" Filename=".\\Mini.g02.hdf" />',
+    "  </Geometries>",
     "  <Plans>",
     '    <Layer Name="Alpha" Type="RASPlan" Filename=".\\Mini.p01" '
     'GeometryHDF=".\\Mini.g01.hdf" />',
     '    <Layer Name="Bravo" Type="RASPlan" Filename=".\\Mini.p02" '
     'GeometryHDF=".\\Mini.g02.hdf" />',
     "  </Plans>",
+    "  <EventConditions>",
+    '    <Layer Name="Flow A" Type="RASEventConditions" Filename=".\\Mini.u01.hdf" />',
+    '    <Layer Name="Flow B" Type="RASEventConditions" Filename=".\\Mini.u02.hdf" />',
+    '    <Layer Name="Flow C" Type="RASEventConditions" Filename=".\\Mini.u03.hdf" />',
+    "  </EventConditions>",
     "  <Results>",
     '    <Layer Name="Bravo" Type="RASResults" Filename=".\\Mini.p02.hdf" />',
     "  </Results>",
@@ -409,6 +418,47 @@ class TestDeletePlan(RichProjectBase):
         self.assertTrue(os.path.isfile(self.path("Mini.u02")))
         self.assertIsNone(report["current_plan"])
 
+    def test_delete_cleans_rasmap_layers_by_default(self):
+        report = delete_plan(self.project, "p02")
+        self.assertEqual(
+            report["rasmap_removed"],
+            {"plans": ["p02"], "results": ["p02"],
+             "event_conditions": [], "geometries": []})
+        rm = _read(self.path("Mini.rasmap"))
+        self.assertNotIn("Mini.p02", rm)          # RASPlan + RASResults gone
+        self.assertIn('Filename=".\\Mini.p01"', rm)   # sibling untouched
+        # flags off -> the flow / geometry files (and their layers) stay
+        self.assertIn("Mini.u02.hdf", rm)
+        self.assertIn("Mini.g02.hdf", rm)
+
+    def test_delete_can_leave_rasmap_alone(self):
+        report = delete_plan(self.project, "p02", clean_rasmap=False)
+        self.assertEqual(
+            report["rasmap_removed"],
+            {"plans": [], "results": [],
+             "event_conditions": [], "geometries": []})
+        self.assertIn("Mini.p02", _read(self.path("Mini.rasmap")))
+
+    def test_delete_unused_flow_cleans_event_conditions_layer(self):
+        report = delete_plan(self.project, "p02", delete_unused_flow=True)
+        self.assertEqual(report["rasmap_removed"]["event_conditions"], ["u02"])
+        rm = _read(self.path("Mini.rasmap"))
+        self.assertNotIn("Mini.u02.hdf", rm)      # EventConditions layer gone
+        self.assertIn("Mini.u01.hdf", rm)         # other flows untouched
+        self.assertIn("Mini.u03.hdf", rm)
+
+    def test_delete_then_renumber_reuse_leaves_no_zombie(self):
+        # The real-world failure mode: delete p01, then renumber p02 onto p01.
+        # If delete had left p01's rasmap layers behind, the renumbered p02
+        # would inherit them as duplicates. With cleanup, p01 appears once.
+        delete_plan(self.project, "p01")
+        renumber_plan(self.project, "p02", "p01")
+        rm = _read(self.path("Mini.rasmap"))
+        self.assertEqual(rm.count('Type="RASPlan" Filename=".\\Mini.p01"'), 1)
+        self.assertEqual(rm.count('Type="RASResults" Filename=".\\Mini.p01.hdf"'),
+                         1)
+        self.assertNotIn("Mini.p02", rm)
+
     def test_optional_unused_geom_and_flow_cleanup(self):
         report = delete_plan(self.project, "p02",
                              delete_unused_geom=True, delete_unused_flow=True)
@@ -421,6 +471,14 @@ class TestDeletePlan(RichProjectBase):
         self.assertNotIn("Unsteady File=u02", text)
         self.assertIn("Geom File=g01", text)
         self.assertIn("Mini.x02", report["deleted"])
+        # rasmap: the removed flow's EventConditions layer and the removed
+        # geometry's <Geometries> layer are dropped too
+        self.assertEqual(report["rasmap_removed"]["event_conditions"], ["u02"])
+        self.assertEqual(report["rasmap_removed"]["geometries"], ["g02"])
+        rm = _read(self.path("Mini.rasmap"))
+        self.assertNotIn("Mini.u02.hdf", rm)
+        self.assertNotIn("Mini.g02.hdf", rm)
+        self.assertIn("Mini.g01.hdf", rm)         # other geometry untouched
 
     def test_shared_geom_is_kept(self):
         delete_plan(self.project, "p01",
