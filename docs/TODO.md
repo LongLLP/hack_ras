@@ -7,13 +7,54 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Two items are open; neither has an active need right now. In rough priority:
+Four items are open. In rough priority:
 
-1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
-2. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+1. **`flows` subsystem** (unsteady-flow file operations) — §D below. **Demonstrated
+   recurring need** (two manual flow jobs already: adding u12-u17, then
+   deleting/renumbering them).
+2. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
+3. **`project.rasmap` accessor** (small ergonomics) — §C below.
+4. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
 
 Everything else once listed here is DONE — see the "DONE" section below and the
 `ai_context.md` session notes.
+
+### D. `flows` subsystem — unsteady-flow file operations
+
+The missing third file-type subsystem. hack_ras has `project/plans.py` and
+`project/geoms.py` but **nothing for unsteady flow (`.u##`) files** — so flow
+delete/renumber/compact currently has to be done with hand-written raw-line
+edits (done twice already: registering pasted u12-u17, then deleting the unused
+ones + renumbering u12->u09). Those ad-hoc edits work but lack the tested
+collision-safety the plan/geom machinery has.
+
+Build `project/flows.py` mirroring `geoms.py`:
+- `renumber_flows(project, mapping)` / `renumber_flow` — bulk + single,
+  collision/cycle-safe (`.renumtmp` hop).
+- `insert_flow_gap`, `compact_flows`, `clone_flow` (new `Flow Title=`,
+  `DuplicateFlowTitle`), `delete_flow` + bulk `delete_flows` (by id-spec).
+- Add `renumber_flows_in_rasmap` to `project/rasmap.py`
+  (`remove_flows_from_rasmap` already exists for the delete side).
+
+Reference graph a flow renumber must rewrite (verified this session):
+- family files: `.u##` and `.u##.hdf` (preprocessor output; regenerated on run
+  but rename it if present). No `.x##`-equivalent for flows.
+- `.prj` `Unsteady File=` entries.
+- **every plan's `Flow File=u##`** line (a flow is a shared dependency, like a
+  geometry — this is the cross-reference that makes it a subsystem).
+- `.rasmap`: the `<EventConditions>` RASEventConditions layer token
+  (`Base.u##.hdf`). (The RASEventConditions sub-layer INSIDE a `<Results>` block
+  names `Base.p##.hdf`, so it is never matched — same rule as geoms.)
+- No "Current Unsteady" key in the `.prj` (flow is chosen per-plan), so nothing
+  global to repoint — simpler than plans, like geoms.
+- Delete semantics: mirror `delete_geom` — refuse if any plan still references
+  the flow (`FlowInUse`) unless `force=True`; `clean_rasmap=True` drops the EC
+  layer via `remove_flows_from_rasmap`.
+- Left alone (cosmetic, same policy): `.u##.hdf` internals; the `Flow Filename`
+  attr inside each `.p##.hdf`.
+
+Once built, this session's cleanup would have been:
+`delete_flows(project, "09-11,13-17"); compact_flows(project)`.
 
 ### A. Blocked Obstructions (`#Block Obstruct=`) + `Levee=` — writer / merge support
 
@@ -31,6 +72,29 @@ triplet layout as IFAs (`normal` flag 0 with left/right + 0.0-edge sentinels /
 `multiple_block` flag -1 with literal stations), but with **no** `Permanent`
 follower line (obstructions are always solid). Fuller detail lives in the
 `ai_context.md` "Future Features — Not Yet Implemented" section.
+
+### C. `project.rasmap` accessor (ergonomics)
+
+The rasmap functions in `project/rasmap.py` are stateless free functions taking
+`(rasmap_path, base_name, …)`, so callers must build the path and pass base_name
+every time, e.g.:
+`sort_rasmap_layers(os.path.join(proj.folder, proj.base_name + ".rasmap"), proj.base_name)`.
+
+Add, on `RasProject`: a `rasmap_path` property, and a `rasmap` property returning
+a thin **bound helper** (`RasMap`) that carries `(path, base_name)` and delegates
+to the existing free functions — so usage becomes `proj.rasmap.sort()`,
+`proj.rasmap.remove_plans([...])`, `proj.rasmap.layer_refs()`,
+`proj.rasmap.result_plan_ids()`, etc. Chosen over a standalone `RasMap(path)`
+(user, 2026-07-28): a standalone object would have to re-derive base_name from the
+filename, and callers almost always already hold a `RasProject`.
+
+Deliberately **thin**: it binds path+base_name and forwards to the stateless
+functions — it does NOT parse the `.rasmap` XML into a model (that would break the
+"narrow, RAS-Mapper-owns-the-file" design). The free functions stay (delete_plan /
+renumber_* call them internally); the helper is pure sugar. ~30 lines + a couple
+of tests. Methods to expose: `sort`, `remove_plans` / `remove_geoms` /
+`remove_flows`, `renumber_plans` / `renumber_geoms`, `layer_refs`,
+`result_plan_ids`, `source_data_folders`, `exists`.
 
 ### B. Dry-run / preview on the mutating ops  (LOW PRIORITY)
 

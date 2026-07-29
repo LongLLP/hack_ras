@@ -1592,12 +1592,15 @@ part, not a case worth adding branching for.
 ## Future Features — Not Yet Implemented
 
 **`docs/TODO.md` is the authoritative open-items list.** As of 2026-07-28 it has
-exactly two OPEN items: (A) writer / `merge.py` support for Blocked Obstructions
+four OPEN items: (D) a `flows` subsystem — unsteady-flow file ops (the missing
+third file-type subsystem alongside `plans`/`geoms`; top priority, a demonstrated
+recurring need); (A) writer / `merge.py` support for Blocked Obstructions
 (`#Block Obstruct=`) and `Levee=` — described just below, currently parse-only;
-and (B) dry-run/preview on the mutating ops (LOW PRIORITY). Everything else once
-listed there (the session-13 plan-file-op gaps, the session-17 geometry
-subsystem / rasmap cleanup / health inspector) is DONE. Ask the user before
-implementing.
+(C) a `project.rasmap` bound-accessor for ergonomics (thin sugar over the
+stateless rasmap functions — no XML model); and (B) dry-run/preview on the
+mutating ops (LOW PRIORITY). Everything else once listed there (the session-13
+plan-file-op gaps, the session-17 geometry subsystem / rasmap cleanup / health
+inspector) is DONE. Ask the user before implementing.
 
 ### `#Block Obstruct=` (Blocked Obstructions) — now PARSED (read-only)
 
