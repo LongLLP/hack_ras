@@ -320,6 +320,24 @@ def find_crs_prj(folder: str, specified: str | None = None) -> str:
     return hits[0]
 
 
+def read_crs_wkt(folder: str, specified: str | None = None) -> str:
+    """
+    CRS of the RAS project in *folder*, as the WKT string held in its ESRI .prj.
+
+    Locates the file with :func:`find_crs_prj`, then returns its contents — the
+    form geopandas/pyproj accept directly (``gdf.to_crs(wkt)``,
+    ``GeoDataFrame(..., crs=wkt)``).
+
+    Raises CrsProjectionFileNotFound if no suitable file can be found.  Callers
+    differ on what to do about that — abort, warn and write no CRS, or assume the
+    data is already in model coordinates — so that policy is deliberately left to
+    them rather than folded in here.
+    """
+    path = find_crs_prj(folder, specified)
+    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+        return f.read().strip()
+
+
 def resolve_default_geom(prj_path: str, prj_geom_id: Optional[str]) -> str:
     """
     Resolve the geometry file for a project strictly:

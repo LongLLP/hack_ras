@@ -130,6 +130,7 @@ project.plan_hdfs()               # all .p##.hdf files listed in the .prj that e
 project.plan_hdfs(['p14','p15'])   # filtered subset
 project.plan_hdfs(['01', 'p03', '14-16'])  # flexible spec (see expand_id_spec)
 project.crs_prj()     # ESRI .prj CRS file (via RAS Mapper or folder search)
+project.crs_wkt()     # ...and its contents, as WKT ready for geopandas/pyproj
 project.family()      # {'geom': [...], 'plan': [...], ...} — filesystem-based
 project.available_ids()           # same, as ID strings
 ```
@@ -917,12 +918,91 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `read_sa2d_connection(hdf_path, connection)` | `Sa2dConnection` | HW and TW cell WSE time series + stations; cells sorted by station |
 | `read_sa2d_areas(hdf_path, connection)` | `tuple[str, str]` | `(hw_area, tw_area)` — looks up `US SA/2D` / `DS SA/2D` via `SNN ID == Node Pointer` |
 
+#### 1D steady-flow cross-section results
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `read_steady_profile_wse(hdf_path)` | `SteadyProfileResults` | WSE only; the original narrow reader, still used by `export_xs_gis.py` |
+| `read_steady_xs_results(hdf_path)` | `SteadyXsResults` | **Every** `(n_profiles, n_xs)` dataset under `Steady Profiles/Cross Sections` + its `Additional Variables` subgroup, keyed by HDF dataset name |
+
+`SteadyXsResults` carries `profile_names`, `keys` (`(river, reach, station)` in
+results order), and `values` (`name -> (n_profiles, n_xs)` float64, with RAS's
+~3.4e38 undefined sentinel converted to `nan`).  Methods: `has(name)`,
+`variable_names()`, `get(variable, river, reach, station, profile)`,
+`mean_velocity(river, reach, station, profile)`, `reaches_of(river)`, and
+`find_keys(river, station, reach=None)` — which **infers the reach** for a
+river/station pair that carries no reach name (numeric station compare, so an
+Excel `27962` matches `'27962'`; a trailing `*` on interpolated XS is handled).
+**HEC-RAS permits the same station on two reaches of one river**, so more than
+one hit is possible and means the pair is genuinely ambiguous — pass `reach` to
+resolve it, and treat >1 hit as an error rather than taking the first.  River and
+reach names are matched via `_normalize_name` (whitespace-collapsed, case-folded,
+mirroring `geometry.shift._normalize_names`) because RAS pads reach names in the
+file — `'Upper Reach  B'` carries two spaces, which a hand-typed name must not
+have to reproduce.  A blank/whitespace-only `reach` counts as not supplied.
+
+Which variables exist is **strongly version-dependent**, so always `has()` first:
+5.0.3 writes four Additional Variables (`Area Flow Total`,
+`Area including Ineffective Total`, `Conveyance Total`, `Top Width Total`); 7.0
+writes ~50, including `Velocity Total`.  `mean_velocity` encapsulates that split —
+it uses `Velocity Total` when present and otherwise derives `Flow / Area Flow
+Total`.  The two routes were verified to agree to 7 significant figures on the
+same model run in both versions (SterpCreek p01 vs p02), and the derived route
+reproduced a hand-built FEMA floodway data table exactly (14/14 rows, Starkweather
+p03 `100-year`).
+
+**`Cross Section Variables` (5.x) is unusable — never read it.** Its declared
+shape `(n_profiles, 34, n_xs)` does not describe its layout: the data is actually
+a per-XS record stream with a **40-float stride** (34 named variables + 6 zero
+pad), so `n_profiles × 34 × n_xs` floats cannot even hold `n_profiles × 40 × n_xs`
+— the tail is truncated.  Every column read out of it (WSEL, Q, `Vel Total`, …)
+is misaligned and does not match the RAS GUI.  `read_steady_xs_results`'s shape
+filter drops it automatically; `Water Surface`, `Flow`, and the Additional
+Variables are standalone, correctly aligned datasets and are what to use instead.
+This is the empirical basis for the alignment warning that was already on
+`read_steady_profile_wse`.
+
+Also note `Geometry Info/Cross Section Only` (`(n_xs,)`, `'River Reach Station'`
+strings) — same order as `/Geometry/Cross Sections`, handy for sanity-checking
+alignment.
+
 #### Pipe networks
 | Function | Returns | Notes |
 |----------|---------|-------|
 | `read_pipe_network(hdf_path, network)` | `PipeNetwork` | Geometry, index maps, adjacency dicts for one network |
 | `read_node_timeseries(hdf_path, network, node_name)` | `NodeTimeSeries` | Depth, WSE, inlet flow, computed flow_in / flow_out |
 | `read_conduit_timeseries(hdf_path, network, conduit_name)` | `ConduitTimeSeries` | Flow and velocity at US and DS ends |
+
+## Line-in-polygon measurement (`hack_ras/gis/clip.py`)
+
+`PolygonProbe(polygon, tol=1.0).measure(line) -> LineInPolygon` — how much of a
+line falls inside a polygon, **plus whether that number can be trusted**. Written
+for FEMA floodway-data-table widths (length of a cross-section line inside the
+mapped floodway) but has no HEC-RAS specifics.
+
+The polygon must be in a **projected** CRS — lengths come out in its coordinate
+units, so a geographic CRS silently yields degrees (use `RasProject.crs_wkt()` and
+`gdf.to_crs()` first). Buffers are built once in the constructor, so measuring
+many lines against one dissolved polygon is cheap.
+
+**The coincident-boundary trap** — the reason this is a module and not a one-line
+shapely call. Mapped polygons are routinely digitized *to* a cross section (a
+floodway terminates at the last mapped section). When the polygon edge lands a
+fraction of a foot off the line, the line stops *crossing* the polygon and starts
+running *alongside* it; the intersection then returns only the overlap slivers,
+and the answer swings by tens of feet for a sub-foot offset. **Nothing about the
+intersection reveals this** — it is a single, clean, plausible segment. Observed
+live (Starkweather PRT RS 6260.361, 2026-08-03): 53.34 ft measured where the true
+width was 116.76 ft, from a ~1 ft offset; a second instance at RS 27962 failed the
+other direction (1 ft the other way → 0.00 ft).
+
+Detection: a line that CROSSES stays within `tol` of the boundary for only about
+`4 * tol` (entering and leaving); one running ALONGSIDE racks up far more.
+Measured on a real 21-section table at `tol=1.0` ft, clean crossings came in at
+4.0–6.1 ft and the two bad sections at 24.7 / 119.1 ft, so `COINCIDENT_FACTOR`
+(10) sits in a wide gap. `LineInPolygon` fields: `length` (the width to report),
+`along_boundary`, `widened_length` (length against `polygon.buffer(tol)` — the
+number to quote when reporting the problem), `clean_crossing` (`4*tol`), `tol`,
+`coincident`, and the `empty` property. Consumer: `Scripts/FWDT_Output`.
 
 ## GIS Profile Line Workflow (`hack_ras/gis/`)
 `compute_profile_stations(line, area_data)` takes a shapely `LineString` and a dict of
@@ -979,7 +1059,7 @@ below).  The script resolves full geometry paths from the project file via
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
 ## Current Work
-*(Last updated: 2026-07-27, session 15)*
+*(Last updated: 2026-08-03, session 18)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
@@ -1010,6 +1090,66 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 18 changes (2026-08-03): steady XS results reader + FWDT_Output script
+
+Driven by a new consumer: `Scripts/FWDT_Output/fwdt_output.py`, which fills a FEMA
+floodway data table.  `read_steady_profile_wse` only exposed WSE, so
+`read_steady_xs_results` was added (see the "1D steady-flow cross-section results"
+section above) — it loads every `(n_profiles, n_xs)` dataset under
+`Steady Profiles/Cross Sections` and `Additional Variables`, which makes it
+version-proof by construction (5.0.3 → 4 additional variables, 7.0 → ~50) rather
+than naming datasets that may not exist.  New `SteadyXsResults` dataclass with
+`has` / `get` / `mean_velocity` / `find_keys` (the reach-inference helper).
+
+The old "`Cross Section Variables` WSEL is misaligned" warning was tracked to its
+actual cause this session: the block is a per-XS record stream with a **40-float
+stride** (34 named vars + 6 pad) behind a declared `(n_prof, 34, n_xs)` shape, so
+it is not merely permuted — it is truncated and unrecoverable.  Documented above;
+the new reader's shape filter excludes it. Velocity therefore comes from
+`Velocity Total` (6.0+) or `Flow / Area Flow Total` (5.x); the two agree to 7
+significant figures on SterpCreek p01 (5.0.3) vs p02 (7.0).
+
+`tests/test_steady_xs_results.py` (23 tests) — both real SterpCreek fixtures for
+the two geometry layouts and the cross-version velocity check, a synthetic file
+for the sentinel→nan masking and the shape filter, and a synthetic
+same-station-on-two-reaches file (no real fixture has one) for the ambiguity and
+loose reach-name matching.  Baseline 297 → **320**.
+
+**Same session, second pass — reach disambiguation, boundary QC, and three
+library extractions.** HEC-RAS permits the same station on two reaches of one
+river, so `find_keys` gained an optional `reach` (plus `reaches_of`) and the script
+now leaves an ambiguous row BLANK instead of taking the first hit. Then a review
+of "what in the script belongs in the library" moved three things out:
+
+1. **`resolve.read_crs_wkt(folder, specified=None)`** + `RasProject.crs_wkt()` —
+   `find_crs_prj` returned only the *path*, so all THREE scripts
+   (`FWDT_Output`, `XS_GIS_Export`, `Mesh_Health`) hand-opened and read it. The
+   `try/except CrsProjectionFileNotFound` deliberately stayed in each script: the
+   policies genuinely differ (FWDT aborts — widths would be in degrees;
+   `export_xs_gis` warns and writes shapefiles with no CRS; `snap_cell_centers`
+   warns and treats coordinates as already-model).
+2. **`gis/clip.py`** — see the "Line-in-polygon measurement" section above. The
+   `xs_interp.py` precedent applies: subtle geometry belongs in the library, not
+   re-derived per script.
+3. Nothing moved for plan resolution — the script was simply switched to
+   `RasProject.plan_hdfs([plan_id])`, which is already `.prj`-authoritative and
+   raises `PlanHdfNotFound`, replacing a hand-rolled
+   `resolve_id` + `"…" + ".hdf"` + `os.path.exists`. (`export_xs_gis` legitimately
+   still uses `resolve_id` — it needs the plan TEXT file to read `Geom File=`.)
+
+Deliberately left in the script, per the session-14 precedent that pure
+filesystem/format plumbing is not the library's charter: the Excel column
+mapping / backup / row iteration, and `watercourse_map` (a FEMA DFIRM
+attribute-naming bridge — if a second FEMA script appears it becomes a `fema`
+module, not `hack_ras` core). Baseline 320 → **335** (+10 `tests/test_gis_clip.py`,
++5 `read_crs_wkt`/`crs_wkt` in `tests/test_find_crs_prj.py`).
+
+Validation of the consumer: the script reproduced the user's hand-built table for
+Starkweather p03 `100-year` exactly on all three HDF columns (area, velocity, WSE)
+for 14/14 rows, and the shapefile-derived mapped width to within 0.12 ft on 13/14
+(the 14th, RS 31432, was hand-entered by the user because that HEC-RAS
+cross-section is not georeferenced).
 
 ### Session 15 changes (2026-07-27): Storage Area 2D Points block + Mesh_Health cell-seed snapper
 

@@ -13,6 +13,7 @@ from hack_ras.resolve import (
     find_crs_prj,
     is_hecras_prj,
     list_available_ids,
+    read_crs_wkt,
 )
 from hack_ras.project.model import ProjectModel
 from hack_ras.project.parser import parse_project_file
@@ -113,6 +114,14 @@ class RasProject:
         Raises CrsProjectionFileNotFound if none can be located.
         """
         return find_crs_prj(self.folder, specified)
+
+    def crs_wkt(self, specified: Optional[str] = None) -> str:
+        """The project's CRS as a WKT string, ready for geopandas/pyproj.
+
+        Delegates to read_crs_wkt(self.folder, specified) — i.e. crs_prj() plus
+        reading the file.  Raises CrsProjectionFileNotFound if none can be located.
+        """
+        return read_crs_wkt(self.folder, specified)
 
     def family(self) -> dict[str, list[str]]:
         """All sibling files belonging to this project, grouped by type.

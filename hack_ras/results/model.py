@@ -238,3 +238,156 @@ class SteadyProfileResults:
         if arr is None:
             return None
         return float(arr[self.profile_index(profile)])
+
+
+def _normalize_name(value) -> str:
+    """Collapse internal whitespace and case-fold a river/reach name.
+
+    Matches ``geometry.shift._normalize_names`` — HEC-RAS reach names are
+    whitespace-padded in the file (``'Upper Reach  B'`` carries two spaces), so a
+    hand-typed name must not have to reproduce that exactly.
+    """
+    return " ".join(str(value).strip().split()).lower()
+
+
+def _station_value(station) -> float | None:
+    """Numeric value of a HEC-RAS river station, or None if not numeric.
+
+    Interpolated cross sections carry a trailing ``*`` (e.g. ``'9262.07*'``).
+    """
+    try:
+        return float(str(station).strip().rstrip('*'))
+    except ValueError:
+        return None
+
+
+@dataclass
+class SteadyXsResults:
+    """
+    Per-cross-section, per-profile results for a 1D steady-flow plan, read from
+    the ``/Results/Steady`` block of a plan HDF5 file.
+
+    Every ``(n_profiles, n_xs)`` dataset found directly under
+    ``.../Steady Profiles/Cross Sections`` and its ``Additional Variables``
+    subgroup is loaded and keyed by its HDF dataset name, e.g. ``'Water
+    Surface'``, ``'Flow'``, ``'Area Flow Total'``, ``'Top Width Total'``.  Which
+    names are present depends on the HEC-RAS version that wrote the file (5.0.3
+    writes four Additional Variables; 7.0 writes ~50, including
+    ``'Velocity Total'``) — always check :meth:`has` before reading a name.
+
+    Alignment note
+    --------------
+    These datasets are indexed in the same order as the ``/Geometry/Cross
+    Sections`` name arrays (see ``read_xs_name_index``).  The 5.x
+    ``Cross Section Variables`` dataset is deliberately NOT read: its declared
+    shape does not match its actual record layout, so its columns (WSEL, Q, Vel
+    Total, ...) are index-misaligned and do not match the RAS GUI output.  Use
+    :meth:`mean_velocity` rather than that dataset's ``Vel Total`` column.
+
+    Attributes
+    ----------
+    profile_names : list[str]
+        Steady profile names in HDF order, e.g. ['100-year', 'Floodway', ...].
+    keys : list[tuple[str, str, str]]
+        ``(river, reach, station)`` for each results column, in HDF order.
+        All three parts are stripped of surrounding whitespace.
+    values : dict[str, np.ndarray]
+        Dataset name -> ``(n_profiles, n_xs)`` float64 array.  HEC-RAS's
+        undefined-value sentinel (~3.4e38) is converted to ``nan``.
+    """
+    profile_names: list
+    keys: list
+    values: dict
+
+    def __post_init__(self):
+        self._index = {k: i for i, k in enumerate(self.keys)}
+
+    def profile_index(self, profile: str) -> int:
+        """Return the index of *profile* in ``profile_names`` (raises if absent)."""
+        return self.profile_names.index(profile)
+
+    def variable_names(self) -> list:
+        """Dataset names available in this file, sorted."""
+        return sorted(self.values)
+
+    def has(self, variable: str) -> bool:
+        """True if *variable* was present in the results file."""
+        return variable in self.values
+
+    def find_keys(self, river: str, station, reach: str = None) -> list:
+        """
+        Every ``(river, reach, station)`` key matching *river* and *station*,
+        comparing stations numerically so ``27962`` matches ``'27962'``.
+
+        With *reach* omitted this infers the reach for a river/station pair that
+        carries no reach name (e.g. a floodway data table row).  HEC-RAS permits
+        the same station on two reaches of one river, so more than one hit is
+        possible and means the pair is genuinely ambiguous — pass *reach* to
+        resolve it.
+
+        River and reach names are matched case-insensitively and with internal
+        whitespace collapsed, so ``'Upper Reach B'`` finds RAS's
+        ``'Upper Reach  B'``.
+        """
+        want_river = _normalize_name(river)
+        # A blank or whitespace-only reach means "not supplied", not "no match".
+        want_reach = _normalize_name(reach) if reach is not None else ""
+        want_reach = want_reach or None
+        want_sta = _station_value(station)
+        want_txt = str(station).strip()
+        hits = []
+        for key in self.keys:
+            if _normalize_name(key[0]) != want_river:
+                continue
+            if want_reach is not None and _normalize_name(key[1]) != want_reach:
+                continue
+            if want_sta is None:
+                if key[2] == want_txt:
+                    hits.append(key)
+                continue
+            have = _station_value(key[2])
+            if have is not None and abs(have - want_sta) <= 1e-4:
+                hits.append(key)
+        return hits
+
+    def reaches_of(self, river: str) -> list:
+        """Reach names on *river*, in HDF order — for error messages."""
+        want = _normalize_name(river)
+        out = []
+        for key in self.keys:
+            if _normalize_name(key[0]) == want and key[1] not in out:
+                out.append(key[1])
+        return out
+
+    def get(self, variable: str, river: str, reach: str, station: str,
+            profile: str):
+        """
+        One value for one cross section on one profile, or ``None`` if the cross
+        section has no results column.
+
+        Raises ``KeyError`` if *variable* is not present in the file.
+        """
+        idx = self._index.get(
+            (str(river).strip(), str(reach).strip(), str(station).strip()))
+        if idx is None:
+            return None
+        return float(self.values[variable][self.profile_index(profile), idx])
+
+    def mean_velocity(self, river: str, reach: str, station: str,
+                      profile: str):
+        """
+        Cross-section average velocity (ft/s), or ``None`` if the cross section
+        has no results column or its flow area is zero.
+
+        Uses ``'Velocity Total'`` when the file has it (HEC-RAS 6.0+), otherwise
+        derives it as ``Flow / Area Flow Total`` — the same quantity, and the
+        only route available in 5.x files, where the ``Cross Section Variables``
+        ``Vel Total`` column is unusable (see the class docstring).
+        """
+        if self.has("Velocity Total"):
+            return self.get("Velocity Total", river, reach, station, profile)
+        flow = self.get("Flow", river, reach, station, profile)
+        area = self.get("Area Flow Total", river, reach, station, profile)
+        if flow is None or area is None or not area:
+            return None
+        return flow / area

@@ -963,3 +963,64 @@ def read_steady_profile_wse(hdf_path: str):
         wse[key] = water_surface[:, i]
 
     return SteadyProfileResults(profile_names=profile_names, wse=wse)
+
+
+# HEC-RAS writes ~3.4e38 (single-precision max) where a value is undefined.
+_STEADY_UNDEFINED = 3.0e38
+
+
+def read_steady_xs_results(hdf_path: str):
+    """
+    Read every per-cross-section results dataset for a 1D steady-flow plan.
+
+    Loads each ``(n_profiles, n_xs)`` dataset found directly under
+    ``.../Steady Profiles/Cross Sections`` and under its ``Additional
+    Variables`` subgroup, keyed by its HDF dataset name.  The available names
+    are version-dependent (5.0.3 writes four Additional Variables; 7.0 writes
+    ~50) so nothing is required to be present beyond the profile names and the
+    geometry name index — callers check ``SteadyXsResults.has(name)``.
+
+    The 5.x ``Cross Section Variables`` dataset is excluded: its declared shape
+    ``(n_profiles, n_vars, n_xs)`` does not describe its actual record layout,
+    so every column read out of it is index-misaligned.  ``Water Surface``,
+    ``Flow`` and the Additional Variables are standalone, correctly aligned
+    datasets and are what this function reads instead.  The shape filter drops
+    it automatically.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the ``.p##.hdf`` plan results file.
+
+    Returns
+    -------
+    SteadyXsResults
+
+    Raises
+    ------
+    KeyError
+        If the steady-profile results group is not present (e.g. the plan was
+        not run, or is not a steady-flow plan).
+    """
+    from .model import SteadyXsResults
+
+    with h5py.File(hdf_path, "r") as hdf:
+        profile_names = [_decode(v) for v in hdf[_STEADY_PROFILE_NAMES][()]]
+        keys = read_xs_name_index(hdf, hdf_path)
+        shape = (len(profile_names), len(keys))
+
+        base = hdf[_STEADY_XS_BASE]
+        groups = [base]
+        if "Additional Variables" in base:
+            groups.append(base["Additional Variables"])
+
+        values = {}
+        for group in groups:
+            for name, obj in group.items():
+                if not isinstance(obj, h5py.Dataset) or obj.shape != shape:
+                    continue
+                arr = obj[()].astype(np.float64)
+                arr[np.abs(arr) >= _STEADY_UNDEFINED] = np.nan
+                values[name] = arr
+
+    return SteadyXsResults(profile_names=profile_names, keys=keys, values=values)
