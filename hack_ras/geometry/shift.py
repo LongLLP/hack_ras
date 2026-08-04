@@ -10,6 +10,7 @@ from typing import Dict, List, Optional, Tuple
 
 from .model import GeometryFile, XSGISCutLine
 from .blocks.xs_gis import write_cutline
+from ..utils.names import normalize_name
 
 _logger = logging.getLogger(__name__)
 
@@ -19,7 +20,8 @@ _logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 def _normalize_names(s: str) -> str:
-    return " ".join(str(s).strip().split()).lower()
+    """Alias of utils.names.normalize_name — kept for this module's local calls."""
+    return normalize_name(s)
 
 
 def _normalize_rs(value) -> Optional[str]:

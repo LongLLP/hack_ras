@@ -240,14 +240,7 @@ class SteadyProfileResults:
         return float(arr[self.profile_index(profile)])
 
 
-def _normalize_name(value) -> str:
-    """Collapse internal whitespace and case-fold a river/reach name.
-
-    Matches ``geometry.shift._normalize_names`` — HEC-RAS reach names are
-    whitespace-padded in the file (``'Upper Reach  B'`` carries two spaces), so a
-    hand-typed name must not have to reproduce that exactly.
-    """
-    return " ".join(str(value).strip().split()).lower()
+from ..utils.names import normalize_name as _normalize_name
 
 
 def _station_value(station) -> float | None:

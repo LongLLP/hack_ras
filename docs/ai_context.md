@@ -935,10 +935,10 @@ Excel `27962` matches `'27962'`; a trailing `*` on interpolated XS is handled).
 **HEC-RAS permits the same station on two reaches of one river**, so more than
 one hit is possible and means the pair is genuinely ambiguous — pass `reach` to
 resolve it, and treat >1 hit as an error rather than taking the first.  River and
-reach names are matched via `_normalize_name` (whitespace-collapsed, case-folded,
-mirroring `geometry.shift._normalize_names`) because RAS pads reach names in the
-file — `'Upper Reach  B'` carries two spaces, which a hand-typed name must not
-have to reproduce.  A blank/whitespace-only `reach` counts as not supplied.
+reach names are matched via `utils.names.normalize_name` (see below) because RAS
+pads reach names in the file — `'Upper Reach  B'` carries two spaces, which a
+hand-typed name must not have to reproduce.  A blank/whitespace-only `reach`
+counts as not supplied.
 
 Which variables exist is **strongly version-dependent**, so always `has()` first:
 5.0.3 writes four Additional Variables (`Area Flow Total`,
@@ -1142,7 +1142,7 @@ Deliberately left in the script, per the session-14 precedent that pure
 filesystem/format plumbing is not the library's charter: the Excel column
 mapping / backup / row iteration, and `watercourse_map` (a FEMA DFIRM
 attribute-naming bridge — if a second FEMA script appears it becomes a `fema`
-module, not `hack_ras` core). Baseline 320 → **335** (+10 `tests/test_gis_clip.py`,
+module, not `hack_ras` core). Baseline 320 → **345** (+10 `tests/test_gis_clip.py`,
 +5 `read_crs_wkt`/`crs_wkt` in `tests/test_find_crs_prj.py`).
 
 Validation of the consumer: the script reproduced the user's hand-built table for

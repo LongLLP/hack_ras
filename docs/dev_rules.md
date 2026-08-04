@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 335 passing tests (plus any added in the current
+All tests must pass. The baseline is 345 passing tests (plus any added in the current
 session). If a new test is added, the new count becomes the baseline.
 
 The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
@@ -64,6 +64,25 @@ Implemented block parsers (as of 2026-06-23):
   Populates `CrossSection.manning_def`.
 - `blocks/xs_bank_sta.py` — `Bank Sta=left,right`: single-line parse; returns
   `((float, float), 1)`.  Populates `CrossSection.bank_stations`.
+
+## Comparing River / Reach Names — always normalize both sides
+
+```python
+from hack_ras.utils.names import normalize_name
+if normalize_name(typed) == normalize_name(from_file): ...
+```
+
+HEC-RAS stores river and reach names in fixed-width fields, so they arrive padded
+**on the inside too**: a reach the GUI shows as "Upper Reach B" is written
+`'Upper Reach  B'` with two interior spaces (real case, Starkweather
+`StarkweatherW`). Never compare raw strings, and never normalize only the value
+read from the file — a hand-typed name in a spreadsheet or YAML config must not
+have to reproduce RAS's padding. Getting this wrong fails *silently*: the lookup
+misses and the caller falls through to a default that often looks plausible.
+
+`normalize_name` strips outer whitespace, collapses interior whitespace runs, and
+case-folds. `geometry.shift._normalize_names` and `results.model._normalize_name`
+are aliases of it; `tests/test_names.py` pins them so they cannot drift.
 
 ## Mapping RAS Stations to GIS Coordinates
 When a script needs to place station-referenced XS features (IFAs, bank stations,
