@@ -15,7 +15,9 @@ Implemented so far:
 2. Geometry file (.g##) parsing — river/reach/cross-section structure, GIS cut lines; lossless roundtrip write-back.
 3. Plan results (.p##.hdf) reading — 2D flow area cell geometry, water surface elevations, cell volume-elevation tables, SA 2D Area Conn (levee/lateral structure) HW/TW cell time series with sub-step accurate time-of-maximum, and pipe network geometry and time series.
 4. GIS profile computation — ordered profile stations along a line with WSE assignment and cell volume interpolation.
-5. Plan file operations — renumber plans (single or bulk with chain/cycle handling), clone with edits, delete with outputs; renames run artifacts and restart files, updates restart references in .u files and plan tokens in the .rasmap; .prj sync (drop entries for missing files) and entry sorting.
+5. Plan file operations — renumber plans (single or bulk with chain/cycle handling), clone with edits, delete with outputs; renames run artifacts (steady and unsteady) and restart files, updates restart references in .u files and plan tokens in the .rasmap; .prj sync (drop entries for missing files) and entry sorting.
+6. Geometry file operations — the same for .g## files: renumber, insert gap, compact, clone, delete; rewrites every plan's Geom File= reference and the .rasmap geometry tokens.
+7. Project health inspector — read-only inventory of plans/geometries/flows with cross-references, plus consistency checks (orphan files, stale .prj entries, duplicate titles, unused files, .rasmap problems, active runs).
 
 Overview of HEC-RAS File Types:
 ===============================
@@ -37,6 +39,16 @@ Contains:
 Contains:
 1. Time series of flow or stage.
 2. Other boundary conditions such as normal depth or rating curves.
+
+.f## - Steady Flow Files
+------------------------
+Contains:
+1. Peak flow values per profile.
+2. Steady boundary conditions.
+
+Note: the .prj registers steady flow as "Flow File=f##" and unsteady as
+"Unsteady File=u##". Inside a .p## plan file, "Flow File=" is that plan's flow
+reference and may name either an f## or a u## — same key, different meaning.
 
 .p## - Plan Files
 -----------------

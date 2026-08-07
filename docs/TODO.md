@@ -22,11 +22,21 @@ Everything else once listed here is DONE — see the "DONE" section below and th
 ### D. `flows` subsystem — unsteady-flow file operations
 
 The missing third file-type subsystem. hack_ras has `project/plans.py` and
-`project/geoms.py` but **nothing for unsteady flow (`.u##`) files** — so flow
+`project/geoms.py` but **nothing for flow files** — so flow
 delete/renumber/compact currently has to be done with hand-written raw-line
 edits (done twice already: registering pasted u12-u17, then deleting the unused
 ones + renumbering u12->u09). Those ad-hoc edits work but lack the tested
 collision-safety the plan/geom machinery has.
+
+Scope it to cover BOTH flow kinds. As of 2026-08-07 steady flow is a
+first-class parsed type (`ProjectModel.steady_file_ids` from the .prj's
+`Flow File=f##`), and `delete_plan(delete_unused_flow=True)` already picks the
+right .prj key per kind via `plans._prj_flow_key`. A `flows.py` that handled
+only `.u##` would re-open the flow==unsteady assumption that this session spent
+its time removing. The two kinds differ in the .prj key and in the `.rasmap`
+(`<EventConditions>` is keyed to `Base.u##.hdf`; steady flow has no EC layer),
+but not in the plan-side reference — every plan names its flow with the SAME
+`Flow File=` line whether it holds an f## or a u##.
 
 Build `project/flows.py` mirroring `geoms.py`:
 - `renumber_flows(project, mapping)` / `renumber_flow` — bulk + single,
@@ -50,8 +60,13 @@ Reference graph a flow renumber must rewrite (verified this session):
 - Delete semantics: mirror `delete_geom` — refuse if any plan still references
   the flow (`FlowInUse`) unless `force=True`; `clean_rasmap=True` drops the EC
   layer via `remove_flows_from_rasmap`.
-- Left alone (cosmetic, same policy): `.u##.hdf` internals; the `Flow Filename`
-  attr inside each `.p##.hdf`.
+- Left alone (same policy): `.u##.hdf` internals; the `Flow Filename` attr inside
+  each `.p##.hdf`. Confirmed empirically 2026-08-07 that this is NOT merely
+  cosmetic — a renumbered `.p##.hdf` keeps its whole stale provenance block
+  (`Plan Data/Plan Information` → `Plan Filename`, `Geometry Filename`, and by
+  the same mechanism `Flow Filename`). hack_ras must not edit a binary to fix
+  it; RAS rewrites the HDF on the next compute. Read these with h5py — `strings`
+  does not surface them.
 
 Once built, this session's cleanup would have been:
 `delete_flows(project, "09-11,13-17"); compact_flows(project)`.

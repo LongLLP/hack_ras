@@ -10,6 +10,9 @@ class ProjectModel:
     geom_file_ids: list[str]     = field(default_factory=list)
     plan_file_ids: list[str]     = field(default_factory=list)
     unsteady_file_ids: list[str] = field(default_factory=list)
+    # .prj 'Flow File=f##' — steady flow. RAS calls it plain "Flow" here for
+    # historical reasons; unsteady gets its own 'Unsteady File=u##' key.
+    steady_file_ids: list[str]   = field(default_factory=list)
 
     y_axis_title: Optional[str]    = None
     x_axis_title_pf: Optional[str] = None
@@ -24,4 +27,5 @@ class ProjectModel:
             "geom":     _resolve(self.geom_file_ids),
             "plan":     _resolve(self.plan_file_ids),
             "unsteady": _resolve(self.unsteady_file_ids),
+            "steady":   _resolve(self.steady_file_ids),
         }

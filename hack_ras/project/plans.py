@@ -9,7 +9,9 @@ file on disk that is not listed in the .prj is an orphan and is rejected.
 
 Renumbering knows about everything keyed to a plan's number:
 - the .p## file and its .p##.hdf results sidecar,
-- run artifacts written by HEC-RAS: .b##, .bco##, .ic.o##,
+- run artifacts written by HEC-RAS: .b##, .bco##, .ic.o## (unsteady) and
+  .O##, .r## (steady) — both sets are always considered, and whichever
+  actually exist on disk are the ones acted on,
 - restart files the plan wrote: `Base.p##.<stamp>.rst` (arbitrary restart
   names like `banana.rst` carry no plan number and are never touched),
 - `Restart Filename=` references inside the project's .u files,
@@ -75,6 +77,15 @@ def _normalize_plan_id(raw: str) -> str:
 
 def _plan_num(pid: str) -> int:
     return int(pid[1:])
+
+
+def _prj_flow_key(flow_id: str) -> str:
+    """The .prj key that registers a flow file: 'f01' -> 'Flow File=',
+    'u01' -> 'Unsteady File='. HEC-RAS names steady flow plain 'Flow' in the
+    .prj because unsteady did not exist in the first version; the 'f'/'u'
+    prefix on the id is what actually distinguishes them."""
+    return "Flow File=" if flow_id.strip().lower().startswith("f") \
+        else "Unsteady File="
 
 
 def plan_path(project: RasProject, plan_id: str) -> str:
@@ -186,16 +197,26 @@ def _assert_no_active_run(project: RasProject, pid: str) -> None:
 
 def _family_names(project: RasProject, pid: str) -> list[str]:
     """Existing filenames (relative to the project folder) keyed to pid:
-    the plan file, .hdf sidecar, run artifacts (b/bco/ic.o), and any
-    `Base.p##.<...>.rst` restart files the plan wrote."""
+    the plan file, .hdf sidecar, run artifacts, and any
+    `Base.p##.<...>.rst` restart files the plan wrote.
+
+    Both the unsteady artifacts (.b##, .bco##, .ic.o##) and the steady ones
+    (.O##, .r##) are listed as candidates; the plan's type is never inferred
+    from the .p## file. The two sets are disjoint by extension and every
+    candidate is filtered through os.path.isfile, so disk decides which apply.
+    That is strictly safer than classifying the plan: a malformed plan (one
+    with no `Flow File=` line, which does occur) would defeat a classifier and
+    silently strand real files, whereas the existence check cannot misjudge."""
     base = project.base_name
     num = pid[1:]
     fixed = [
         f"{base}.{pid}",
         f"{base}.{pid}.hdf",
-        f"{base}.b{num}",
-        f"{base}.bco{num}",
-        f"{base}.ic.o{num}",
+        f"{base}.b{num}",        # unsteady: binary output
+        f"{base}.bco{num}",      # unsteady: computation log
+        f"{base}.ic.o{num}",     # unsteady: initial conditions output
+        f"{base}.O{num}",        # steady: output file
+        f"{base}.r{num}",        # steady: run file
     ]
     names = [n for n in fixed
              if os.path.isfile(os.path.join(project.folder, n))]
@@ -211,7 +232,7 @@ def _renamed_family_name(name: str, base: str, old: str, new: str) -> str:
     o, n = old[1:], new[1:]
     if name.startswith(f"{base}.{old}"):        # .p##, .p##.hdf, .p##.*.rst
         return f"{base}.{new}" + name[len(f"{base}.{old}"):]
-    for stem in ("b", "bco", "ic.o"):
+    for stem in ("b", "bco", "ic.o", "O", "r"):
         if name == f"{base}.{stem}{o}":
             return f"{base}.{stem}{n}"
     raise ValueError(f"Not a plan-family filename for {old}: {name!r}")
@@ -287,7 +308,7 @@ def renumber_plans(project: RasProject, mapping: dict) -> dict:
     cycle leaves no free slot.
 
     Renames the whole plan-keyed family (.p##, .p##.hdf, .b##, .bco##,
-    .ic.o##, Base.p##.*.rst), then applies the complete mapping in ONE pass
+    .ic.o##, .O##, .r##, Base.p##.*.rst), then applies the mapping in ONE pass
     to the .prj (Plan File= and Current Plan=), to `Restart Filename=`
     references in the .u files, and to Base.p## tokens in the .rasmap if one
     exists. One pass matters: applying entries sequentially would corrupt
@@ -458,8 +479,9 @@ def delete_plan(
     clean_rasmap: bool = True,
 ) -> dict:
     """Delete a plan and everything keyed to its number: the .p## file, the
-    .p##.hdf results, run artifacts (.b##, .bco##, .ic.o##), restart files it
-    wrote (Base.p##.*.rst), and its 'Plan File=' entry in the .prj
+    .p##.hdf results, run artifacts (.b##, .bco##, .ic.o## for an unsteady
+    plan; .O##, .r## for a steady one), restart files it wrote
+    (Base.p##.*.rst), and its 'Plan File=' entry in the .prj
     (repointing 'Current Plan=' to the first surviving plan if needed).
 
     With delete_unused_geom / delete_unused_flow, the plan's geometry / flow
@@ -574,7 +596,11 @@ def delete_plan(
             if os.path.isfile(path):
                 os.remove(path)
                 deleted.append(name)
-        _drop_entry("Unsteady File=", flow_id)
+        # The .prj registers steady flow as 'Flow File=f##' and unsteady as
+        # 'Unsteady File=u##'. (Inside a .p## file 'Flow File=' means either,
+        # carrying an f## or u## id — same key, different file, different
+        # meaning.) Pick the .prj key from the id's own prefix.
+        _drop_entry(_prj_flow_key(flow_id), flow_id)
         removed_flow_id = flow_id
 
     write_lines(project.prj_path, kept)

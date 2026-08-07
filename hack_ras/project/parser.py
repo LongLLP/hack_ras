@@ -8,13 +8,15 @@ _KEYMAP = {
     "geom file":       "geom_file_ids",
     "plan file":       "plan_file_ids",
     "unsteady file":   "unsteady_file_ids",
+    "flow file":       "steady_file_ids",
     "y axis title":    "y_axis_title",
     "x axis title(pf)": "x_axis_title_pf",
     "x axis title(xs)": "x_axis_title_xs",
     "dss file":        "dss_file",
 }
 
-_LIST_ATTRS = {"geom_file_ids", "plan_file_ids", "unsteady_file_ids"}
+_LIST_ATTRS = {"geom_file_ids", "plan_file_ids", "unsteady_file_ids",
+               "steady_file_ids"}
 
 
 def _norm(s: str) -> str:
@@ -24,8 +26,14 @@ def _norm(s: str) -> str:
 def parse_project_lines(lines: Iterable[str]) -> ProjectModel:
     """
     Parse lines of a HEC-RAS .prj file into ProjectModel.
-    Repeated keys (Geom File, Plan File, Unsteady File) are accumulated into lists.
-    Unknown keys and empty/comment lines are ignored.
+    Repeated keys (Geom File, Plan File, Unsteady File, Flow File) are
+    accumulated into lists. Unknown keys and empty/comment lines are ignored.
+
+    NOTE: 'Flow File=' here is the .prj's STEADY flow registration (f##) and
+    lands in steady_file_ids. The same key inside a .p## plan file means that
+    plan's flow reference and may hold either an f## or a u## id — a different
+    file with a different meaning, parsed elsewhere (plans._read_plan_ref).
+    This function is only ever given a .prj.
     """
     proj = ProjectModel()
     in_description = False

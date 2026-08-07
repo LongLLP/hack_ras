@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 345 passing tests (plus any added in the current
+All tests must pass. The baseline is 362 passing tests (plus any added in the current
 session). If a new test is added, the new count becomes the baseline.
 
 The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
@@ -206,6 +206,11 @@ tests/data/
                                            Image log.xlsx). Two Type-3 bridge nodes (43084,
                                            40447) have no #Sta/Elev and are skipped by the
                                            active-flow check. Used by test_levee_obstruct.py.
+    SterpCreek.O01 / .O02 / .r01 / .r02  ← the STEADY run artifacts RAS wrote for p01/p02.
+                                           LOAD-BEARING: test_steady_flow.py uses this model
+                                           (on a temp copy) as the only steady fixture that
+                                           exercises delete/renumber of .O##/.r##. Do not
+                                           delete them as "just outputs".
 ```
 
 Geometry merge tests reference fixtures from the sibling `RAS_xsedit` repo via a

@@ -150,8 +150,12 @@ def project_health(project: RasProject) -> ProjectHealth:
         t = _title(gpath, "Geom Title")
         geom_titles.append((gid, t))
         geometries.append(FileInfo(gid, t, sorted(geom_used.get(gid, []))))
+    # Steady (f##) and unsteady (u##) flows share one inventory: a plan's
+    # 'Flow File=' reference points at either, so flow_used is already keyed
+    # across both. Listed steady-first to match .prj order. Both file types
+    # carry a 'Flow Title=' line.
     flows, flow_titles = [], []
-    for uid in model.unsteady_file_ids:
+    for uid in model.steady_file_ids + model.unsteady_file_ids:
         upath = os.path.join(folder, f"{base}.{uid}")
         t = _title(upath, "Flow Title")
         flow_titles.append((uid, t))
@@ -165,8 +169,9 @@ def project_health(project: RasProject) -> ProjectHealth:
     # --- issues: orphan files & stale .prj entries ---
     avail = project.available_ids()
     listed = {"plan": model.plan_file_ids, "geom": model.geom_file_ids,
-              "unsteady": model.unsteady_file_ids}
-    for kind in ("plan", "geom", "unsteady"):
+              "unsteady": model.unsteady_file_ids,
+              "steady": model.steady_file_ids}
+    for kind in ("plan", "geom", "unsteady", "steady"):
         listed_set = set(listed[kind])
         for fid in avail.get(kind, []):
             if fid not in listed_set:

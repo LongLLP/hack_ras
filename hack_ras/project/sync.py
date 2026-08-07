@@ -2,8 +2,12 @@
 """Reconcile a .prj against the files actually on disk — removal only.
 
 `sync_prj` removes file entries (Plan File=, Geom File=, Unsteady File=,
-Steady File=) whose referenced file does not exist next to the .prj, and
+Flow File=) whose referenced file does not exist next to the .prj, and
 repoints `Current Plan=` if its target was removed or is missing.
+
+The test is "is the file on disk?", NOT "does a plan use it?" — a flow or
+geometry that exists but no plan references is perfectly legal and is left
+alone (project_health reports those as unused_* instead).
 
 Deliberate non-goal: adopting orphans. Files on disk that the .prj does not
 list are NOT added — the .prj is authoritative for what belongs to a project,
@@ -18,11 +22,14 @@ from hack_ras.project.ras_project import RasProject
 from hack_ras.utils.lines import read_lines, write_lines, eol_of, content_of
 
 # prj key -> file-ID prefix letter ("Plan File=p01" -> "Mini.p01")
+# 'Flow File=' is the .prj's STEADY flow key (f##) — HEC-RAS never writes a
+# 'Steady File=' key, which this table wrongly looked for until 2026-08-07,
+# so steady entries silently fell through as unrecognised lines.
 _FILE_KEYS = {
     "Plan File=": "plan",
     "Geom File=": "geom",
     "Unsteady File=": "unsteady",
-    "Steady File=": "steady",
+    "Flow File=": "steady",
 }
 
 
@@ -97,7 +104,7 @@ def sort_prj_entries(
     Returns {kind: [file IDs in final order]} for the kinds requested.
     """
     keys = {"plan": "Plan File=", "geom": "Geom File=",
-            "unsteady": "Unsteady File=", "steady": "Steady File="}
+            "unsteady": "Unsteady File=", "steady": "Flow File="}
     for kind in kinds:
         if kind not in keys:
             raise ValueError(

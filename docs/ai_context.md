@@ -62,6 +62,8 @@ HEC-RAS uses a base name plus a typed numeric suffix:
 | `.b##` | UNET run/boundary input, regenerated each run; text; embeds plan/project TITLES but not the plan number — the suffix is the only plan link | plan |
 | `.bco##` | Unsteady computation log (text; 0 bytes until flushed at run end) | plan |
 | `.ic.o##` | Binary initial-conditions output; embeds the plan title, not the number | plan |
+| `.O##` | STEADY output file (uppercase O) — the steady counterpart of `.b##`/`.bco##` | plan |
+| `.r##` | STEADY run file | plan |
 | `.x##` | Preprocessor run file — keyed to GEOMETRY `g##`, NOT the plan (user-confirmed; line 3 carries the title of the last plan run with that geometry, which misleads) | geometry |
 | `.u##` | Unsteady flow file | — |
 | `.u##.hdf` | Flow preprocessor output (HDF5), regenerated | flow |
@@ -72,6 +74,11 @@ HEC-RAS uses a base name plus a typed numeric suffix:
 `##` is a two-digit number (`01`, `02`, …). A project may have multiple geometry or plan files.
 Multiple plans may share the same geometry (same `g##` ID), which is important for grouping.
 The plan-keyed rows are exactly the family that `renumber_plans` / `delete_plan` handle.
+A plan is steady OR unsteady, so only one artifact set exists for it (`.b##`/`.bco##`/
+`.ic.o##` or `.O##`/`.r##`). `_family_names` lists BOTH sets as candidates and filters
+by `os.path.isfile` — it never infers the type from the `.p##` file. Disk is the
+authority: a malformed plan (no `Flow File=` line — observed in the wild) would defeat a
+classifier and silently strand real files, whereas an existence check cannot misjudge.
 
 ## HEC-RAS Runtime & GUI Behavior (empirical — GMF_DFA live runs, 2026-07-17)
 
@@ -152,11 +159,17 @@ Plan File=p14
 `ProjectModel` stores these as **lists**:
 - `geom_file_ids: list[str]` — all geometry IDs referenced by the project
 - `plan_file_ids: list[str]` — all plan IDs, in the order listed in the `.prj`
-- `unsteady_file_ids: list[str]` — all unsteady flow IDs
+- `unsteady_file_ids: list[str]` — all unsteady flow IDs (`.prj` `Unsteady File=u##`)
+- `steady_file_ids: list[str]` — all steady flow IDs (`.prj` `Flow File=f##`)
+
+Note the asymmetric key names: in the `.prj`, `Flow File=` means STEADY specifically
+(historical — the first HEC-RAS had no unsteady). Inside a `.p##` plan file the same
+`Flow File=` key is that plan's flow reference and may hold an `f##` OR a `u##` id.
+Same key, different file, different meaning — do not reuse one parser for both.
 
 Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 `resolve_filenames(basename_map)` maps all IDs of each type to filenames, returning
-`{'geom': [...], 'plan': [...], 'unsteady': [...]}`.
+`{'geom': [...], 'plan': [...], 'unsteady': [...], 'steady': [...]}`.
 
 ## Flexible file-id selection — `resolve.expand_id_spec(spec, kind='p')`
 
@@ -201,8 +214,9 @@ renumber_plan(project, "p25", "p30")     # single-plan case of the same machiner
 insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5; returns {old: new}
 compact_plans(project)                    # renumber survivors to contiguous p01..pN
 delete_plans(project, "16-17,21-26,30-35")  # bulk delete by id-spec (fail-fast)
-sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Steady File=
+sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Flow File=
                                          #   lines ascending; kinds=("plan",) etc. to limit
+                                         #   (kind 'steady' == the prj's 'Flow File=f##' lines)
 delete_plan(project, "p08",              # deletes plan + outputs; optional unused-file cleanup
             delete_unused_geom=True, delete_unused_flow=True)
 clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
@@ -214,7 +228,8 @@ sort_rasmap_layers(project.folder + r"\Model.rasmap", project.base_name)
 ```
 
 Renumbering/deleting covers the whole plan-keyed file family — `.p##`, `.p##.hdf`,
-run artifacts `.b##` / `.bco##` / `.ic.o##`, and `Base.p##.<stamp>.rst` restart
+run artifacts `.b##` / `.bco##` / `.ic.o##` (unsteady) or `.O##` / `.r##` (steady),
+and `Base.p##.<stamp>.rst` restart
 files — plus cross-file references: `Restart Filename=` lines in the `.u` files and
 the `.rasmap` (`project/rasmap.py`). `renumber_plans` remaps `Base.p##` tokens
 there; `delete_plan` removes the deleted plan's RASPlan/RASResults layer subtrees
@@ -248,14 +263,13 @@ alone.
   / that geometry's `<Geometries>` RASGeometry layer (`remove_geoms_from_rasmap`,
   keyed on `Base.g##.hdf`). Both are section-scoped and token-keyed, so the
   RASEventConditions / RASGeometry sub-layers INSIDE a RASResults block (which
-  name `Base.p##.hdf`) are never touched — those go with their result. Flow and
-  geometry numbers are never renumbered by hack_ras, so this is pure tidy-up (the
-  leftover layer would point at a genuinely-missing file), not a reuse-safety fix.
+  name `Base.p##.hdf`) are never touched — those go with their result. For FLOW
+  numbers this is pure tidy-up (hack_ras has no flow renumber — see TODO item D —
+  so the leftover layer would point at a genuinely-missing file). For GEOMETRY
+  numbers it is also a reuse-safety fix, because `renumber_geoms` CAN free and
+  refill a geometry number, which is the same zombie-layer trap as plans.
   The `rasmap_removed` report field is `{'plans': [...], 'results': [...],
-  'event_conditions': [...], 'geometries': [...]}`. (There is no geometry
-  renumber/delete operation in hack_ras today — only this delete_unused_geom
-  side-path; a full geometry-file renumber/delete subsystem would be a separate
-  addition.)
+  'event_conditions': [...], 'geometries': [...]}`.
 - `plans_with_unlisted_results(project)` flags plan IDs whose `.p##.hdf` has a
   top-level `Results` group but which have NO RASResults layer in the `.rasmap`
   (uses `result_plan_ids(rasmap_path, base)`; h5py imported lazily). These are
@@ -1091,6 +1105,55 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
+### Session 19 changes (2026-08-07): steady flow made first-class in project ops
+
+Driven by a real request — delete steady plans p01/p02 from `Model_Pattison` (a mixed
+steady/unsteady model). `delete_plans` would have run, but left `.O01/.O02/.r01/.r02`
+orphaned. Root cause across three sites: the package assumed **flow == unsteady**.
+
+- **Plan-keyed steady artifacts.** `_family_names` knew only `.b##`/`.bco##`/`.ic.o##`;
+  `.O##`/`.r##` are now candidates too, filtered by `os.path.isfile` as before. NO plan-
+  type detection — see the file-suffix table note for why disk beats a classifier.
+  The load-bearing half is `_renamed_family_name` (stems gained `O` and `r`): it is
+  shared with `renumber_plans`, so before this, renumbering a steady plan STRANDED its
+  outputs at the old number, where a plan later renumbered into that slot silently
+  inherited them. That was a wrong-results bug, not untidiness.
+- **`Flow File=` is the .prj's steady key.** RAS registers steady flow as
+  `Flow File=f##` and unsteady as `Unsteady File=u##`; it never writes `Steady File=`,
+  which `sync.py` had been looking for since it was written. Consequence: steady
+  entries fell through `_FILE_KEYS` as unrecognised lines, so `sync_prj` could not
+  remove a `.prj` entry whose `.f##` was missing and always reported `steady: []`.
+  Fixed in `_FILE_KEYS` and `sort_prj_entries`. `parser.py`/`model.py` gained
+  `steady_file_ids` (+ `resolve_filenames`), and `health.py` now inventories steady
+  flows and checks them for stale/orphan/unused/duplicate-title like every other kind.
+  `delete_unused_flow` picks the key via the new `_prj_flow_key(flow_id)` helper.
+- **The naming trap** (user-explained, worth keeping): `Flow File=` means different
+  things in different files. In a `.p##` it is that plan's flow reference and holds
+  either `f##` or `u##`. In the `.prj` it means specifically STEADY. The generic word
+  "Flow" is historical — the first HEC-RAS had no unsteady computations. That
+  ambiguity is very likely what led someone to invent the tidier-looking but
+  nonexistent `Steady File=`.
+- **Behavior changes to be aware of**: `sync_prj` now actually removes dangling
+  `Flow File=` entries it used to preserve (it still never deletes files, and its test
+  remains "is the file on disk?", NOT "does a plan use it?" — an unused-but-present
+  flow file is legal and survives); `sort_prj_entries` reorders them by default; and
+  `health` reports steady problems it previously ignored.
+- **Empirical, from validating the fix against a hand-built target** (Model_Pattison
+  00/01/02): a renamed `.p##.hdf` keeps STALE INTERNAL PROVENANCE. Its
+  `Plan Data/Plan Information` attrs `Plan Filename` and `Geometry Filename` still name
+  the pre-renumber files (p05.hdf renamed to p03.hdf still says `Pattison_Bridge.p05` /
+  `.g05`). hack_ras cannot fix this without editing a binary, which it must not do; RAS
+  clears it by regenerating the HDF on the next compute. Harmless for RAS Mapper (the
+  .rasmap references are correct and were verified identical to the hand-built target),
+  but do not trust a renumbered results HDF's embedded provenance until it is re-run.
+  Note `strings` does NOT surface these — they live in HDF object headers; read them
+  with h5py.
+- New `tests/test_steady_flow.py` (17 tests) uses the real `Wisconsin Floodway`
+  (SterpCreek) steady fixture on a temp copy for the artifact/delete/renumber cases,
+  small synthetic projects for parser/sync/health. Verified non-vacuous: 15 of the 17
+  fail against the pre-fix code. The 2 that pass either way are deliberate guards that
+  the delete does NOT over-reach. Full suite: **362 passed** (345 baseline + 17).
+
 ### Session 18 changes (2026-08-03): steady XS results reader + FWDT_Output script
 
 Driven by a new consumer: `Scripts/FWDT_Output/fwdt_output.py`, which fills a FEMA
@@ -1732,7 +1795,8 @@ part, not a case worth adding branching for.
 ## Future Features — Not Yet Implemented
 
 **`docs/TODO.md` is the authoritative open-items list.** As of 2026-07-28 it has
-four OPEN items: (D) a `flows` subsystem — unsteady-flow file ops (the missing
+four OPEN items: (D) a `flows` subsystem — flow-file ops covering BOTH steady
+(`.f##`) and unsteady (`.u##`), per the 2026-08-07 rescope (the missing
 third file-type subsystem alongside `plans`/`geoms`; top priority, a demonstrated
 recurring need); (A) writer / `merge.py` support for Blocked Obstructions
 (`#Block Obstruct=`) and `Levee=` — described just below, currently parse-only;
