@@ -352,13 +352,14 @@ makes it more than a rename.
 
 ```python
 from hack_ras.project.geoms import (
-    renumber_geom, renumber_geoms, insert_geom_gap, compact_geoms,
+    renumber_geom, renumber_geoms, insert_geom_gap, compact_geoms, reorder_geoms,
     clone_geom, delete_geom)
 
 renumber_geoms(project, {"g03": "g02", "g05": "g03"})  # bulk, chain/cycle-safe
 renumber_geom(project, "g05", "g02")                   # single-entry case
 insert_geom_gap(project, "g02", 1)                     # shift g>=02 up by 1
 compact_geoms(project)                                 # g01,g03,g05 -> g01,g02,g03
+reorder_geoms(project, ["g01", "g03", "g02"])           # complete list, as g01..gN
 clone_geom(project, "g01", "New Geom Title", new_id="g07")  # copy .g## + new title
 delete_geom(project, "g04")                            # refuses if a plan uses it
 delete_geom(project, "g04", force=True)                # deletes anyway (+warns)
@@ -383,6 +384,13 @@ stale plan title on `.x##` line 3. There is **no "Current Geometry"** key in the
   still references the geometry, unless `force=True` — which deletes anyway and
   warns that those plans now point at a missing geometry (a forced delete leaves
   their `GeometryHDF=` in the rasmap dangling, by design; the plans still exist).
+- `reorder_geoms(project, order)` is the geometry twin of `plans.reorder_plans`
+  (same complete-list requirement, same ValueError-before-any-write behavior,
+  single namespace so no kind argument). It is the most far-reaching of the three
+  reorders: a geometry is shared, so each move rewrites `Geom File=` in every
+  referencing plan plus the `<Geometries>` layer and each plan layer's
+  `GeometryHDF=`. Added session 20 after `reorder_plans`/`reorder_flows`, when the
+  user spotted geometry was the one subsystem missing it.
 - `compact_geoms` builds the fill-the-gaps mapping and delegates to
   `renumber_geoms`; `insert_geom_gap` is the inverse (mirrors `insert_plan_gap`).
 - `delete_geoms(project, spec, force=)` bulk-deletes by id-spec (mirrors
@@ -1226,7 +1234,12 @@ throughout — no behavior change to existing functions.
   before building: prefix-required IDs (no bare numbers), cross-kind moves refused,
   `kinds=("unsteady","steady")` on `compact_flows` so one kind can be compacted
   without the other, and `reorder_flows` included. Plus `renumber_flows_in_rasmap`
-  in `rasmap.py`. +55 tests. Baseline 362 -> **426**.
+  in `rasmap.py`. +55 tests.
+- **`geoms.reorder_geoms(project, order)`** — added last, when the user noticed
+  geometry was the only subsystem without a reorder (plans got one first, flows got
+  one by decision 4, geoms was never in either request's scope). Identical in shape
+  to `reorder_plans`; +7 tests. All three subsystems now expose the same
+  insert-gap / compact / reorder trio. Baseline 362 -> **433**.
 
 The Pattison job shaped all three. Its two asks were a plan REORDER (a 4-way
 permutation, `{p05:p03, p06:p04, p03:p05, p04:p06}` — the motive for `reorder_plans`)

@@ -26,6 +26,7 @@ from hack_ras.project.geoms import (
     insert_geom_gap,
     renumber_geom,
     renumber_geoms,
+    reorder_geoms,
 )
 
 CRLF = "\r\n"
@@ -182,6 +183,59 @@ class TestInsertGapAndCompact(GeomProjectBase):
 
     def test_compact_noop_when_contiguous(self):
         self.assertEqual(compact_geoms(self.project), {})
+
+
+class TestReorderGeoms(GeomProjectBase):
+    def test_reorder_swaps_and_rewrites_every_reference(self):
+        # g01, g03, g02 -> the g02/g03 pair trades places (a 2-cycle)
+        mapping = reorder_geoms(self.project, ["g01", "g03", "g02"])
+        self.assertEqual(mapping, {"g03": "g02", "g02": "g03"})
+        self.assertIn("Geom Title=Geom Three", _read(self.path("Mini.g02")))
+        self.assertIn("Geom Title=Geom Two", _read(self.path("Mini.g03")))
+        # the .x## preprocessor run file is geometry-keyed and follows
+        for name in ("Mini.g03", "Mini.g03.hdf", "Mini.x03"):
+            self.assertTrue(os.path.isfile(self.path(name)), name)
+        # both plans that used g02 followed it to g03 — the shared-dependency
+        # rewrite that makes this the most far-reaching reorder
+        self.assertEqual(self.geom_of("p03"), "g03")
+        self.assertEqual(self.geom_of("p04"), "g03")
+        self.assertEqual(self.geom_of("p01"), "g01")      # untouched
+        rm = _read(self.path("Mini.rasmap"))
+        self.assertIn('GeometryHDF=".\\Mini.g03.hdf"', rm)
+        self.assertEqual([n for n in os.listdir(self.folder)
+                          if "renumtmp" in n], [])
+
+    def test_reorder_accepts_loose_ids(self):
+        self.assertEqual(reorder_geoms(self.project, ["1", "G3", "g2"]),
+                         {"g03": "g02", "g02": "g03"})
+
+    def test_reorder_noop_when_already_in_order(self):
+        self.assertEqual(reorder_geoms(self.project, ["g01", "g02", "g03"]), {})
+
+    def test_reorder_in_current_order_still_closes_a_gap(self):
+        renumber_geom(self.project, "g03", "g09")   # geoms: g01, g02, g09
+        self.assertEqual(reorder_geoms(self.project, ["g01", "g02", "g09"]),
+                         {"g09": "g03"})
+        self.assertEqual(sorted(self.project.model.geom_file_ids),
+                         ["g01", "g02", "g03"])
+
+    def test_incomplete_order_refuses_and_touches_nothing(self):
+        with self.assertRaises(ValueError) as ctx:
+            reorder_geoms(self.project, ["g01", "g03"])
+        self.assertIn("g02", str(ctx.exception))
+        self.assertIn("Geom Title=Geom Two", _read(self.path("Mini.g02")))
+        self.assertEqual(self.geom_of("p03"), "g02")
+
+    def test_unknown_id_refuses(self):
+        with self.assertRaises(ValueError):
+            reorder_geoms(self.project, ["g01", "g02", "g03", "g09"])
+        self.assertEqual(self.project.model.geom_file_ids,
+                         ["g01", "g02", "g03"])
+
+    def test_duplicate_id_refuses(self):
+        with self.assertRaises(ValueError):
+            reorder_geoms(self.project, ["g01", "g02", "g02"])
+        self.assertIn("Geom Title=Geom Three", _read(self.path("Mini.g03")))
 
 
 class TestCloneGeom(GeomProjectBase):

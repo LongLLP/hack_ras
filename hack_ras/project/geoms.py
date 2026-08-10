@@ -1,6 +1,6 @@
 # hack_ras/project/geoms.py
 """Geometry file operations: renumber (single/bulk), insert a numbering gap,
-compact to contiguous, clone with a new title, delete.
+compact to contiguous, reorder, clone with a new title, delete.
 
 The geometry analogue of project/plans.py. A geometry is a SHARED dependency —
 many plans point at one geometry via `Geom File=g##` — so renumbering a geometry
@@ -321,6 +321,58 @@ def compact_geoms(project: RasProject) -> dict:
     sorted_ids = sorted(project.model.geom_file_ids, key=_geom_num)
     mapping = {}
     for i, gid in enumerate(sorted_ids, start=1):
+        target = f"g{i:02d}"
+        if gid != target:
+            mapping[gid] = target
+    if mapping:
+        renumber_geoms(project, mapping)
+    return mapping
+
+
+def reorder_geoms(project: RasProject, order) -> dict:
+    """Renumber the listed geometries into the given order as a contiguous
+    g01..gN.
+
+    `order` is the COMPLETE list of the project's current geometry IDs, written
+    in the order you want them to end up: passing ['g01','g03','g02'] moves g03
+    into the g02 slot and g02 down to g03. Positions are assigned from the list,
+    so the result is always contiguous — reordering a project with gaps
+    (g01,g02,g09) compacts it as well, exactly like compact_geoms.
+
+    The complete list is required on purpose: naming only the geometries you
+    want to move would make the outcome depend on geometries you never
+    mentioned. Every geometry listed in the .prj must appear exactly once — a
+    missing, duplicated, or unknown ID raises ValueError before any file is
+    touched, so a partial order cannot silently reshuffle the rest.
+
+    Note this is the most far-reaching of the three reorder operations: a
+    geometry is shared, so every renumber rewrites `Geom File=` in EVERY plan
+    that uses it (plus the .rasmap's `<Geometries>` layer and each plan layer's
+    `GeometryHDF=`). The renumbering itself is done by renumber_geoms; see there.
+
+    Returns the {old_id: new_id} mapping of what moved (empty if `order` is
+    already the current numbering).
+    """
+    ids = [_normalize_geom_id(g) for g in order]
+    dupes = sorted({g for g in ids if ids.count(g) > 1}, key=_geom_num)
+    if dupes:
+        raise ValueError(f"Duplicate geometry IDs in order: {dupes}")
+
+    listed = set(project.model.geom_file_ids)
+    unknown = [g for g in ids if g not in listed]
+    if unknown:
+        raise ValueError(
+            f"Geometr(ies) not listed in {project.base_name}.prj: {unknown}"
+        )
+    missing = sorted(listed - set(ids), key=_geom_num)
+    if missing:
+        raise ValueError(
+            "order must list every geometry in the project — missing: "
+            f"{missing}. (Add them in the position you want them to keep.)"
+        )
+
+    mapping = {}
+    for i, gid in enumerate(ids, start=1):
         target = f"g{i:02d}"
         if gid != target:
             mapping[gid] = target
