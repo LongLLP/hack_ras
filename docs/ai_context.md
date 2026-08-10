@@ -10,7 +10,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | Package | Purpose |
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
-| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, clone, delete); `geoms.py` — the geometry-file analogue (renumber, insert gap, compact, clone, delete) |
+| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`) |
 | `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
@@ -127,6 +127,18 @@ see Plan File Operations.)
 Pass the absolute path to the `.prj` file; `ValueError` is raised if the file is missing
 or is not a HEC-RAS project (e.g. an ESRI shapefile projection file with the same extension).
 
+The top-level package also **re-exports the `project/` operations modules** —
+`from hack_ras import RasProject, plans, geoms, sync, rasmap, health` — so a script
+needs one import line instead of one per subpackage. The MODULES are re-exported, not
+their functions: `plans` and `geoms` have deliberately parallel APIs (renumber / insert
+gap / compact / clone / delete), so the module name at the call site is what says which
+file type is being operated on, and flattening the functions into the top level would
+throw that cue away. `hack_ras.plans` and `hack_ras.project.plans` are the same module
+object (pinned by `tests/test_package_exports.py`); the canonical home is unchanged, and
+nothing new is imported eagerly (none of the five pulls in h5py/geopandas at module
+level). When adding a module to `project/`, decide whether it belongs in `__all__` —
+that list is the second place to maintain, and the cost of this convenience.
+
 ```python
 project = RasProject(r"C:\path\to\NKC_Hillside_Levee.prj")
 project.folder        # directory containing the .prj
@@ -194,10 +206,10 @@ Shared raw-line I/O helpers live in `hack_ras/utils/lines.py`
 (`read_lines` / `write_lines` / `eol_of` / `content_of`).
 
 ```python
-from hack_ras import RasProject
-from hack_ras.project.plans import (
-    renumber_plan, renumber_plans, insert_plan_gap, clone_plan, delete_plan,
-    plan_short_ids, plans_with_unlisted_results)
+from hack_ras import RasProject, plans, geoms, sync, rasmap, health  # module re-exports
+from hack_ras.project.plans import (   # or import the names directly
+    renumber_plan, renumber_plans, insert_plan_gap, reorder_plans,
+    clone_plan, delete_plan, plan_short_ids, plans_with_unlisted_results)
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 from hack_ras.project.rasmap import (              # .rasmap-specific ops
     remove_plans_from_rasmap, remove_flows_from_rasmap,  # (delete_plan calls
@@ -213,6 +225,9 @@ renumber_plans(project, {"p20": "p02",   # bulk renumber: chains/cycles auto-ord
 renumber_plan(project, "p25", "p30")     # single-plan case of the same machinery
 insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5; returns {old: new}
 compact_plans(project)                    # renumber survivors to contiguous p01..pN
+reorder_plans(project, ["p01", "p02",    # renumber into this order as p01..pN;
+                        "p05", "p06",    #   the COMPLETE current-ID list is required
+                        "p03", "p04"])   #   (ValueError up front otherwise)
 delete_plans(project, "16-17,21-26,30-35")  # bulk delete by id-spec (fail-fast)
 sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Flow File=
                                          #   lines ascending; kinds=("plan",) etc. to limit
@@ -300,7 +315,16 @@ alone.
 - `compact_plans(project)` renumbers the listed plans to a contiguous p01..pN by
   ascending number (fills gaps; the plan-side twin of `geoms.compact_geoms`) — the
   "...and renumber the rest sequentially" half of the common delete-then-compact
-  request. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
+  request. `reorder_plans(project, order)` is the same thing with the positions
+  taken from `order` instead of from the current numbers: it builds the
+  `{old: new}` mapping and delegates to `renumber_plans`, so it inherits all of
+  its validation. `order` must be the COMPLETE list of currently-listed plan IDs
+  (loose forms like `'3'`/`'P3'` accepted) — a missing, duplicated, or unknown ID
+  is a `ValueError` raised before any file is touched. That requirement is
+  deliberate: naming only the plans to move would make the outcome depend on
+  plans the caller never mentioned. Because positions come from the list, a
+  project with gaps gets compacted as a side effect. It is the answer to
+  "insert p05 and p06 after p02" — write the order you want, not the moves. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
   bulk-deletes by a flexible id-spec (`'16-17,21-26,30-35'` string, or a list —
   via `resolve.expand_id_spec`); it validates every id up front (exists, listed,
   not mid-run) so a bad spec deletes NOTHING, then loops `delete_plan` and returns
@@ -373,6 +397,84 @@ stale plan title on `.x##` line 3. There is **no "Current Geometry"** key in the
   `DuplicateGeomTitle`, `GeomRunActive` (a plan using the geometry is mid-run —
   a `.p##.tmp.hdf` exists). Orphan geometries (on disk but not in the `.prj`) are
   rejected, mirroring the plan ops.
+
+## Flow File Operations (`hack_ras/project/flows.py`)
+
+The third file-type subsystem, and the closer analogue of `geoms.py` than of
+`plans.py`: a flow file is a **shared dependency** (many plans point at one via
+`Flow File=`), so renumbering one rewrites that reference in **every referencing
+plan**; and like geometry there is no "current flow" key in the `.prj`, so nothing
+global to repoint. Covers BOTH kinds — a module that handled only `.u##` would
+re-open the flow==unsteady assumption that session 19 removed.
+
+```python
+from hack_ras import RasProject, flows
+
+flows.renumber_flows(project, {"u01": "u02", "u02": "u01"})  # bulk; a swap is a 2-cycle
+flows.renumber_flow(project, "u12", "u09")                   # single-entry case
+flows.insert_flow_gap(project, "u05", 3)      # kind comes from at_id's own prefix
+flows.compact_flows(project)                 # both namespaces, independently
+flows.compact_flows(project, kinds=("unsteady",))     # ...or just one
+flows.reorder_flows(project, ["u02", "u01", "u04"])   # complete list of ONE kind
+flows.clone_flow(project, "u02", "New Flow Title", new_id="u07")
+flows.delete_flow(project, "u12", force=False, clean_rasmap=True)
+flows.delete_flows(project, "u09-u11,u13,f02")        # prefixes required
+```
+
+**TWO INDEPENDENT NAMESPACES — the one real departure from `plans`/`geoms`.**
+Steady and unsteady numbering are separate (`f01` and `u01` legitimately coexist),
+so every ID this module accepts must carry its kind prefix; a bare `'01'` raises
+`ValueError` rather than guessing, including inside id-specs (`'u09-u11'`, never
+`'09-11'`, and both endpoints of a range must carry it). That is a deliberate
+asymmetry with the other two modules, where a bare number is unambiguous.
+Cross-kind moves (`u01` -> `f01`) are refused as well — a format conversion, not
+a rename — as are cross-kind ranges and a mixed-kind `reorder_flows` order.
+
+What the kinds share and don't:
+- `Flow File=` in a `.p##` is the plan's flow reference and holds an `f##` **or** a
+  `u##` — the SAME key for both kinds. In the `.prj` they are DIFFERENT keys
+  (`Unsteady File=u##` vs `Flow File=f##`). Because IDs are always prefixed, the
+  `.prj` rewrite matches on the parsed ID and never branches on the key.
+- family files: `.u##` + its `.u##.hdf` preprocessor sidecar; steady is a lone
+  `.f##` (**no `.f##.hdf` exists** — verified across every local model, and
+  confirmed on the Wisconsin fixture). Both candidates are listed and filtered by
+  `os.path.isfile`, so disk stays the authority. No `.x##`-equivalent for flows.
+- `.rasmap`: unsteady has an `<EventConditions>` RASEventConditions layer keyed
+  `Base.u##.hdf` (remapped by the new `renumber_flows_in_rasmap`, removed by the
+  existing `remove_flows_from_rasmap`); **steady has no rasmap presence at all**.
+  The RASEventConditions layers nested inside a `<Results>` block name
+  `Base.p##.hdf`, so token-keying never touches them — and this is load-bearing,
+  not theoretical: 4 of 5 EC layers in the live Pattison model and 3 of 6 in the
+  2D-culvert fixture are results-nested.
+
+- **`Restart Filename=` is plan-keyed, not flow-keyed.** Those lines live INSIDE a
+  `.u` file but name a `Base.p##.<stamp>.rst`, so a flow renumber renames the file
+  around them and leaves the line alone (rewriting them is `plans.py`'s job). Both
+  subsystems write to `.u` files for unrelated reasons, so this has its own
+  regression test.
+- Delete semantics mirror `delete_geom`: refuse with `FlowInUse` if any listed plan
+  still references the flow, unless `force=True` (deletes anyway + warns that those
+  plans now point at a missing flow). `clean_rasmap=True` drops the EC layer for a
+  `u##` and is a no-op for an `f##`. `delete_flows` validates every id up front, so
+  a bad spec — including a range spanning a gap — deletes nothing.
+- `clone_flow` copies only the text file with a new unique `Flow Title=`
+  (`DuplicateFlowTitle`, scoped to the same kind since RAS lists the two kinds
+  separately) and inserts the `.prj` entry ascending under the right key; RAS
+  regenerates the `.u##.hdf`. An unsteady clone inherits the source's
+  `Restart Filename=` line if it has one.
+- Left alone, same policy as plans/geoms: `.u##.hdf` internals, the `Flow Filename`
+  attr in each `.p##.hdf` (stale provenance until RAS recomputes), and `.b##`/`.O##`
+  (they embed flow TITLES, not numbers).
+- Typed exceptions: `FlowFileNotFound`, `FlowIdInUse`, `FlowInUse`,
+  `DuplicateFlowTitle`, `FlowRunActive` (a plan using the flow is mid-run — a
+  `.p##.tmp.hdf` exists). Orphans (on disk, not in the `.prj`) are rejected.
+
+Tests: `tests/test_flow_ops.py` (47, synthetic mixed-kind project — f01 shared by
+two steady plans, u01 by two unsteady, plus an unused f03/u04 and a deliberate gap
+in each namespace) and `tests/test_flow_ops_fixture.py` (8, real models — the
+2D-culvert model for unsteady incl. its genuine stale `u03` prj entry + stale EC
+layer, and Wisconsin Floodway for steady, where `f01` is shared by both plans and
+there is no `.rasmap` at all).
 
 ## Project Health / Status Inspector (`hack_ras/project/health.py`)
 
@@ -1105,6 +1207,40 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
+### Session 20 changes (2026-08-10): module re-exports, `reorder_plans`, `flows` subsystem
+
+All driven by one real request on `Model_Pattison/03 assess abutments RS 7.0` ("insert
+p05 and p06 after p02, and swap u01 and u02") and the questions it surfaced. Additive
+throughout — no behavior change to existing functions.
+
+- **`hack_ras/__init__.py` re-exports the `project/` op modules** (`plans`, `geoms`,
+  `flows`, `sync`, `rasmap`, `health`) — see the Project Entry Point section for the
+  rationale and the module-vs-function decision. `tests/test_package_exports.py` (+2)
+  pins that the re-exports are the same module objects and that `__all__` matches.
+- **`plans.reorder_plans(project, order)`** — renumber into a given order as p01..pN,
+  with the complete-list requirement (see the bullet in Plan File Operations).
+  ~30 lines delegating to `renumber_plans`; +7 tests in `test_plan_ops.py`.
+- **`project/flows.py` — TODO item D, now CLOSED.** The third file-type subsystem,
+  covering both flow kinds; see the Flow File Operations section above for the API
+  and the design rules. All four open design decisions were confirmed with the user
+  before building: prefix-required IDs (no bare numbers), cross-kind moves refused,
+  `kinds=("unsteady","steady")` on `compact_flows` so one kind can be compacted
+  without the other, and `reorder_flows` included. Plus `renumber_flows_in_rasmap`
+  in `rasmap.py`. +55 tests. Baseline 362 -> **426**.
+
+The Pattison job shaped all three. Its two asks were a plan REORDER (a 4-way
+permutation, `{p05:p03, p06:p04, p03:p05, p04:p06}` — the motive for `reorder_plans`)
+and a FLOW SWAP (u01 <-> u02), which had to be hand-rolled at the time and is now
+just `flows.renumber_flows(project, {"u01": "u02", "u02": "u01"})`. Two things learned
+doing it by hand that the module now encodes: a pure SWAP needs **no `.prj` edit** (the
+set of `Unsteady File=` ids is unchanged — only the plan refs and the rasmap token
+move), and this model's steady/unsteady mix put `.O05/.O06/.r05/.r06` on disk alongside
+`.b05/.bco05` for plans that are now unsteady (stale artifacts from when they were
+steady), which the `os.path.isfile` filter in `_family_names` handles correctly — the
+session-19 design paying off. The user completed the job manually before `flows.py`
+landed, so Pattison now reads p01/p02 steady on f01, p03/p04 1D-unsteady on u01
+(Design_Flow_1D), p05/p06 2D on u02 (Design_Flow_2D), `.prj` sorted.
+
 ### Session 19 changes (2026-08-07): steady flow made first-class in project ops
 
 Driven by a real request — delete steady plans p01/p02 from `Model_Pattison` (a mixed
@@ -1794,17 +1930,15 @@ part, not a case worth adding branching for.
 
 ## Future Features — Not Yet Implemented
 
-**`docs/TODO.md` is the authoritative open-items list.** As of 2026-07-28 it has
-four OPEN items: (D) a `flows` subsystem — flow-file ops covering BOTH steady
-(`.f##`) and unsteady (`.u##`), per the 2026-08-07 rescope (the missing
-third file-type subsystem alongside `plans`/`geoms`; top priority, a demonstrated
-recurring need); (A) writer / `merge.py` support for Blocked Obstructions
+**`docs/TODO.md` is the authoritative open-items list.** As of 2026-08-10 it has
+three OPEN items: (A) writer / `merge.py` support for Blocked Obstructions
 (`#Block Obstruct=`) and `Levee=` — described just below, currently parse-only;
 (C) a `project.rasmap` bound-accessor for ergonomics (thin sugar over the
 stateless rasmap functions — no XML model); and (B) dry-run/preview on the
 mutating ops (LOW PRIORITY). Everything else once listed there (the session-13
 plan-file-op gaps, the session-17 geometry subsystem / rasmap cleanup / health
-inspector) is DONE. Ask the user before implementing.
+inspector, and item D — the `flows` subsystem, built session 20) is DONE. Ask the
+user before implementing.
 
 ### `#Block Obstruct=` (Blocked Obstructions) — now PARSED (read-only)
 

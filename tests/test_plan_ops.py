@@ -24,6 +24,7 @@ from hack_ras.project.plans import (
     insert_plan_gap,
     renumber_plan,
     renumber_plans,
+    reorder_plans,
 )
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 
@@ -518,6 +519,63 @@ class TestCompactPlans(RichProjectBase):
 
     def test_compact_noop_when_contiguous(self):
         self.assertEqual(compact_plans(self.project), {})
+
+
+class TestReorderPlans(RichProjectBase):
+    def test_reorder_swaps_plans_and_follows_artifacts(self):
+        # p01, p03, p02 -> the p02/p03 pair trades places (a 2-cycle)
+        mapping = reorder_plans(self.project, ["p01", "p03", "p02"])
+        self.assertEqual(mapping, {"p03": "p02", "p02": "p03"})
+        self.assertEqual(self.project.model.plan_file_ids,
+                         ["p01", "p03", "p02"])
+        self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p02")))
+        self.assertIn("Plan Title=Bravo", _read(self.path("Mini.p03")))
+        # Bravo's plan-keyed artifacts and its restart file moved with it
+        for name in ("Mini.p03.hdf", "Mini.b03", "Mini.bco03", "Mini.ic.o03",
+                     "Mini.p03.02JAN2025 2400.rst"):
+            self.assertTrue(os.path.isfile(self.path(name)), name)
+        # ...and the .u file's restart reference was repointed
+        self.assertIn("Restart Filename=Mini.p03.02JAN2025 2400.rst",
+                      _read(self.path("Mini.u02")))
+        # Current Plan was p03 (Charlie), which now lives at p02
+        self.assertIn("Current Plan=p02", _read(self.prj_path))
+
+    def test_reorder_accepts_loose_ids(self):
+        self.assertEqual(reorder_plans(self.project, ["1", "P3", "p2"]),
+                         {"p03": "p02", "p02": "p03"})
+
+    def test_reorder_noop_when_already_in_order(self):
+        self.assertEqual(reorder_plans(self.project, ["p01", "p02", "p03"]), {})
+
+    def test_reorder_fills_gaps_like_compact(self):
+        delete_plan(self.project, "p02")           # p01, p03 remain
+        mapping = reorder_plans(self.project, ["p03", "p01"])
+        self.assertEqual(mapping, {"p03": "p01", "p01": "p02"})
+        # values are replaced in the .prj lines' existing positions, so the
+        # entry order needs sort_prj_entries — the IDs are what matter here
+        self.assertEqual(sorted(self.project.model.plan_file_ids),
+                         ["p01", "p02"])
+        self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p01")))
+        self.assertIn("Plan Title=Alpha", _read(self.path("Mini.p02")))
+
+    def test_incomplete_order_refuses_and_touches_nothing(self):
+        with self.assertRaises(ValueError) as ctx:
+            reorder_plans(self.project, ["p01", "p03"])
+        self.assertIn("p02", str(ctx.exception))
+        self.assertIn("Plan Title=Bravo", _read(self.path("Mini.p02")))
+        self.assertEqual(self.project.model.plan_file_ids,
+                         ["p01", "p02", "p03"])
+
+    def test_unknown_id_refuses(self):
+        with self.assertRaises(ValueError):
+            reorder_plans(self.project, ["p01", "p02", "p03", "p09"])
+        self.assertEqual(self.project.model.plan_file_ids,
+                         ["p01", "p02", "p03"])
+
+    def test_duplicate_id_refuses(self):
+        with self.assertRaises(ValueError):
+            reorder_plans(self.project, ["p01", "p02", "p02"])
+        self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p03")))
 
 
 class TestDeletePlansBulk(RichProjectBase):

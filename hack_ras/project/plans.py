@@ -1,6 +1,6 @@
 # hack_ras/project/plans.py
 """Plan file operations: renumber (single or bulk), insert a numbering gap,
-clone with edits, delete with outputs.
+compact or reorder the numbering, clone with edits, delete with outputs.
 
 All functions take a RasProject and edit files in place. Plan files and the
 .prj are treated as raw lines (lossless: untouched lines are preserved
@@ -462,6 +462,55 @@ def compact_plans(project: RasProject) -> dict:
     sorted_ids = sorted(project.model.plan_file_ids, key=_plan_num)
     mapping = {}
     for i, pid in enumerate(sorted_ids, start=1):
+        target = f"p{i:02d}"
+        if pid != target:
+            mapping[pid] = target
+    if mapping:
+        renumber_plans(project, mapping)
+    return mapping
+
+
+def reorder_plans(project: RasProject, order) -> dict:
+    """Renumber the listed plans into the given order as a contiguous p01..pN.
+
+    `order` is the COMPLETE list of the project's current plan IDs, written in
+    the order you want them to end up: passing
+    ['p01','p02','p05','p06','p03','p04'] moves p05/p06 into the p03/p04 slots
+    and slides the old p03/p04 down to p05/p06. Positions are assigned from the
+    list, so the result is always contiguous — reordering a project with gaps
+    (p01,p03,p06) compacts it as well, exactly like compact_plans.
+
+    The complete list is required on purpose: naming only the plans you want to
+    move would make the outcome depend on plans you never mentioned. Every plan
+    listed in the .prj must appear exactly once — a missing, duplicated, or
+    unknown ID raises ValueError before any file is touched, so a partial order
+    cannot silently reshuffle the rest.
+
+    Returns the {old_id: new_id} mapping of what moved (empty if `order` is
+    already the current numbering). The renumbering itself — the plan-keyed
+    file family, the .prj, restart references, the .rasmap — is done by
+    renumber_plans; see there.
+    """
+    ids = [_normalize_plan_id(p) for p in order]
+    dupes = sorted({p for p in ids if ids.count(p) > 1}, key=_plan_num)
+    if dupes:
+        raise ValueError(f"Duplicate plan IDs in order: {dupes}")
+
+    listed = set(project.model.plan_file_ids)
+    unknown = [p for p in ids if p not in listed]
+    if unknown:
+        raise ValueError(
+            f"Plan(s) not listed in {project.base_name}.prj: {unknown}"
+        )
+    missing = sorted(listed - set(ids), key=_plan_num)
+    if missing:
+        raise ValueError(
+            "order must list every plan in the project — missing: "
+            f"{missing}. (Add them in the position you want them to keep.)"
+        )
+
+    mapping = {}
+    for i, pid in enumerate(ids, start=1):
         target = f"p{i:02d}"
         if pid != target:
             mapping[pid] = target

@@ -223,6 +223,45 @@ def renumber_geoms_in_rasmap(
     return count
 
 
+def renumber_flows_in_rasmap(
+    rasmap_path: str, base_name: str, idmap: dict
+) -> int:
+    """Remap every `<base_name>.u##` token in the .rasmap per idmap
+    ({'u01': 'u02', ...}), in ONE pass. This is the `<EventConditions>`
+    RASEventConditions layer's `Filename` (`Base.u##.hdf`).
+
+    Steady flow IDs in idmap are simply never matched — steady flow has no
+    .rasmap presence at all (no `.f##` token appears in any RAS-authored
+    rasmap). The RASEventConditions layers nested INSIDE a `<Results>` block
+    name the plan HDF `Base.p##.hdf`, so keying on the `Base.u##` token never
+    touches them — the same rule that protects plan/geometry sub-layers, and it
+    matters: in a real 6-plan model, 4 of the 5 RASEventConditions layers were
+    results-nested.
+
+    Tokens whose flow ID is not in idmap are untouched; everything else is
+    byte-for-byte. Returns the number of tokens replaced.
+    """
+    with open(rasmap_path, "r", encoding="latin-1", newline="") as f:
+        text = f.read()
+
+    pattern = re.compile(re.escape(base_name) + r"\.u(\d{2})(?!\d)")
+    count = 0
+
+    def _sub(match: re.Match) -> str:
+        nonlocal count
+        fid = f"u{match.group(1)}"
+        if fid in idmap:
+            count += 1
+            return f"{base_name}.{idmap[fid]}"
+        return match.group(0)
+
+    new_text = pattern.sub(_sub, text)
+    if count:
+        with open(rasmap_path, "w", encoding="latin-1", newline="") as f:
+            f.write(new_text)
+    return count
+
+
 def remove_plans_from_rasmap(
     rasmap_path: str, base_name: str, plan_ids
 ) -> dict:

@@ -7,19 +7,47 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Four items are open. In rough priority:
+Three items are open. In rough priority:
 
-1. **`flows` subsystem** (unsteady-flow file operations) — §D below. **Demonstrated
-   recurring need** (two manual flow jobs already: adding u12-u17, then
-   deleting/renumbering them).
-2. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
-3. **`project.rasmap` accessor** (small ergonomics) — §C below.
-4. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
+2. **`project.rasmap` accessor** (small ergonomics) — §C below.
+3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+
+(§D, the `flows` subsystem, was BUILT on 2026-08-10 — see below.)
 
 Everything else once listed here is DONE — see the "DONE" section below and the
 `ai_context.md` session notes.
 
-### D. `flows` subsystem — unsteady-flow file operations
+### D. `flows` subsystem — DONE 2026-08-10 (`project/flows.py`)
+
+**Built as specified below, with four design decisions confirmed with the user
+first — all of which came from the fact that steady and unsteady numbering are
+INDEPENDENT namespaces (f01 and u01 coexist), which plans/geoms never face:**
+
+1. Every ID must carry its kind prefix; a bare number raises `ValueError` rather
+   than guessing a namespace. Applies to mappings, single IDs, and id-specs
+   (`'u09-u11'`, and both endpoints of a range must carry it).
+2. Cross-kind moves (`u01` -> `f01`) refused — a format conversion, not a rename.
+   Cross-kind ranges and mixed-kind `reorder_flows` orders likewise.
+3. `compact_flows(project, kinds=("unsteady","steady"))` — both by default, but
+   either kind can be compacted without disturbing the other (the user asked for
+   this explicitly). Both kinds' mappings still go through ONE `renumber_flows`
+   call, so validation precedes any file change.
+4. `reorder_flows(project, order)` included, mirroring `plans.reorder_plans`:
+   complete-list requirement, kind inferred from the (homogeneous) IDs.
+
+Also added `renumber_flows_in_rasmap` to `project/rasmap.py`. Tests:
+`tests/test_flow_ops.py` (47, synthetic mixed-kind) +
+`tests/test_flow_ops_fixture.py` (8, real models — 2D-culvert for unsteady incl.
+its genuine stale u03 prj entry + stale EC layer, Wisconsin Floodway for steady).
+Baseline 371 -> 426. See the Flow File Operations section of `ai_context.md`.
+
+One correction to the original spec below: it said a steady `.f##.hdf` should be
+renamed "if present". No such file exists in any local model, and RAS does not
+write one — the family lists both candidates and filters by `os.path.isfile`, so
+this is handled, but do not expect a steady sidecar.
+
+The original specification follows, for the record.
 
 The missing third file-type subsystem. hack_ras has `project/plans.py` and
 `project/geoms.py` but **nothing for flow files** — so flow
