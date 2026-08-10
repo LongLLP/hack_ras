@@ -10,7 +10,9 @@ import os
 import tempfile
 import unittest
 
+from hack_ras import RasProject
 from hack_ras.project.rasmap import (
+    rasmap_layer_refs,
     remove_flows_from_rasmap,
     remove_geoms_from_rasmap,
     remove_plans_from_rasmap,
@@ -271,3 +273,99 @@ class SortRasmapLayersTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RasMapAccessorTest(unittest.TestCase):
+    """The bound accessor (TODO item C) — binds (path, base_name) and forwards.
+
+    Each test pairs the accessor call with the equivalent free-function call, so
+    the sugar cannot drift from the implementation it wraps.
+    """
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.folder = self._tmp.name
+        self.addCleanup(self._tmp.cleanup)
+        self.prj_path = os.path.join(self.folder, "Mini.prj")
+        with open(self.prj_path, "w", encoding="latin-1", newline="") as f:
+            f.write("Proj Title=Mini\r\nPlan File=p01\r\nPlan File=p02\r\n")
+        self.rasmap_path = os.path.join(self.folder, "Mini.rasmap")
+        with open(self.rasmap_path, "w", encoding="latin-1", newline="") as f:
+            f.write("\r\n".join([
+                "<RASMapper>",
+                "  <Geometries>",
+                '    <Layer Name="G1" Type="RASGeometry" Filename=".\\Mini.g01.hdf" />',
+                "  </Geometries>",
+                "  <EventConditions>",
+                '    <Layer Name="U1" Type="RASEventConditions" Filename=".\\Mini.u01.hdf" />',
+                "  </EventConditions>",
+                "  <Plans>",
+                '    <Layer Name="Two" Type="RASPlan" Filename=".\\Mini.p02" GeometryHDF=".\\Mini.g01.hdf" />',
+                '    <Layer Name="One" Type="RASPlan" Filename=".\\Mini.p01" GeometryHDF=".\\Mini.g01.hdf" />',
+                "  </Plans>",
+                "  <Results>",
+                '    <Layer Name="One" Type="RASResults" Filename=".\\Mini.p01.hdf" />',
+                "  </Results>",
+                "</RASMapper>",
+            ]) + "\r\n")
+        self.project = RasProject(self.prj_path)
+
+    def test_path_and_exists(self):
+        self.assertEqual(self.project.rasmap_path, self.rasmap_path)
+        self.assertEqual(self.project.rasmap.path, self.rasmap_path)
+        self.assertEqual(self.project.rasmap.base_name, "Mini")
+        self.assertTrue(self.project.rasmap.exists())
+        self.assertIn("Mini.rasmap", repr(self.project.rasmap))
+
+    def test_exists_is_false_without_the_file(self):
+        os.remove(self.rasmap_path)
+        # the accessor is still available — it holds no file content
+        self.assertFalse(self.project.rasmap.exists())
+        self.assertEqual(self.project.rasmap_path, self.rasmap_path)
+
+    def test_accessor_is_cached_but_holds_no_state(self):
+        self.assertIs(self.project.rasmap, self.project.rasmap)
+
+    def test_queries_match_the_free_functions(self):
+        rm = self.project.rasmap
+        self.assertEqual(rm.result_plan_ids(),
+                         result_plan_ids(self.rasmap_path, "Mini"))
+        self.assertEqual(rm.result_plan_ids(), {"p01"})
+        self.assertEqual(rm.layer_refs(), rasmap_layer_refs(self.rasmap_path))
+        self.assertEqual(rm.source_data_folders(),
+                         source_data_folders(self.rasmap_path))
+
+    def test_renumber_methods_forward_per_file_type(self):
+        rm = self.project.rasmap
+        self.assertEqual(rm.renumber_plans({"p01": "p03"}), 2)   # .p01 + .p01.hdf
+        self.assertEqual(rm.renumber_geoms({"g01": "g05"}), 3)   # 1 + 2 GeometryHDF
+        self.assertEqual(rm.renumber_flows({"u01": "u09"}), 1)
+        text = open(self.rasmap_path, encoding="latin-1").read()
+        for token in ("Mini.p03", "Mini.g05.hdf", "Mini.u09.hdf"):
+            self.assertIn(token, text)
+        for token in ("Mini.p01", "Mini.g01.hdf", "Mini.u01.hdf"):
+            self.assertNotIn(token, text)
+
+    def test_sort_forwards_and_accepts_sections(self):
+        # the .rasmap lists the plan layers p02, p01 — sorting swaps them
+        got = self.project.rasmap.sort()
+        self.assertEqual(got["plans"], ["p01", "p02"])
+        self.assertEqual(got["results"], ["p01"])
+        self.assertEqual(self.project.rasmap.sort(sections=("Plans",)),
+                         {"plans": ["p01", "p02"]})
+
+    def test_remove_methods_forward_per_file_type(self):
+        rm = self.project.rasmap
+        self.assertEqual(rm.remove_geoms(["g01"]), ["g01"])
+        self.assertEqual(rm.remove_flows(["u01"]), ["u01"])
+        removed = rm.remove_plans(["p01"])
+        self.assertEqual(removed["plans"], ["p01"])
+        self.assertEqual(removed["results"], ["p01"])
+        text = open(self.rasmap_path, encoding="latin-1").read()
+        self.assertNotIn('Type="RASGeometry"', text)
+        self.assertNotIn("Mini.u01.hdf", text)
+        self.assertNotIn("Mini.p01", text)
+        self.assertIn("Mini.p02", text)      # the survivor is untouched
+        # ...including its GeometryHDF=, which remove_geoms deliberately leaves
+        # dangling (removing a geometry does not repoint the plans using it)
+        self.assertIn('GeometryHDF=".\\Mini.g01.hdf"', text)

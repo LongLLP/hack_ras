@@ -7,13 +7,13 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Three items are open. In rough priority:
+Two items are open. In rough priority:
 
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
-2. **`project.rasmap` accessor** (small ergonomics) — §C below.
-3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+2. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
 
-(§D, the `flows` subsystem, was BUILT on 2026-08-10 — see below.)
+(§D, the `flows` subsystem, and §C, the `project.rasmap` accessor, were both
+BUILT on 2026-08-10 — see below.)
 
 Everything else once listed here is DONE — see the "DONE" section below and the
 `ai_context.md` session notes.
@@ -116,7 +116,26 @@ triplet layout as IFAs (`normal` flag 0 with left/right + 0.0-edge sentinels /
 follower line (obstructions are always solid). Fuller detail lives in the
 `ai_context.md` "Future Features — Not Yet Implemented" section.
 
-### C. `project.rasmap` accessor (ergonomics)
+### C. `project.rasmap` accessor — DONE 2026-08-10
+
+**Built as specified below.** `RasMap` lives in `project/rasmap.py` (next to the
+functions it wraps) and takes `(rasmap_path, base_name)`, so it has no
+`RasProject` dependency and creates no import cycle — `rasmap.py` imports
+nothing from the package. `RasProject` gained `rasmap_path` and `rasmap`, both
+`cached_property` (safe: the accessor holds no parsed state, so it cannot go
+stale; only the two bound strings are cached, and they are fixed for the
+project's lifetime).
+
+Two judgment calls beyond the spec below, both minor: `renumber_flows` was added
+to the method list (the spec predates `flows.py`), and `exists` is a method
+rather than a property, following `pathlib.Path.exists()`. The mutating methods
+raise from the underlying `open()` when the .rasmap is absent — `exists()` is the
+guard. +7 tests in `tests/test_rasmap.py`, each pairing the accessor call with
+the equivalent free-function call so the sugar cannot drift. Verified read-only
+against the live Pattison model. Baseline 433 -> 440. See the ".rasmap Bound
+Accessor" section of `ai_context.md`.
+
+The original specification follows, for the record.
 
 The rasmap functions in `project/rasmap.py` are stateless free functions taking
 `(rasmap_path, base_name, …)`, so callers must build the path and pass base_name

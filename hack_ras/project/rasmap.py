@@ -26,6 +26,7 @@ target, and keep the original encoding and line endings.
 """
 from __future__ import annotations
 
+import os
 import re
 
 # A .rasmap layer opening tag and its Type / Filename attributes.
@@ -533,3 +534,93 @@ def sort_rasmap_layers(
         with open(rasmap_path, "w", encoding="latin-1", newline="") as f:
             f.write(text)
     return result
+
+
+# ---------------------------
+# Bound accessor
+# ---------------------------
+
+class RasMap:
+    """Thin bound accessor for one project's .rasmap — pure ergonomics.
+
+    Every function in this module is stateless and takes `(rasmap_path,
+    base_name, ...)`, which makes a direct call verbose:
+
+        sort_rasmap_layers(os.path.join(p.folder, p.base_name + ".rasmap"),
+                           p.base_name)
+
+    This class binds those two arguments and forwards, so it reads:
+
+        p.rasmap.sort()
+        p.rasmap.remove_plans(["p16", "p17"])
+        p.rasmap.result_plan_ids()
+
+    Reach it via `RasProject.rasmap`; constructing one directly is fine too but
+    the project already knows both arguments.
+
+    Deliberately THIN. It does NOT parse the .rasmap XML into a model — RAS
+    Mapper owns that file, and the narrow token/section editing in this module
+    is what makes hand-editing it safe. The free functions remain the
+    implementation (delete_plan / renumber_* call them internally); this is
+    sugar over them, holds no parsed state, and caches nothing, so it can never
+    go stale against the file. Mutating methods raise from the underlying open()
+    if the .rasmap is absent — guard with exists() when that is possible.
+    """
+
+    def __init__(self, rasmap_path: str, base_name: str) -> None:
+        self.path = rasmap_path
+        self.base_name = base_name
+
+    def __repr__(self) -> str:
+        return f"RasMap({self.path!r}, {self.base_name!r})"
+
+    def exists(self) -> bool:
+        """True if the .rasmap file is present (many projects have none)."""
+        return os.path.isfile(self.path)
+
+    # -- read-only queries --------------------------------------------------
+
+    def layer_refs(self) -> list:
+        """(section, type, filename) for every layer — see rasmap_layer_refs."""
+        return rasmap_layer_refs(self.path)
+
+    def result_plan_ids(self) -> set:
+        """Plan IDs that have a RASResults layer — see result_plan_ids."""
+        return result_plan_ids(self.path, self.base_name)
+
+    def source_data_folders(self) -> set:
+        """Subfolders referenced by non-result layers — see
+        source_data_folders."""
+        return source_data_folders(self.path)
+
+    # -- mutations ----------------------------------------------------------
+
+    def sort(self, sections: tuple = ("Plans", "Results")) -> dict:
+        """Re-sort plan-keyed layers by number — see sort_rasmap_layers."""
+        return sort_rasmap_layers(self.path, self.base_name, sections)
+
+    def renumber_plans(self, idmap: dict) -> int:
+        """Remap Base.p## tokens — see renumber_plans_in_rasmap."""
+        return renumber_plans_in_rasmap(self.path, self.base_name, idmap)
+
+    def renumber_geoms(self, idmap: dict) -> int:
+        """Remap Base.g## tokens — see renumber_geoms_in_rasmap."""
+        return renumber_geoms_in_rasmap(self.path, self.base_name, idmap)
+
+    def renumber_flows(self, idmap: dict) -> int:
+        """Remap Base.u## tokens — see renumber_flows_in_rasmap."""
+        return renumber_flows_in_rasmap(self.path, self.base_name, idmap)
+
+    def remove_plans(self, plan_ids) -> dict:
+        """Delete RASPlan / RASResults subtrees — see
+        remove_plans_from_rasmap."""
+        return remove_plans_from_rasmap(self.path, self.base_name, plan_ids)
+
+    def remove_geoms(self, geom_ids) -> list:
+        """Delete <Geometries> RASGeometry layers — see
+        remove_geoms_from_rasmap."""
+        return remove_geoms_from_rasmap(self.path, self.base_name, geom_ids)
+
+    def remove_flows(self, flow_ids) -> list:
+        """Delete <EventConditions> layers — see remove_flows_from_rasmap."""
+        return remove_flows_from_rasmap(self.path, self.base_name, flow_ids)

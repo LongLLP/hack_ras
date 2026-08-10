@@ -150,6 +150,8 @@ project.plan_hdfs(['p14','p15'])   # filtered subset
 project.plan_hdfs(['01', 'p03', '14-16'])  # flexible spec (see expand_id_spec)
 project.crs_prj()     # ESRI .prj CRS file (via RAS Mapper or folder search)
 project.crs_wkt()     # ...and its contents, as WKT ready for geopandas/pyproj
+project.rasmap_path   # <folder>/<base_name>.rasmap (existence NOT checked)
+project.rasmap        # bound .rasmap accessor — see below
 project.family()      # {'geom': [...], 'plan': [...], ...} — filesystem-based
 project.available_ids()           # same, as ID strings
 ```
@@ -237,9 +239,10 @@ delete_plan(project, "p08",              # deletes plan + outputs; optional unus
 clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
            line_edits={"Breach Start=": "Breach Start=False,,01JAN2025,1214,False,,,0"},
            new_id="p25")                 # new_id optional — defaults to next free number
-sort_rasmap_layers(project.folder + r"\Model.rasmap", project.base_name)
-                                         # optional: re-sort .rasmap RASPlan/RASResults
+project.rasmap.sort()                    # optional: re-sort .rasmap RASPlan/RASResults
                                          #   layers into ascending plan-number order
+                                         #   (bound accessor — see below; the free
+                                         #   sort_rasmap_layers(path, base) still works)
 ```
 
 Renumbering/deleting covers the whole plan-keyed file family — `.p##`, `.p##.hdf`,
@@ -483,6 +486,46 @@ in each namespace) and `tests/test_flow_ops_fixture.py` (8, real models — the
 2D-culvert model for unsteady incl. its genuine stale `u03` prj entry + stale EC
 layer, and Wisconsin Floodway for steady, where `f01` is shared by both plans and
 there is no `.rasmap` at all).
+
+## `.rasmap` Bound Accessor — `RasProject.rasmap` (`project/rasmap.py`)
+
+Everything in `project/rasmap.py` is a stateless free function taking
+`(rasmap_path, base_name, ...)`, which made every call site rebuild the path and
+repeat the base name. `RasProject` now exposes `rasmap_path` and `rasmap` — the
+latter a thin `RasMap` bound to those two values that forwards to the same
+functions:
+
+```python
+project.rasmap.exists()            # many projects have no .rasmap at all
+project.rasmap.sort()                          # sort_rasmap_layers
+project.rasmap.sort(sections=("Plans",))
+project.rasmap.renumber_plans({"p02": "p06"})  # renumber_*_in_rasmap
+project.rasmap.renumber_geoms({"g03": "g02"})
+project.rasmap.renumber_flows({"u01": "u02"})
+project.rasmap.remove_plans(["p16", "p17"])    # remove_*_from_rasmap
+project.rasmap.remove_geoms(["g04"])
+project.rasmap.remove_flows(["u12"])
+project.rasmap.layer_refs()                    # read-only queries
+project.rasmap.result_plan_ids()
+project.rasmap.source_data_folders()
+```
+
+**Deliberately thin, and this is the design constraint, not a shortcut.** It binds
+two arguments and forwards — it does NOT parse the `.rasmap` XML into a model. RAS
+Mapper owns that file; the narrow token/section editing in this module is exactly
+what makes hand-editing it safe, and a parsed model would invite whole-file
+rewrites. Because it holds no parsed state and caches no file content, it cannot
+go stale against the file; the accessor itself is a `cached_property` only because
+`(path, base_name)` are fixed for the project's lifetime. The free functions remain
+the implementation and stay public — `delete_plan` / `renumber_plans` / `geoms` /
+`flows` call them internally and were not changed.
+
+`exists()` is a method (pathlib precedent), and the mutating methods raise from the
+underlying `open()` if the file is absent — guard with `exists()` when a project
+may have no `.rasmap`. `renumber_flows` was added to the accessor beyond the
+original TODO list, which predated `flows.py`. Tests: 7 in `tests/test_rasmap.py`,
+each pairing the accessor call with the equivalent free-function call so the sugar
+cannot drift from what it wraps.
 
 ## Project Health / Status Inspector (`hack_ras/project/health.py`)
 
@@ -1239,7 +1282,12 @@ throughout — no behavior change to existing functions.
   geometry was the only subsystem without a reorder (plans got one first, flows got
   one by decision 4, geoms was never in either request's scope). Identical in shape
   to `reorder_plans`; +7 tests. All three subsystems now expose the same
-  insert-gap / compact / reorder trio. Baseline 362 -> **433**.
+  insert-gap / compact / reorder trio.
+- **`RasProject.rasmap_path` + `RasProject.rasmap` — TODO item C, now CLOSED.** The
+  bound `.rasmap` accessor; see its section above. `RasMap` lives in
+  `project/rasmap.py` next to the functions it wraps and takes `(path, base_name)`,
+  so it has no `RasProject` dependency and creates no import cycle (`rasmap.py`
+  imports nothing from the package). +7 tests. Baseline 362 -> **440**.
 
 The Pattison job shaped all three. Its two asks were a plan REORDER (a 4-way
 permutation, `{p05:p03, p06:p04, p03:p05, p04:p06}` — the motive for `reorder_plans`)
@@ -1944,13 +1992,12 @@ part, not a case worth adding branching for.
 ## Future Features — Not Yet Implemented
 
 **`docs/TODO.md` is the authoritative open-items list.** As of 2026-08-10 it has
-three OPEN items: (A) writer / `merge.py` support for Blocked Obstructions
+two OPEN items: (A) writer / `merge.py` support for Blocked Obstructions
 (`#Block Obstruct=`) and `Levee=` — described just below, currently parse-only;
-(C) a `project.rasmap` bound-accessor for ergonomics (thin sugar over the
-stateless rasmap functions — no XML model); and (B) dry-run/preview on the
-mutating ops (LOW PRIORITY). Everything else once listed there (the session-13
-plan-file-op gaps, the session-17 geometry subsystem / rasmap cleanup / health
-inspector, and item D — the `flows` subsystem, built session 20) is DONE. Ask the
+and (B) dry-run/preview on the mutating ops (LOW PRIORITY). Everything else once
+listed there is DONE: the session-13 plan-file-op gaps, the session-17 geometry
+subsystem / rasmap cleanup / health inspector, and — both in session 20 — item D
+(the `flows` subsystem) and item C (the `project.rasmap` bound accessor). Ask the
 user before implementing.
 
 ### `#Block Obstruct=` (Blocked Obstructions) — now PARSED (read-only)

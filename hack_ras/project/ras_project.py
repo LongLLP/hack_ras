@@ -17,6 +17,7 @@ from hack_ras.resolve import (
 )
 from hack_ras.project.model import ProjectModel
 from hack_ras.project.parser import parse_project_file
+from hack_ras.project.rasmap import RasMap
 
 
 class RasProject:
@@ -63,6 +64,24 @@ class RasProject:
     def title(self) -> Optional[str]:
         """Project title from the .prj file."""
         return self.model.title
+
+    @cached_property
+    def rasmap_path(self) -> str:
+        """Absolute path of this project's .rasmap (existence NOT checked —
+        many projects have none; use `self.rasmap.exists()`)."""
+        return os.path.join(self.folder, f"{self.base_name}.rasmap")
+
+    @cached_property
+    def rasmap(self) -> RasMap:
+        """Bound accessor for this project's .rasmap: `project.rasmap.sort()`,
+        `.remove_plans([...])`, `.result_plan_ids()`, and so on.
+
+        Thin sugar over the stateless functions in project/rasmap.py — it binds
+        (path, base_name) and forwards. It parses nothing and caches no file
+        content, so it cannot go stale; caching the accessor itself is safe
+        because both bound values are fixed for the project's lifetime.
+        """
+        return RasMap(self.rasmap_path, self.base_name)
 
     # ------------------------------------------------------------------
     # File discovery
