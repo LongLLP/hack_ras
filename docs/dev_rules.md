@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 440 passing tests (plus any added in the current
+All tests must pass. The baseline is 459 passing tests (plus any added in the current
 session). If a new test is added, the new count becomes the baseline.
 
 The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
@@ -26,6 +26,12 @@ organised and how to add new merge test cases.
 - **Lossless roundtrip**: `GeometryFile.raw_lines` must be preserved exactly as read.
   Any parser change that drops or modifies raw lines will break the roundtrip test.
   Parse structured fields on top of raw lines, never instead of them.
+  `utils/lines.py` holds the same line for a read/write cycle: a leading UTF-8 BOM is
+  stripped on read (so line-1 key matches work) and re-attached on write when the
+  destination had one, so rewriting a file in place is byte-identical. **Do not switch
+  `write_lines` to a write-to-temp-then-rename scheme without moving the BOM lookup to
+  the final path** — the temp file has no BOM to find and preservation silently breaks.
+  `tests/test_bom_handling.py` guards this.
 - **Typed exceptions over None**: Functions that resolve files or look up data must raise
   a typed exception (`ValueError`, `GeometryFileNotFound`, etc.) on failure. Never return
   `None` to signal not-found.

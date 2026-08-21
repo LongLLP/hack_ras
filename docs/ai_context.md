@@ -41,7 +41,16 @@ required config key and exits with an error if it is missing.
 - Emphasis on reproducibility and auditability
 - Fail gracefully — do not crash on partial or malformed data; raise explicit exceptions instead
 - **Lossless roundtrip**: `GeometryFile` stores original raw lines; structured fields are
-  parsed on top of the raw lines, not instead of them
+  parsed on top of the raw lines, not instead of them. In `utils/lines.py` the same
+  guarantee holds byte-for-byte through a read/write cycle, including a leading UTF-8
+  BOM: `read_lines` strips one so line-1 key matches work, and `write_lines`
+  re-attaches it when the destination already had one. Files created fresh get no BOM.
+  See the `utils/lines.py` docstring for why, and `tests/test_bom_handling.py`.
+  `GeometryParser` reads with `utf-8-sig` instead, so a BOM never reaches
+  `raw_lines` (where it used to hide `Geom Title=` and make `GeometryWriter` raise
+  `UnicodeEncodeError`); nothing re-attaches it, because every `GeometryWriter` call
+  site writes a NEW file — the shifter, `merge`, and the Mesh_Health snapper all take
+  an output path and never overwrite their source
 - **Typed exceptions over None**: resolution and lookup functions raise typed exceptions
   (`ValueError`, `GeometryFileNotFound`, etc.) rather than returning `None`
 - **`.prj` is authoritative**: the project file is the definitive list of which files belong

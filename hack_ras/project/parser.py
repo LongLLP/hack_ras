@@ -71,5 +71,9 @@ def parse_project_lines(lines: Iterable[str]) -> ProjectModel:
 
 
 def parse_project_file(path: str) -> ProjectModel:
-    with open(path, "r", encoding="utf-8", errors="ignore") as f:
+    # utf-8-sig drops a leading UTF-8 BOM if present (some Windows editors add
+    # one), which would otherwise hide the line-1 'Proj Title=' key. Read-only
+    # parse — the .prj is rewritten through utils/lines.py, which preserves the
+    # BOM — so stripping here costs nothing.
+    with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
         return parse_project_lines(f.readlines())

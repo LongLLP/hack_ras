@@ -6,6 +6,7 @@ Fixture files are synthesized in tmp_path (trivially small key=value content,
 CRLF-terminated like real HEC-RAS files) because these operations mutate the
 project in place.
 """
+import codecs
 import os
 import unittest
 import tempfile
@@ -31,13 +32,19 @@ from hack_ras.project.sync import sort_prj_entries, sync_prj
 CRLF = "\r\n"
 
 
-def _write(path, lines):
-    with open(path, "w", encoding="ascii", newline="") as f:
+def _write(path, lines, bom=False):
+    # bom=True writes a leading UTF-8 BOM, as some Windows editors do. One
+    # fixture plan is written that way (see PlanOpsBase.setUp) so every plan
+    # op in this module runs with a BOM'd file present.
+    enc = "utf-8-sig" if bom else "ascii"
+    with open(path, "w", encoding=enc, newline="") as f:
         f.write(CRLF.join(lines) + CRLF)
 
 
 def _read(path):
-    with open(path, "r", encoding="ascii", newline="") as f:
+    # utf-8-sig reads BOM'd and BOM-less files alike, stripping the BOM so
+    # assertions on content do not have to care which fixture they got.
+    with open(path, "r", encoding="utf-8-sig", newline="") as f:
         return f.read()
 
 
@@ -70,7 +77,13 @@ class PlanOpsBase(unittest.TestCase):
             "Plan File=p03",
             "DSS File=dss",
         ])
-        _write(os.path.join(self.folder, "Mini.p01"), _plan_lines("Breach 1212", "1212"))
+        # p01 carries a UTF-8 BOM on purpose: it makes every plan op in this
+        # module (renumber, gap, clone, delete, reorder, compact, sync) run
+        # against a BOM'd file, which is how a plan saved by some Windows
+        # editors actually looks. p01 rather than p02/p03 so that
+        # test_untouched_lines_are_byte_identical still inspects a clean .prj.
+        _write(os.path.join(self.folder, "Mini.p01"),
+               _plan_lines("Breach 1212", "1212"), bom=True)
         _write(os.path.join(self.folder, "Mini.p02"), _plan_lines("Breach 1211", "1211"))
         _write(os.path.join(self.folder, "Mini.p03"), _plan_lines("Breach 1210", "1210"))
         # results sidecar for p02 only
@@ -80,6 +93,21 @@ class PlanOpsBase(unittest.TestCase):
 
     def path(self, name):
         return os.path.join(self.folder, name)
+
+
+class TestFixtureIntegrity(PlanOpsBase):
+    """Guard the BOM'd fixture itself. Without this, a future edit to _write
+    could quietly stop writing the BOM and every plan op in this module would
+    silently lose its BOM coverage while still passing."""
+
+    def test_p01_fixture_carries_a_utf8_bom(self):
+        with open(self.path("Mini.p01"), "rb") as f:
+            self.assertEqual(f.read(3), codecs.BOM_UTF8)
+
+    def test_the_other_fixture_plans_do_not(self):
+        for name in ("Mini.p02", "Mini.p03"):
+            with open(self.path(name), "rb") as f:
+                self.assertNotEqual(f.read(3), codecs.BOM_UTF8)
 
 
 class TestRenumberPlan(PlanOpsBase):

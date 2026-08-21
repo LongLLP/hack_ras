@@ -14,7 +14,13 @@ class GeometryParser:
     """
 
     def parse_file(self, path: str) -> "GeometryFile":
-            with open(path, "r", encoding="utf-8", errors="ignore") as f:
+            # utf-8-sig drops a leading UTF-8 BOM if present (some Windows
+            # editors add one). Without it the BOM lands in raw_lines as
+            # '﻿', which hides the line-1 'Geom Title=' key and makes
+            # GeometryWriter raise UnicodeEncodeError. Every GeometryWriter
+            # call site writes a NEW file (shifter, merge, Mesh_Health
+            # snapper), so there is no source BOM to preserve here.
+            with open(path, "r", encoding="utf-8-sig", errors="ignore") as f:
                 return self.parse(f.readlines())
 
     def parse(self, lines: List[str]) -> GeometryFile:
