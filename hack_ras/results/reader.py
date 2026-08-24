@@ -84,9 +84,73 @@ def list_areas(hdf_path: str) -> list[str]:
 # Cell geometry
 # ---------------------------
 
+# Datasets needed to reconstruct a cell outline that follows the 2D flow area
+# perimeter. Present in RAS 7.0; a plan HDF missing any of them falls back to the
+# face-point-only outline.
+_PERIM_POLY_KEYS = (
+    "Cells Face and Orientation Info",
+    "Cells Face and Orientation Values",
+    "Faces FacePoint Indexes",
+    "Faces Perimeter Info",
+    "Faces Perimeter Values",
+)
+
+
+def _facepoint_polygons(fp_xy, fp_idx):
+    """Cell outlines from face points alone — the pre-7.0 fallback.
+
+    Correct for interior cells and wrong for any boundary cell whose perimeter
+    face bends between its two face points; see _perimeter_polygons.
+    """
+    from shapely.geometry import Polygon
+
+    polys = []
+    for row in fp_idx:
+        idx = row[row >= 0]
+        polys.append(Polygon(fp_xy[idx]) if len(idx) >= 3 else None)
+    return polys
+
+
+def _perimeter_polygons(fp_xy, face_info, face_vals, face_fp, perim_info, perim_vals):
+    """Cell outlines that follow the 2D flow area perimeter exactly.
+
+    Walks each cell's faces in stored order and splices in the intermediate
+    vertices RAS keeps in `Faces Perimeter Values` — the vertices where the mesh
+    boundary bends *between* a face's two end face points, which are therefore
+    absent from `Cells FacePoint Indexes`. Face orientation (the second column of
+    `Cells Face and Orientation Values`) says which way to traverse the face, and
+    the intermediate run is reversed with it.
+    """
+    from shapely.geometry import Polygon
+
+    polys = []
+    for start, count in face_info:
+        if count < 3:
+            polys.append(None)
+            continue
+        ring = []
+        for face, orient in face_vals[start:start + count]:
+            a, b = face_fp[face]
+            if orient < 0:
+                a = b
+            p_start, p_count = perim_info[face]
+            mid = perim_vals[p_start:p_start + p_count]
+            if orient < 0:
+                mid = mid[::-1]
+            ring.append(fp_xy[a])
+            ring.extend(mid)
+        polys.append(Polygon(ring) if len(ring) >= 3 else None)
+    return polys
+
+
 def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
     """
     Read cell geometry for one 2D flow area from a plan HDF5 file.
+
+    Cell outlines follow the 2D flow area perimeter — see _perimeter_polygons for
+    why the face points alone are not enough, and the module docstring of
+    hack_ras/gis/mesh.py for the measurements that settled it. A plan HDF that
+    predates those datasets falls back to face points only.
 
     Perimeter dummy cells (NaN min_elev) are excluded from cell_gdf so they
     never appear as profile output points.
@@ -108,16 +172,36 @@ def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
     from shapely.geometry import Polygon
 
     with h5py.File(hdf_path, "r") as hdf:
-        centers      = hdf[f"{base}/Cells Center Coordinate"][:]
-        fp_xy        = hdf[f"{base}/FacePoints Coordinate"][:]
-        fp_idx       = hdf[f"{base}/Cells FacePoint Indexes"][:]
-        perim        = hdf[f"{base}/Perimeter"][:]
-        min_elev_arr = hdf[f"{base}/Cells Minimum Elevation"][:].astype(np.float64)
+        grp          = hdf[base]
+        centers      = grp["Cells Center Coordinate"][:]
+        fp_xy        = grp["FacePoints Coordinate"][:]
+        fp_idx       = grp["Cells FacePoint Indexes"][:]
+        perim        = grp["Perimeter"][:]
+        min_elev_arr = grp["Cells Minimum Elevation"][:].astype(np.float64)
 
-    polys = []
-    for row in fp_idx:
-        idx = row[row >= 0]
-        polys.append(Polygon(fp_xy[idx]) if len(idx) >= 3 else None)
+        exact = all(k in grp for k in _PERIM_POLY_KEYS)
+        if exact:
+            polys = _perimeter_polygons(
+                fp_xy,
+                grp["Cells Face and Orientation Info"][:],
+                grp["Cells Face and Orientation Values"][:],
+                grp["Faces FacePoint Indexes"][:],
+                grp["Faces Perimeter Info"][:],
+                grp["Faces Perimeter Values"][:],
+            )
+        else:
+            logging.warning(
+                "%s / %s has no perimeter face datasets (pre-RAS-7.0 plan HDF); "
+                "boundary cell outlines will be approximate.", hdf_path, area
+            )
+            polys = _facepoint_polygons(fp_xy, fp_idx)
+
+        if "Cells Surface Area" in grp:
+            plan_areas = grp["Cells Surface Area"][:].astype(np.float64)
+        else:
+            plan_areas = np.array(
+                [p.area if p is not None else np.nan for p in polys], dtype=np.float64
+            )
 
     boundary = Polygon(perim)
 
@@ -134,9 +218,46 @@ def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
         cell_centers=centers,
         min_elevations=min_elev_arr,
         polygons=polys,
+        plan_areas=plan_areas,
         boundary=boundary,
         cell_gdf=cell_gdf,
     )
+
+
+def read_cell_mannings(hdf_path: str, area: str) -> np.ndarray:
+    """
+    Read the cell-center Manning's n value for every cell in one 2D flow area.
+
+    The returned array is indexed by the same local cell index used by
+    read_area_geometry / read_wse, and has the same length as
+    `Cells Center Coordinate` — i.e. it includes the perimeter dummy cells.
+    Callers that need only real cells should filter with
+    `AreaGeometry.cell_gdf["cell_idx"]`.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Absolute path to the .p##.hdf file.
+    area : str
+        Name of the 2D flow area (from list_areas).
+
+    Returns
+    -------
+    np.ndarray, shape (N,), float64
+
+    Raises
+    ------
+    KeyError
+        If the area has no "Cells Center Manning's n" dataset.
+    """
+    key = f"Geometry/2D Flow Areas/{area}/Cells Center Manning's n"
+    with h5py.File(hdf_path, "r") as hdf:
+        if key not in hdf:
+            raise KeyError(
+                f"Dataset not found: {key}\n"
+                f"In HDF file: {hdf_path}"
+            )
+        return hdf[key][:].astype(np.float64)
 
 
 # ---------------------------
@@ -195,9 +316,11 @@ def interpolate_cell_volume(
     wse : float
         Water surface elevation to evaluate at.
     cell_plan_area : float
-        Horizontal footprint area of the cell polygon (ft² or m², matching the
-        model's coordinate units). Used for linear extrapolation above the table
-        maximum. Obtain from AreaGeometry.polygons[cell_idx].area.
+        Horizontal footprint area of the cell (ft² or m², matching the model's
+        coordinate units). Used for linear extrapolation above the table maximum.
+        Obtain from AreaGeometry.plan_areas[cell_idx] — RAS's own per-cell area.
+        Not `polygons[cell_idx].area`: that has to be reconstructed, and on a
+        pre-7.0 plan HDF the reconstruction is approximate for boundary cells.
 
     Returns
     -------

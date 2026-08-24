@@ -13,7 +13,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`) |
 | `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
-| `hack_ras/gis/` | GIS operations — profile line sampling, station computation |
+| `hack_ras/gis/` | GIS operations — profile line sampling, station computation, line-in-polygon measurement, 2D mesh cell attribute export |
 | `hack_ras/utils/` | Shared utilities (logging, line helpers) |
 | `hack_ras/resolve.py` | File discovery and ID resolution (lower-level module) |
 
@@ -753,6 +753,10 @@ Base path: `Geometry/2D Flow Areas/{area_name}/`
 | `Cells FacePoint Indexes` | (N, max_faces) | int32 | Per-cell index into FacePoints; −1 = unused slot |
 | `Perimeter` | (K, 2) | float64 | Outer boundary polygon vertices |
 | `Cells Minimum Elevation` | (N,) | float64 | Minimum terrain elevation; **NaN for perimeter dummy cells** |
+| `Cells Center Manning's n` | (N,) | float32 | The n value the solver used at each cell centre; **populated for perimeter dummy cells too** |
+| `Cells Surface Area` | (N,) | float32 | Horizontal plan area of the cell as RAS sees it. Matches the perimeter-accurate `polygons[i].area` everywhere (to float32). Numerically zero (~1e-12, sometimes negative) for perimeter dummy cells. Surfaced as `AreaGeometry.plan_areas` |
+| `FacePoints Is Perimeter` | (M,) | int32 | `-1` = face point lies on the mesh perimeter, `0` = interior. Note the flag is **−1, not 1** — summing it gives a negative count |
+| `Faces Perimeter Info` / `Faces Perimeter Values` | (F,2) int32 / (P,2) float64 | Extra vertices along a face where the mesh perimeter bends between its two face points |
 | `Cells Volume Elevation Info` | (N, 2) | int32 | Per-cell `[start_idx, count]` into Values array; count=0 for perimeter dummies |
 | `Cells Volume Elevation Values` | (total_pairs, 2) | float32 | Packed `[elevation, volume]` pairs for all cells |
 
@@ -763,6 +767,28 @@ Key facts:
   cell's volume table — confirmed empirically. The two datasets are redundant by design.
 - Cell polygons are reconstructed from `FacePoints Coordinate[Cells FacePoint Indexes[i]]`
   (strip negative padding indices before building the `Polygon`).
+- **Boundary cells need `Faces Perimeter Values`.** A face on the mesh perimeter can
+  bend between its two face points, and the bend vertices are stored in
+  `Faces Perimeter Values`, NOT in `Cells FacePoint Indexes`. Face points alone cut the
+  corner (or bulge past it) on such a cell. Walk `Cells Face and Orientation Values`
+  instead and splice each face's perimeter run in; `reader._perimeter_polygons` does
+  this and `read_area_geometry` uses it.
+- **The perimeter-accurate outline is what RAS computes with** (measured 2026-08-24 over
+  8 meshes / 4 plans / 7486 cells: Hillside p12, p51, p62 and the test fixture p02):
+  - `polygons[i].area / Cells Surface Area[i]` = 1.0 to at worst **5.4e-08** relative,
+    i.e. float32 round-off on that dataset, for every cell, interior and boundary alike.
+  - The cell polygons tile `Perimeter` with **zero** symmetric difference
+    (`unary_union(cells) ^ Polygon(Perimeter)` = 0.0 sq ft).
+  - Face points alone: off by up to **25%** on a single boundary cell, and leaving
+    81.6k sq ft (`Interior`) / 1.18M sq ft (`RockCr`) of the mesh untiled.
+
+  So the detailed perimeter is not cosmetic — it is the geometry the volume tables are
+  integrated over and the continuity equation uses. There is no use case for the
+  face-point-only outline; it survives only as a pre-7.0 fallback.
+- **Verified against RAS 7.0 only.** Every 2D plan HDF on disk (Hillside, PCA, Pattison,
+  DCRA, the fixture) is 7.0 and carries all five perimeter/face datasets. No pre-7.0 2D
+  model was available, so `_facepoint_polygons` (the fallback taken when any of
+  `_PERIM_POLY_KEYS` is absent) is **untested on real data**.
 
 ### Volume-Elevation Table Usage
 ```
@@ -776,8 +802,10 @@ interpolated = np.interp(wse, elev, vol)
   HEC-RAS treats the cell as a flat-bottomed tank once WSE exceeds the highest terrain
   point; volume grows linearly at the cell's horizontal plan area (ft² or m²).
   Do **not** clamp to `vol[-1]` — that underestimates storage in deeply flooded cells.
-- `cell_plan_area` comes from `AreaGeometry.polygons[cell_idx].area` (shapely Polygon area
-  in the model's projected coordinate units).
+- `cell_plan_area` comes from **`AreaGeometry.plan_areas[cell_idx]`** (i.e. RAS's own
+  `Cells Surface Area`), not from `polygons[cell_idx].area`. The two agree to float32
+  round-off on a 7.0 HDF, but `plan_areas` needs no reconstruction and stays correct on
+  the pre-7.0 fallback path. `Scripts/Profile_Lines_Volume/extract_volume.py` uses it.
 
 ### Output Blocks
 The `Results/Unsteady/Output/Output Blocks/` group contains three named output blocks:
@@ -1053,7 +1081,7 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | Class | Fields | Notes |
 |-------|--------|-------|
 | `PlanMetadata` | `geom_id: str`, `plan_title: str` | Parsed from `.p##` text sidecar |
-| `AreaGeometry` | `cell_centers (N,2)`, `min_elevations (N,)`, `polygons list`, `boundary Polygon`, `cell_gdf GeoDataFrame` | Non-dummy cells only in `cell_gdf`; `polygons[i]` is `None` if fewer than 3 face points |
+| `AreaGeometry` | `cell_centers (N,2)`, `min_elevations (N,)`, `polygons list`, `plan_areas (N,)`, `boundary Polygon`, `cell_gdf GeoDataFrame` | Non-dummy cells only in `cell_gdf`; `polygons[i]` is `None` if the cell has fewer than 3 faces. `polygons` follows the 2DFA perimeter (see 2D Flow Area Geometry). `plan_areas` = `Cells Surface Area` — use it for `interpolate_cell_volume`, not `polygons[i].area` |
 | `CellVolumeTable` | `info (N_cells,2) int32`, `values (total_pairs,2) float32` | `info[i] = [start, count]`; `values[:,0]` = elevation, `values[:,1]` = volume |
 | `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64`, `station_start: float`, `station_end: float` | `station` = mean of segment midpoint stations (center); `station_start`/`station_end` = min/max face-point stations bounding the cell's segments; default `nan` |
 | `Sa2dConnection` | `name: str`, `timestamps (T,) str`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
@@ -1076,7 +1104,8 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | Function | Returns | Notes |
 |----------|---------|-------|
 | `read_plan_metadata(hdf_path)` | `PlanMetadata` | Parses `.p##` text sidecar; raises `FileNotFoundError` if missing |
-| `read_area_geometry(hdf_path, area)` | `AreaGeometry` | Reads cell centres, face-point polygons, perimeter, min elevation; excludes perimeter dummy cells from `cell_gdf` |
+| `read_area_geometry(hdf_path, area)` | `AreaGeometry` | Reads cell centres, perimeter-accurate cell polygons, `Cells Surface Area`, boundary, min elevation; excludes perimeter dummy cells from `cell_gdf`. Falls back to face-point-only polygons (with a warning) if the plan HDF lacks any of `_PERIM_POLY_KEYS` |
+| `read_cell_mannings(hdf_path, area)` | `np.ndarray (N,) float64` | Cell-centre Manning's n, indexed like `Cells Center Coordinate` — **includes** perimeter dummy cells; raises `KeyError` if the area has no `Cells Center Manning's n` |
 | `read_cell_volume_table(hdf_path, area)` | `CellVolumeTable` | Raw info + values arrays; use `interpolate_cell_volume` to query |
 | `interpolate_cell_volume(table, cell_idx, wse, cell_plan_area)` | `float` | Returns 0.0 if dry; linearly extrapolates above table max using `cell_plan_area` |
 
@@ -1194,6 +1223,38 @@ For **volume extraction**, only `cell` points are used (boundary/endpoint points
 cell index and therefore no volume table to query). Profile lines that extend beyond the
 mesh boundary are handled gracefully — the out-of-mesh portion is silently ignored.
 
+## 2D Mesh Cell Manning's n Export (`hack_ras/gis/mesh.py`)
+
+```python
+from hack_ras.gis.mesh import cell_mannings_gdf, export_cell_mannings_shp
+
+gdf = cell_mannings_gdf(hdf_path)                       # all areas, no CRS attached
+export_cell_mannings_shp(hdf_path, out_shp)             # CRS auto-resolved from the project
+export_cell_mannings_shp(hdf_path, out_shp, areas=["RockCr"], crs=wkt)
+```
+
+One polygon per real mesh cell, with the n value the solver actually used —
+`Geometry/2D Flow Areas/{area}/Cells Center Manning's n`, not the RAS Mapper raster,
+which is resampled from land cover.
+
+- Fields: `area`, `cell_idx`, `mannings_n` (exactly 10 chars — the shapefile limit; do
+  not lengthen), `geometry`.
+- **One file for all areas, with an `area` field.** Cell indices are local to each area,
+  so two areas both start at cell 0; keeping them together makes that visible and lets
+  one symbology cover the model.
+- Perimeter dummy cells are dropped by reusing `read_area_geometry`'s `cell_gdf` filter
+  rather than re-deriving it. Live counts on Hillside `p12`: 229/2844 ghosts in
+  `Interior`, 191/1262 in `RockCr`.
+- CRS defaults to `resolve.read_crs_wkt(dirname(hdf_path))`. If no projection file is
+  found it logs a warning and writes no `.prj` — the coordinates are model coordinates
+  regardless.
+- Cell outlines follow the 2D flow area perimeter, including boundary cells — the
+  polygons are the geometry RAS computes with (see 2D Flow Area Geometry).
+
+Verified against Hillside `p12` and `p62` (`NKC_Hillside_Levee`, RAS 7.0): 3686 polygons
+each (2615 `Interior` + 1071 `RockCr`), no invalid geometry, `mannings_n` bit-matching
+the HDF at every `cell_idx`, CRS resolved to NAD83 / Missouri West via the `.rasmap`.
+
 ## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
 
 Translates cross-section GIS cut-line polylines along their own alignment while
@@ -1266,6 +1327,37 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Session 21 changes (2026-08-24): 2D mesh cell Manning's n export
+
+Request: get the per-cell Manning's n out of a plan HDF as a polygon shapefile, one
+polygon per mesh cell — RAS Mapper can only show a resampled raster.
+
+- `results/reader.py` — new `read_cell_mannings(hdf_path, area)`; reads
+  `Cells Center Manning's n` as float64, indexed like `Cells Center Coordinate`
+  (dummy cells included).
+- `gis/mesh.py` — new module. `cell_mannings_gdf()` joins that array onto the cell
+  polygons from `read_area_geometry`; `export_cell_mannings_shp()` adds CRS resolution
+  and writes the file. See the section above for the field/layout decisions.
+- `tests/test_cell_mannings.py` — 13 tests on the `Model.p02.hdf` fixture.
+- **Cell polygons made perimeter-accurate** (same session, after the user asked whether
+  RAS actually computes with the detailed perimeter). Validating the export against
+  `Cells Surface Area` had shown boundary cells reconstructing 0.79–1.25×; the question
+  was whether RAS's own computational area follows the face points or the perimeter.
+  It follows the perimeter, decisively — see the two bullets under 2D Flow Area Geometry
+  for the measurements. `read_area_geometry` now walks
+  `Cells Face and Orientation Values` and splices in `Faces Perimeter Values`
+  (`reader._perimeter_polygons`), with `_facepoint_polygons` kept as a pre-7.0 fallback.
+  Interior cells are unchanged; only boundary cells move. Cost: 2.1× the polygon build
+  (50 ms vs 24 ms for 2844 cells; ~1.7 s per 100k cells).
+- `AreaGeometry.plan_areas` added (from `Cells Surface Area`) and made the recommended
+  `cell_plan_area` source for `interpolate_cell_volume`;
+  `Scripts/Profile_Lines_Volume/extract_volume.py` switched over from
+  `polygons[i].area`. This shifts boundary-cell volumes slightly — accepted knowingly
+  as strictly more correct.
+- `tests/test_area_geometry.py` — 5 tests pinning polygon area against
+  `Cells Surface Area` and the zero-symmetric-difference tiling. Mutation-checked:
+  forcing the fallback path fails 3 of the 5. Baseline 459 → **477 passing**.
 
 ### Session 20 changes (2026-08-10): module re-exports, `reorder_plans`, `flows` subsystem
 

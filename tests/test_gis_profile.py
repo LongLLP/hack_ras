@@ -35,6 +35,9 @@ def _make_area(cell_centers, polys, boundary):
         cell_centers=np.array(cell_centers, dtype=float),
         min_elevations=min_elevations,
         polygons=polys,
+        plan_areas=np.array(
+            [p.area if p is not None else np.nan for p in polys], dtype=float
+        ),
         boundary=boundary,
         cell_gdf=cell_gdf,
     )

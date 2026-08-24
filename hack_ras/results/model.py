@@ -24,7 +24,16 @@ class AreaGeometry:
     min_elevations : np.ndarray, shape (N,)
         Minimum terrain elevation per cell. NaN for perimeter dummy cells.
     polygons : list[shapely.Polygon | None], length N
-        Cell polygon for each cell; None if fewer than 3 face points.
+        Cell polygon for each cell; None if the cell has fewer than 3 faces.
+        Follows the 2D flow area perimeter exactly where the plan HDF carries the
+        perimeter face datasets (RAS 7.0); see reader._perimeter_polygons.
+    plan_areas : np.ndarray, shape (N,)
+        Horizontal plan area of each cell, from `Cells Surface Area` — RAS's own
+        number, and the one to use as `interpolate_cell_volume`'s
+        `cell_plan_area`. Prefer it over `polygons[i].area`: the two agree to
+        float32 round-off, but this one needs no reconstruction and stays right
+        on the fallback path. Numerically zero (~1e-12, sometimes negative) for
+        perimeter dummy cells.
     boundary : shapely.Polygon
         Outer perimeter of the 2D flow area.
     cell_gdf : geopandas.GeoDataFrame
@@ -35,6 +44,7 @@ class AreaGeometry:
     cell_centers: np.ndarray
     min_elevations: np.ndarray
     polygons: list
+    plan_areas: np.ndarray
     boundary: object
     cell_gdf: object
 
