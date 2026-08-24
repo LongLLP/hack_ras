@@ -1105,7 +1105,7 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 |----------|---------|-------|
 | `read_plan_metadata(hdf_path)` | `PlanMetadata` | Parses `.p##` text sidecar; raises `FileNotFoundError` if missing |
 | `read_area_geometry(hdf_path, area)` | `AreaGeometry` | Reads cell centres, perimeter-accurate cell polygons, `Cells Surface Area`, boundary, min elevation; excludes perimeter dummy cells from `cell_gdf`. Falls back to face-point-only polygons (with a warning) if the plan HDF lacks any of `_PERIM_POLY_KEYS` |
-| `read_cell_mannings(hdf_path, area)` | `np.ndarray (N,) float64` | Cell-centre Manning's n, indexed like `Cells Center Coordinate` — **includes** perimeter dummy cells; raises `KeyError` if the area has no `Cells Center Manning's n` |
+| `read_face_geometry(hdf_path, area)` | `FaceGeometry` | Per-face Manning's n (the value RAS conveys with), cell/face-point indices, unit normals, lengths, and the dual "diamond" polygons. Accepts a `.p##.hdf` or a `.g##.hdf`; raises `KeyError` on a pre-7.0 HDF with no face property datasets. There is deliberately **no** cell-centre Manning's n reader — see the mesh export section |
 | `read_cell_volume_table(hdf_path, area)` | `CellVolumeTable` | Raw info + values arrays; use `interpolate_cell_volume` to query |
 | `interpolate_cell_volume(table, cell_idx, wse, cell_plan_area)` | `float` | Returns 0.0 if dry; linearly extrapolates above table max using `cell_plan_area` |
 
@@ -1223,37 +1223,116 @@ For **volume extraction**, only `cell` points are used (boundary/endpoint points
 cell index and therefore no volume table to query). Profile lines that extend beyond the
 mesh boundary are handled gracefully — the out-of-mesh portion is silently ignored.
 
-## 2D Mesh Cell Manning's n Export (`hack_ras/gis/mesh.py`)
+## 2D Mesh Face Manning's n Export (`hack_ras/gis/mesh.py`)
+
+**Manning's n lives on faces, not cell centres.** HEC-RAS builds a hydraulic property
+table per mesh *face*, and the n in it is the value the computations use — HEC,
+["Creating Hydraulic Property Tables for 2D Flow Areas"](https://www.hec.usace.army.mil/confluence/rasdocs/r2dum/6.4/development-of-a-2d-or-combined-1d-2d-model/creating-hydraulic-property-tables-for-2d-flow-areas).
+It is column 3 of `Faces Area Elevation Values`, which the HDF labels itself:
+`attrs["Column"]` = `['Z', 'Area', 'Wetted Perimeter', "Manning's n"]`, units
+`['ft', 'ft^2', 'ft', 's/m^(1/3)']`.
+
+Other hydraulic properties — volume, surface area, minimum elevation — **are**
+cell-centred and apply to the cell volume. Those are unaffected and still live on
+`read_area_geometry` / `read_cell_volume_table`. Roughness is simply not one of them.
 
 ```python
-from hack_ras.gis.mesh import cell_mannings_gdf, export_cell_mannings_shp
+from hack_ras.results.reader import read_face_geometry
+from hack_ras.gis.mesh import face_mannings_gdf, export_face_mannings_shp
 
-gdf = cell_mannings_gdf(hdf_path)                       # all areas, no CRS attached
-export_cell_mannings_shp(hdf_path, out_shp)             # CRS auto-resolved from the project
-export_cell_mannings_shp(hdf_path, out_shp, areas=["RockCr"], crs=wkt)
+fg  = read_face_geometry(hdf_path, "RockCr")   # FaceGeometry: arrays + dual polygons
+gdf = face_mannings_gdf(hdf_path)              # all areas, no CRS attached
+export_face_mannings_shp(hdf_path, out_shp, areas=["RockCr"], crs=wkt)
 ```
 
-One polygon per real mesh cell, with the n value the solver actually used —
-`Geometry/2D Flow Areas/{area}/Cells Center Manning's n`, not the RAS Mapper raster,
-which is resampled from land cover.
+Both accept a `.p##.hdf` or a `.g##.hdf` — the face datasets live in either, so two
+geometries can be diffed without running plans.
 
-- Fields: `area`, `cell_idx`, `mannings_n` (exactly 10 chars — the shapefile limit; do
-  not lengthen), `geometry`.
-- **One file for all areas, with an `area` field.** Cell indices are local to each area,
-  so two areas both start at cell 0; keeping them together makes that visible and lets
-  one symbology cover the model.
-- Perimeter dummy cells are dropped by reusing `read_area_geometry`'s `cell_gdf` filter
-  rather than re-deriving it. Live counts on Hillside `p12`: 229/2844 ghosts in
-  `Interior`, 191/1262 in `RockCr`.
-- CRS defaults to `resolve.read_crs_wkt(dirname(hdf_path))`. If no projection file is
-  found it logs a warning and writes no `.prj` — the coordinates are model coordinates
-  regardless.
-- Cell outlines follow the 2D flow area perimeter, including boundary cells — the
-  polygons are the geometry RAS computes with (see 2D Flow Area Geometry).
+### There is deliberately no cell-centre Manning's n export
 
-Verified against Hillside `p12` and `p62` (`NKC_Hillside_Levee`, RAS 7.0): 3686 polygons
-each (2615 `Interior` + 1071 `RockCr`), no invalid geometry, `mannings_n` bit-matching
-the HDF at every `cell_idx`, CRS resolved to NAD83 / Missouri West via the `.rasmap`.
+`Cells Center Manning's n` exists in the HDF and RAS Mapper will draw it, but RAS does
+not convey with it. A cell-centre reader and exporter were written on 2026-08-24 and
+**removed the same day** — they made the wrong value the path of least resistance, and
+had already produced one wrong conclusion.
+
+The evidence, from `NKC_Hillside_Levee` g07 vs g09. Shrinking one n-override polygon
+("Drainage Ditch", 78 → 73 vertices) left `Cells Center Manning's n` **bit-identical on
+all 4107 cells** and every cell volume table unchanged, while changing **27 of 2361
+`RockCr` faces** (0 in `Interior`): 0.035→0.080 ×196 sub-rows, 0.035→0.040 ×175,
+0.035→0.060 ×92, 0.080→0.035 ×5. The computed Ditch WSE profile moved by up to **1.3 ft**.
+RAS flagged the recompute in `Property Tables LC Hash` on both areas. A cell-centre export
+showed nothing at all.
+
+Of those 27 faces, 4 were streamwise (both cells on the profile chain, adjacent in station
+order) and 14 were channel↔overbank laterals; the 4 streamwise ones carried the biggest n
+jumps and track the profile response station for station.
+
+If the raw cell-centre values are ever needed to demonstrate the discrepancy to a
+reviewer, they need no library support:
+
+```python
+with h5py.File(hdf_path, "r") as hdf:
+    n = hdf[f"Geometry/2D Flow Areas/{area}/Cells Center Manning's n"][:]
+```
+
+### One value per face
+
+RAS indexes face n by elevation, so it *can* vary with stage when Vertical Variation in
+Manning's n is switched on. It does not vary in practice here: measured 2026-08-24 over
+every 2D model on disk — Hillside (all geometries plus backups), PCA, Pattison, and the
+test fixture — **0 of 308,301 faces** vary. `read_face_geometry` takes the lowest-elevation
+row and logs a warning if a face ever varies, rather than silently reducing a curve to one
+number. Stage-varying face n is out of scope; the warning is the tripwire.
+
+### Dual ("diamond") polygons, not polylines
+
+A polyline layer at mesh scale is thousands of hairlines that cannot be filled or
+symbolised by value. Each face is drawn as the ring
+`[cell_L centre, face point A, cell_R centre, face point B]` — the face is the **diagonal**,
+not an edge.
+
+Alternating centre/face-point is load-bearing: ordering the ring `[cL, A, B, cR]` instead
+makes a self-intersecting bowtie (measured on Hillside g07: 5331 of 5431 polygons invalid,
+total area collapsing to 26% of the mesh).
+
+The diamond is the face's own control volume, and the polygons tile the mesh. Measured on
+Hillside g07: 0 invalid rings, 0 zero-area, **zero overlap** (union == sum of areas), and
+total within **0.0043%** (`Interior`) / **0.0068%** (`RockCr`) of the summed
+`Cells Surface Area`. The residual is perimeter faces that bend — the diagonal cuts across
+the bend rather than following it. Not clipped; the effect is a rounding error and clipping
+would cost more than it buys.
+
+A Voronoi/Thiessen tessellation of face midpoints was **considered and rejected**: its
+polygons straddle mesh cells, it needs clipping to the perimeter, and it encodes proximity
+rather than the connectivity RAS actually solves on.
+
+### Fields and layout
+
+- `area`, `face_idx`, `mannings_n`, `cell_l`, `cell_r`, `face_len`, `norm_x`, `norm_y`,
+  `geometry`. All ≤10 chars — the shapefile driver silently truncates longer names, and two
+  fields truncating to the same stem collide. `mannings_n` is exactly at the limit; do not
+  lengthen it.
+- `cell_l` / `cell_r` are local cell indices, the same indexing `read_area_geometry` and the
+  WSE/volume output use, so the layer joins to those.
+- `norm_x` / `norm_y` come from `Faces NormalUnitVector and Length` and are the direction
+  flow through the face travels — enough to sort faces into streamwise vs lateral in GIS
+  against any reach direction, without the library needing to know about a centreline.
+- **One file for all areas, with an `area` field.** Face indices are local to each area, so
+  two areas both start at face 0; keeping them together makes that visible and lets one
+  symbology cover the model.
+- Perimeter faces name a **ghost cell** on one side rather than a negative index (RAS puts
+  that ghost's centre at or near the face midpoint), so their diamond collapses onto the
+  real half-cell. Correct, and it is why the tiling still closes.
+- CRS defaults to `resolve.read_crs_wkt(dirname(hdf_path))`. If no projection file is found
+  it logs a warning and writes no `.prj` — the coordinates are model coordinates regardless.
+
+Verified end-to-end on Hillside `p47` (g07) and `p58` (g09): 7792 face polygons per plan
+(5431 `Interior` + 2361 `RockCr`), CRS resolved to NAD83 / Missouri West via the `.rasmap`.
+`RockCr` face n shifts between the two plans — 0.035 (151→126), 0.04 (575→584), 0.06
+(973→978), 0.08 (591→602) — which is the g07/g09 edit, and is exactly what a cell-centre
+layer could not see.
+
+`Scripts/Mesh_nvals/` drives it.
 
 ## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
 
@@ -1328,18 +1407,30 @@ the `.prj` so HEC-RAS recognises the new file without a manual edit.
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
 
-### Session 21 changes (2026-08-24): 2D mesh cell Manning's n export
+### Session 21 changes (2026-08-24): 2D mesh Manning's n export — faces only
 
-Request: get the per-cell Manning's n out of a plan HDF as a polygon shapefile, one
-polygon per mesh cell — RAS Mapper can only show a resampled raster.
+Request: get Manning's n out of a plan HDF as a polygon shapefile — RAS Mapper can only
+show a resampled raster.
 
-- `results/reader.py` — new `read_cell_mannings(hdf_path, area)`; reads
-  `Cells Center Manning's n` as float64, indexed like `Cells Center Coordinate`
-  (dummy cells included).
-- `gis/mesh.py` — new module. `cell_mannings_gdf()` joins that array onto the cell
-  polygons from `read_area_geometry`; `export_cell_mannings_shp()` adds CRS resolution
-  and writes the file. See the section above for the field/layout decisions.
-- `tests/test_cell_mannings.py` — 13 tests on the `Model.p02.hdf` fixture.
+Started cell-centred, **ended face-only**. The cell-centre layer was built first, then
+removed the same day once HEC's "Creating Hydraulic Property Tables for 2D Flow Areas"
+and a live diff both confirmed RAS conveys with the *face* value, not the cell centre.
+The removal is the substantive outcome; see the mesh export section for the evidence.
+
+- `results/reader.py` — new `read_face_geometry(hdf_path, area)` returning `FaceGeometry`.
+  `read_cell_mannings()` was added and then **removed** — it made the wrong value the
+  path of least resistance. The dataset is still two h5py lines away if ever needed.
+- `results/model.py` — new `FaceGeometry` dataclass.
+- `gis/mesh.py` — new module. `face_mannings_gdf()` / `export_face_mannings_shp()`.
+  `cell_mannings_gdf()` / `export_cell_mannings_shp()` were added and then removed, along
+  with the `nface_min` / `nface_max` cell fields, whose only purpose was flagging
+  centre-vs-face disagreement — moot once the centre layer was gone.
+- `tests/test_face_mannings.py` — 29 tests on the `Model.p02.hdf` fixture, including the
+  dual-polygon tiling property and the HDF's own `Column` attribute proving column 3 is n.
+- `tests/test_area_geometry.py` — gained `TestCellGdfDropsPerimeterDummies`, relocated
+  from the deleted `test_cell_mannings.py`. That was the only place asserting `cell_gdf`
+  filters ghost cells, and the filter outlived the layer that used it.
+- `Scripts/Mesh_cell_nvals/` renamed to `Scripts/Mesh_nvals/`, faces only, no `export:` key.
 - **Cell polygons made perimeter-accurate** (same session, after the user asked whether
   RAS actually computes with the detailed perimeter). Validating the export against
   `Cells Surface Area` had shown boundary cells reconstructing 0.79–1.25×; the question

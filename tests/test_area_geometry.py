@@ -125,5 +125,44 @@ class TestCellPolygonsFollowPerimeter(unittest.TestCase):
             )
 
 
+@unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
+@unittest.skipUnless(HAS_HDF, "no .p##.hdf fixture at tests/data/")
+class TestCellGdfDropsPerimeterDummies(unittest.TestCase):
+    """
+    `cell_gdf` is the filter every consumer relies on to keep RAS's perimeter
+    dummy cells out of spatial output — they carry attribute values but have no
+    polygon to draw and a NaN minimum elevation.  Nothing else asserts it, so it
+    is pinned here.  (Relocated from test_cell_mannings.py when the cell-centre
+    Manning's n export was removed; the filter outlived the layer that used it.)
+
+    Both fixture areas have dummies — 27 of 59 in `Interior`, 30 of 59 in
+    `Watershed` — so a no-op filter would show up as an equal count.
+    """
+
+    def test_dummies_are_excluded_and_the_filter_is_not_a_no_op(self):
+        for area in list_areas(HDF_FIXTURE):
+            geom = read_area_geometry(HDF_FIXTURE, area)
+            kept = geom.cell_gdf["cell_idx"].to_numpy()
+            self.assertLess(len(kept), len(geom.cell_centers), area)
+            self.assertFalse(np.isnan(geom.min_elevations[kept]).any(), area)
+
+    def test_every_kept_cell_has_a_polygon(self):
+        for area in list_areas(HDF_FIXTURE):
+            geom = read_area_geometry(HDF_FIXTURE, area)
+            self.assertTrue(geom.cell_gdf.geometry.notna().all(), area)
+            self.assertTrue(geom.cell_gdf.geometry.is_valid.all(), area)
+
+    def test_nothing_real_is_dropped(self):
+        # The filter must remove dummies and only dummies.
+        for area in list_areas(HDF_FIXTURE):
+            geom = read_area_geometry(HDF_FIXTURE, area)
+            expected = {
+                i for i in range(len(geom.polygons))
+                if geom.polygons[i] is not None
+                and not np.isnan(geom.min_elevations[i])
+            }
+            self.assertEqual(set(geom.cell_gdf["cell_idx"]), expected, area)
+
+
 if __name__ == "__main__":
     unittest.main()

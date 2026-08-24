@@ -13,6 +13,7 @@ from ..version import RasVersion
 from .model import (
     AreaGeometry,
     CellVolumeTable,
+    FaceGeometry,
     ConduitTimeSeries,
     NodeTimeSeries,
     PipeConduit,
@@ -224,40 +225,112 @@ def read_area_geometry(hdf_path: str, area: str) -> AreaGeometry:
     )
 
 
-def read_cell_mannings(hdf_path: str, area: str) -> np.ndarray:
-    """
-    Read the cell-center Manning's n value for every cell in one 2D flow area.
+# ---------------------------
+# Face geometry and roughness
+# ---------------------------
 
-    The returned array is indexed by the same local cell index used by
-    read_area_geometry / read_wse, and has the same length as
-    `Cells Center Coordinate` — i.e. it includes the perimeter dummy cells.
-    Callers that need only real cells should filter with
-    `AreaGeometry.cell_gdf["cell_idx"]`.
+# Datasets needed to describe faces. A plan HDF missing any of them cannot be
+# read for face roughness at all — unlike the cell path, there is no fallback,
+# because nothing else in the file carries the per-face n.
+_FACE_KEYS = (
+    "Faces Cell Indexes",
+    "Faces FacePoint Indexes",
+    "Faces NormalUnitVector and Length",
+    "Faces Area Elevation Info",
+    "Faces Area Elevation Values",
+)
+
+
+def read_face_geometry(hdf_path: str, area: str) -> FaceGeometry:
+    """
+    Read face geometry and per-face Manning's n for one 2D flow area.
+
+    Face n is what RAS uses for conveyance *between* two cells; it is sampled
+    along the face from the land cover, not taken from either cell centre.  See
+    FaceGeometry for why the two can disagree and for the dual-polygon
+    construction returned in `polygons`.
 
     Parameters
     ----------
     hdf_path : str
-        Absolute path to the .p##.hdf file.
+        Absolute path to a .p##.hdf or .g##.hdf file.
     area : str
         Name of the 2D flow area (from list_areas).
 
     Returns
     -------
-    np.ndarray, shape (N,), float64
+    FaceGeometry
 
     Raises
     ------
     KeyError
-        If the area has no "Cells Center Manning's n" dataset.
+        If the area is absent, or lacks any of the face datasets (a pre-RAS-7.0
+        plan HDF).
     """
-    key = f"Geometry/2D Flow Areas/{area}/Cells Center Manning's n"
+    base = f"Geometry/2D Flow Areas/{area}"
+
+    from shapely.geometry import Polygon
+
     with h5py.File(hdf_path, "r") as hdf:
-        if key not in hdf:
+        if base not in hdf:
+            raise KeyError(f"2D flow area not found: {base}\nIn HDF file: {hdf_path}")
+        grp = hdf[base]
+
+        missing = [k for k in _FACE_KEYS if k not in grp]
+        if missing:
             raise KeyError(
-                f"Dataset not found: {key}\n"
-                f"In HDF file: {hdf_path}"
+                f"{base} has no face property datasets: {', '.join(missing)}\n"
+                f"In HDF file: {hdf_path}\n"
+                f"Face Manning's n is only stored in RAS 7.0 and later."
             )
-        return hdf[key][:].astype(np.float64)
+
+        cell_idx = grp["Faces Cell Indexes"][:]
+        fp_idx   = grp["Faces FacePoint Indexes"][:]
+        nvl      = grp["Faces NormalUnitVector and Length"][:].astype(np.float64)
+        info     = grp["Faces Area Elevation Info"][:]
+        values   = grp["Faces Area Elevation Values"][:].astype(np.float64)
+        centers  = grp["Cells Center Coordinate"][:]
+        fp_xy    = grp["FacePoints Coordinate"][:]
+
+    # Manning's n: column 3 of the face property table. Stored per elevation
+    # step, but constant within a face on every mesh measured — take the
+    # lowest-elevation row and say so loudly if that assumption ever breaks,
+    # rather than silently averaging a curve down to one number.
+    n_faces = len(info)
+    mannings = np.full(n_faces, np.nan, dtype=np.float64)
+    varying = 0
+    for i, (start, count) in enumerate(info):
+        if count <= 0:
+            continue
+        col = values[start:start + count, 3]
+        mannings[i] = col[0]
+        if count > 1 and not np.all(col == col[0]):
+            varying += 1
+    if varying:
+        logging.warning(
+            "%s / %s: Manning's n varies with elevation on %d of %d faces; "
+            "using the lowest-elevation value.", hdf_path, area, varying, n_faces
+        )
+
+    polygons = []
+    for i in range(n_faces):
+        c_l, c_r = cell_idx[i]
+        a, b = fp_idx[i]
+        # The face is the DIAGONAL of the diamond, not an edge: alternate
+        # cell centre / face point around the ring, or it comes out a bowtie.
+        poly = Polygon([centers[c_l], fp_xy[a], centers[c_r], fp_xy[b]])
+        if not poly.is_valid:
+            poly = poly.buffer(0)
+        polygons.append(poly if (not poly.is_empty and poly.area > 0) else None)
+
+    return FaceGeometry(
+        cell_indexes=cell_idx,
+        facepoint_indexes=fp_idx,
+        mannings_n=mannings,
+        normals=nvl[:, :2],
+        lengths=nvl[:, 2],
+        polygons=polygons,
+    )
 
 
 # ---------------------------

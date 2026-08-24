@@ -50,6 +50,54 @@ class AreaGeometry:
 
 
 @dataclass
+class FaceGeometry:
+    """
+    Face geometry and roughness for one HEC-RAS 2D flow area.
+
+    A face is the shared edge between two cells, and it is where RAS evaluates
+    conveyance: the Manning's n here is what the momentum equation uses between
+    the two cells, independent of either cell-centre value.  A land-cover edit
+    that misses every cell centre can still move face n — measured live on
+    `NKC_Hillside_Levee` g07 vs g09, where `Cells Center Manning's n` was
+    bit-identical on all 4107 cells while 27 faces changed, some by more than 2x.
+
+    Attributes
+    ----------
+    cell_indexes : np.ndarray, shape (F, 2), dtype int32
+        The two cells sharing each face, as local cell indices.  A face on the
+        mesh perimeter names a perimeter dummy cell on one side rather than a
+        negative index.
+    facepoint_indexes : np.ndarray, shape (F, 2), dtype int32
+        The face's two end points, as indices into `FacePoints Coordinate`.
+    mannings_n : np.ndarray, shape (F,), float64
+        Manning's n per face, from column 3 of `Faces Area Elevation Values`.
+        NaN where a face carries no property table.  RAS stores this per
+        elevation step, but it has been constant within a face on every mesh
+        measured (7792 faces across Hillside g07/g09, plus the test fixture);
+        `read_face_geometry` takes the lowest-elevation row and warns if a face
+        ever varies.
+    normals : np.ndarray, shape (F, 2), float64
+        Face unit normal, i.e. the direction flow through the face travels.
+    lengths : np.ndarray, shape (F,), float64
+        Face length, from `Faces NormalUnitVector and Length` column 2.
+    polygons : list[shapely.Polygon | None], length F
+        Dual ("diamond") polygon per face: the ring
+        ``[cell_L centre, face point A, cell_R centre, face point B]``, with the
+        face itself as the diagonal rather than an edge.  This is the face's
+        control volume, and the polygons tile the mesh: measured on Hillside g07,
+        zero overlap and within 0.007% of the summed `Cells Surface Area` (the
+        residual is perimeter faces that bend, whose diagonal cuts the bend off).
+        None where the ring is degenerate.
+    """
+    cell_indexes:      np.ndarray
+    facepoint_indexes: np.ndarray
+    mannings_n:        np.ndarray
+    normals:           np.ndarray
+    lengths:           np.ndarray
+    polygons:          list
+
+
+@dataclass
 class CellVolumeTable:
     """
     Volume-elevation lookup table for all cells in one 2D flow area.
