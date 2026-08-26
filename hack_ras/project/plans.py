@@ -34,6 +34,7 @@ from hack_ras.project.rasmap import (
     remove_plans_from_rasmap,
     renumber_plans_in_rasmap,
     result_plan_ids,
+    retitle_in_rasmap,
 )
 from hack_ras.resolve import expand_id_spec
 from hack_ras.utils.lines import content_of, eol_of, read_lines, write_lines
@@ -750,6 +751,109 @@ def delete_plans(
                 r["current_plan"][1],
             )
     return report
+
+
+def retitle_plan(
+    project: RasProject,
+    plan_id: str,
+    new_title: str,
+    *,
+    short_id: str | None = None,
+    clean_rasmap: bool = True,
+    update_hdf: bool = True,
+) -> dict:
+    """Rename a plan in place: its title, its short identifier, and every
+    display name derived from them.
+
+    short_id defaults to new_title (the usual case — HEC-RAS itself seeds the
+    short identifier from the title); pass it explicitly to give the plan a
+    short identifier that differs from its title. Note the short identifier is
+    what RAS Mapper uses to name the plan's stored-results subfolder, so
+    changing it on a plan whose results have already been exported to GIS
+    orphans that folder — the existing folder keeps the old name.
+
+    The plan number is NOT touched; this is the retitle half of what
+    `renumber_plan` does for the number.
+
+    Updates, in order:
+      - the `.p##` text file's `Plan Title=` and `Short Identifier=` lines (the
+        short identifier keeps the file's existing field width);
+      - the `.rasmap` display names (`clean_rasmap=True`): the `<Plans>` RASPlan
+        layer and, if the plan has a result, the `<Results>` RASResults layer;
+      - the title / short-ID attributes inside the `.p##.hdf` (`update_hdf=True`)
+        — required, not cosmetic: RAS Mapper regenerates the `<Results>` layer
+        name from the HDF, so skipping this silently reverts the rasmap edit on
+        the next open. See `hdf_titles.py`.
+
+    Raises PlanFileNotFound if the .p## is missing, ValueError if the plan is
+    not listed in the .prj (orphan), DuplicatePlanTitle if new_title is already
+    used by another listed plan, PlanRunActive if the plan is mid-run.
+    Returns a report: `plan_id`, `old_title`, `new_title`, `short_id`,
+    `rasmap_renamed`, `hdf_attrs`.
+    """
+    pid = _normalize_plan_id(plan_id)
+    path = plan_path(project, pid)
+    if not os.path.isfile(path):
+        raise PlanFileNotFound(f"Plan file not found: {path}")
+    if pid not in project.model.plan_file_ids:
+        raise ValueError(
+            f"Plan '{pid}' exists on disk but is not listed in "
+            f"{project.base_name}.prj (orphan) — refusing to retitle it."
+        )
+    _assert_no_active_run(project, pid)
+
+    short = new_title if short_id is None else short_id
+    for other in project.model.plan_file_ids:
+        if other == pid:
+            continue
+        p = plan_path(project, other)
+        if os.path.isfile(p) and _read_plan_title(p) == new_title:
+            raise DuplicatePlanTitle(
+                f"Plan title '{new_title}' is already used by '{other}' — "
+                "HEC-RAS requires unique plan titles."
+            )
+
+    old_title = _read_plan_title(path)
+    lines = read_lines(path)
+    eol = eol_of(lines)
+    for i, line in enumerate(lines):
+        c = content_of(line)
+        if c.startswith("Plan Title="):
+            lines[i] = f"Plan Title={new_title}{eol}"
+        elif c.startswith("Short Identifier="):
+            width = len(c) - len("Short Identifier=")
+            lines[i] = f"Short Identifier={short.ljust(width)}{eol}"
+    write_lines(path, lines)
+
+    renamed: list = []
+    if clean_rasmap and os.path.isfile(project.rasmap_path):
+        # The <Plans> layer shows the title; the <Results> layer shows the
+        # short ID — so they take different strings when the two differ.
+        renamed = retitle_in_rasmap(
+            project.rasmap_path, project.base_name, "plan", {pid: new_title},
+            only_sections=("Plans",),
+        )
+        renamed += retitle_in_rasmap(
+            project.rasmap_path, project.base_name, "plan", {pid: short},
+            only_sections=("Results",),
+        )
+
+    attrs: list = []
+    if update_hdf:
+        from hack_ras.project.hdf_titles import retitle_plan_hdf
+        attrs = retitle_plan_hdf(path + ".hdf", new_title, short)
+
+    _invalidate_model(project)
+    logger.info("Retitled %s: %r -> %r (short id %r)", pid, old_title,
+                new_title, short)
+    return {
+        "plan_id": pid,
+        "old_title": old_title,
+        "new_title": new_title,
+        "short_id": short,
+        "rasmap_renamed": renamed,
+        "hdf_attrs": attrs,
+    }
 
 
 def clone_plan(

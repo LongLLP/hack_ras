@@ -61,6 +61,7 @@ from hack_ras.project.ras_project import RasProject
 from hack_ras.project.rasmap import (
     remove_flows_from_rasmap,
     renumber_flows_in_rasmap,
+    retitle_in_rasmap,
 )
 from hack_ras.resolve import expand_id_spec
 from hack_ras.utils.lines import content_of, eol_of, read_lines, write_lines
@@ -527,6 +528,82 @@ def reorder_flows(project: RasProject, order) -> dict:
     if mapping:
         renumber_flows(project, mapping)
     return mapping
+
+
+def retitle_flow(
+    project: RasProject,
+    flow_id: str,
+    new_title: str,
+    *,
+    clean_rasmap: bool = True,
+) -> dict:
+    """Rename a flow file in place, without changing its number.
+
+    Like a geometry and unlike a plan, a flow has one title and no short
+    identifier, so `Flow Title=` is the only thing to set.
+
+    Updates the `.u##` / `.f##` text file's `Flow Title=` and, for an unsteady
+    flow, the `<EventConditions>` RASEventConditions layer's display name in the
+    `.rasmap` (`clean_rasmap=True`).
+
+    There is no `update_hdf` counterpart to the plan and geometry versions: a
+    `.u##.hdf` stores no title at all (it holds a single `Event Conditions`
+    group with no title attribute — checked on RAS 7.0 output), so the flow's
+    name lives only in the text file and the `.rasmap`. A steady flow has no
+    `.rasmap` layer of its own, so only its text file changes.
+
+    Title uniqueness is enforced within the flow's own kind, mirroring
+    `clone_flow` — steady and unsteady are independent namespaces.
+
+    Raises FlowFileNotFound, ValueError for an orphan (on disk but not listed in
+    the .prj), DuplicateFlowTitle, or FlowRunActive. Returns a report:
+    `flow_id`, `old_title`, `new_title`, `rasmap_renamed`.
+    """
+    fid = _normalize_flow_id(flow_id)
+    path = flow_path(project, fid)
+    if not os.path.isfile(path):
+        raise FlowFileNotFound(f"Flow file not found: {path}")
+    listed = _listed_ids(project, fid[0])
+    if fid not in listed:
+        raise ValueError(
+            f"Flow '{fid}' exists on disk but is not listed in "
+            f"{project.base_name}.prj (orphan) — refusing to retitle it."
+        )
+    _assert_no_flow_run_active(project, fid)
+
+    for other in listed:
+        if other == fid:
+            continue
+        p = flow_path(project, other)
+        if os.path.isfile(p) and _read_flow_title(p) == new_title:
+            raise DuplicateFlowTitle(
+                f"Flow title '{new_title}' is already used by '{other}' — "
+                "HEC-RAS requires unique flow titles."
+            )
+
+    old_title = _read_flow_title(path)
+    lines = read_lines(path)
+    eol = eol_of(lines)
+    for i, line in enumerate(lines):
+        if content_of(line).startswith("Flow Title="):
+            lines[i] = f"Flow Title={new_title}{eol}"
+            break
+    write_lines(path, lines)
+
+    renamed: list = []
+    if clean_rasmap and os.path.isfile(project.rasmap_path):
+        renamed = retitle_in_rasmap(
+            project.rasmap_path, project.base_name, "flow", {fid: new_title}
+        )
+
+    _invalidate_model(project)
+    logger.info("Retitled %s: %r -> %r", fid, old_title, new_title)
+    return {
+        "flow_id": fid,
+        "old_title": old_title,
+        "new_title": new_title,
+        "rasmap_renamed": renamed,
+    }
 
 
 def clone_flow(

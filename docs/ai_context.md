@@ -123,6 +123,10 @@ in ExamDiff after a GUI touch.
 **RAS Mapper / .rasmap.** Mapper does NOT rewrite the .rasmap on open (saves on
 close/save; `.rasmap.backup` = previous save state). Layer display names refresh
 from the actual files' titles at load, so stale names in the XML are cosmetic.
+That refresh cuts BOTH ways and is not purely benign: a name you correct only in
+the XML is overwritten from the file on the next open. See the Retitling
+section — which file it reads differs per section, and for `<Results>` /
+`<Geometries>` it is the `.hdf`.
 Layers whose referenced file is missing render italic + red-asterisk and are purged
 by Tools > "remove missing layers"; result layers re-create themselves when a plan
 runs. Hand-edited `<Plans>`/`<Results>` sections survive a GUI save round-trip
@@ -245,6 +249,9 @@ sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unste
                                          #   (kind 'steady' == the prj's 'Flow File=f##' lines)
 delete_plan(project, "p08",              # deletes plan + outputs; optional unused-file cleanup
             delete_unused_geom=True, delete_unused_flow=True)
+retitle_plan(project, "p58", "FC 002year 260824")   # rename in place; short id follows title
+retitle_plan(project, "p58", "FC 002year 260824",  # ...or give the short id its own value
+             short_id="FC002_260824")
 clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
            line_edits={"Breach Start=": "Breach Start=False,,01JAN2025,1214,False,,,0"},
            new_id="p25")                 # new_id optional — defaults to next free number
@@ -372,6 +379,7 @@ renumber_geom(project, "g05", "g02")                   # single-entry case
 insert_geom_gap(project, "g02", 1)                     # shift g>=02 up by 1
 compact_geoms(project)                                 # g01,g03,g05 -> g01,g02,g03
 reorder_geoms(project, ["g01", "g03", "g02"])           # complete list, as g01..gN
+retitle_geom(project, "g01", "New Geom Title")          # rename g01 in place (no new file)
 clone_geom(project, "g01", "New Geom Title", new_id="g07")  # copy .g## + new title
 delete_geom(project, "g04")                            # refuses if a plan uses it
 delete_geom(project, "g04", force=True)                # deletes anyway (+warns)
@@ -387,7 +395,9 @@ plan layer's `GeometryHDF=`; RASGeometry sub-layers inside `<Results>` name
 `Base.p##.hdf`, so they are never matched). Chains/cycles use the same
 `.renumtmp` hop as plan renumbering. Left alone (cosmetic, same policy as plans):
 `.g##.hdf` internals, the `Geometry Filename` attr in each `.p##.hdf`, and the
-stale plan title on `.x##` line 3. There is **no "Current Geometry"** key in the
+stale plan title on `.x##` line 3. ONE carve-out, added with `retitle_geom`:
+`Geometry/Title` in the `.g##.hdf` IS written, because RAS Mapper sources the
+`<Geometries>` layer name from it — see the Retitling section. There is **no "Current Geometry"** key in the
 `.prj` (geometry is chosen per-plan), so nothing global to repoint.
 
 - `delete_geom` removes the family + `.prj Geom File=` entry, and (default
@@ -436,6 +446,7 @@ flows.insert_flow_gap(project, "u05", 3)      # kind comes from at_id's own pref
 flows.compact_flows(project)                 # both namespaces, independently
 flows.compact_flows(project, kinds=("unsteady",))     # ...or just one
 flows.reorder_flows(project, ["u02", "u01", "u04"])   # complete list of ONE kind
+flows.retitle_flow(project, "u02", "New Flow Title")   # rename u02 in place
 flows.clone_flow(project, "u02", "New Flow Title", new_id="u07")
 flows.delete_flow(project, "u12", force=False, clean_rasmap=True)
 flows.delete_flows(project, "u09-u11,u13,f02")        # prefixes required
@@ -484,7 +495,9 @@ What the kinds share and don't:
   `Restart Filename=` line if it has one.
 - Left alone, same policy as plans/geoms: `.u##.hdf` internals, the `Flow Filename`
   attr in each `.p##.hdf` (stale provenance until RAS recomputes), and `.b##`/`.O##`
-  (they embed flow TITLES, not numbers).
+  (they embed flow TITLES, not numbers). `retitle_flow` adds no carve-out — a
+  `.u##.hdf` holds no title to write — and the `Flow Title` attr each `.p##.hdf`
+  records is left stale on purpose (confirmed inert; see the Retitling section).
 - Typed exceptions: `FlowFileNotFound`, `FlowIdInUse`, `FlowInUse`,
   `DuplicateFlowTitle`, `FlowRunActive` (a plan using the flow is mid-run — a
   `.p##.tmp.hdf` exists). Orphans (on disk, not in the `.prj`) are rejected.
@@ -495,6 +508,173 @@ in each namespace) and `tests/test_flow_ops_fixture.py` (8, real models — the
 2D-culvert model for unsteady incl. its genuine stale `u03` prj entry + stale EC
 layer, and Wisconsin Floodway for steady, where `f01` is shared by both plans and
 there is no `.rasmap` at all).
+
+## Retitling — `retitle_plan` / `retitle_geom` / `retitle_flow`
+
+The rename-the-name twin of the three `renumber_*` families, added 2026-08-26.
+`renumber_*` changes only the `##`; before this there was NO way to change a
+title except `clone_* + delete_*`, which for a shared geometry or flow also
+renumbers the dependency. Each lives in its own subsystem module and reuses that
+module's existing `Duplicate*Title` guard (previously reachable only from the
+clone functions), its orphan rejection, and its mid-run check.
+
+```python
+plans.retitle_plan(project, "p58", "FC 002year 260824")                  # short id follows title
+plans.retitle_plan(project, "p58", "FC 002year 260824", short_id="X")    # ...or set it apart
+geoms.retitle_geom(project, "g01", "New Geom Title")
+flows.retitle_flow(project, "u02", "New Flow Title")
+```
+
+**Only a plan has two names.** `Plan Title=` plus `Short Identifier=` (a
+fixed-width padded field, kept at its original width). `short_id` defaults to
+`new_title`, matching how HEC-RAS seeds it. A geometry (`Geom Title=`) and a flow
+(`Flow Title=`) have one name each and take no `short_id`. Flow title uniqueness
+is checked within the flow's own kind, since steady and unsteady are independent
+namespaces.
+
+### A title lives in up to four places, and the `.rasmap` is NOT the authority
+
+**Empirical, Hillside 2026-08-26 — this is the whole reason retitle is more than
+a one-line edit.** A `.rasmap` layer's display `Name=` is refreshed by RAS Mapper
+from whatever file the layer's `Filename=` points at. That target differs by
+section:
+
+| section | `Filename=` points at | name shows | name comes from | rasmap-only edit sticks? |
+|---|---|---|---|---|
+| `<Plans>` RASPlan | `Base.p##` (TEXT) | plan TITLE | `Plan Title=` | yes |
+| `<Results>` RASResults | `Base.p##.hdf` | SHORT ID | HDF attrs | **no — reverted** |
+| `<Geometries>` RASGeometry | `Base.g##.hdf` | geom title | HDF `Geometry/Title` | **no — reverted** |
+| `<EventConditions>` | `Base.u##.hdf` | flow title | `Flow Title=` (HDF has none) | yes |
+
+**The title-vs-short-ID split is confirmed, not inferred** (Hillside 2026-08-26):
+p62 was retitled to `'Renamed plan title'` with `short_id='Renamed short ID'` —
+the first plan in that model where the two differ — and RAS Mapper showed
+`Renamed plan title` in the `<Plans>` tree and `Renamed short ID` in the
+`<Results>` tree, with all result data intact. This is why `retitle_plan` writes
+the two sections separately via `only_sections=`. `retitle_flow` was confirmed in
+the same pass: `u09` -> `RENAMED_FLOW` appeared in the unsteady flow editor, in
+the referencing plans, and in the `<EventConditions>` tree.
+
+Observed directly: eleven plans were retitled in the `.p##` text files AND the
+`.rasmap`, the `.rasmap` was verified clean, then RAS Mapper was opened once and
+re-saved it with all eleven `<Results>` names reverted to the old title — while
+the `<Plans>` names survived. Hence `retitle_plan` / `retitle_geom` write the HDF
+too (`update_hdf=True`), via `project/hdf_titles.py`. Re-verified after the fix:
+RAS Mapper was opened again and left every name alone.
+
+**The scope of the exception to the "cosmetic" policy.** "RAS rewrites `.hdf`
+internals on the next run" stays TRUE and is not being overturned — it fails only
+for a plan that has ALREADY been computed, because that is precisely the plan you
+will not re-run (these eleven were ~5 min of compute each). The useful test is
+not numbers-vs-titles, it is whether anything READS the stale field back:
+
+- **Inert** — nothing reads it, so a wrong value is just a wrong note on a
+  finished record. `Plan Data/Plan Information/Geometry Filename` in
+  `p58.hdf` still reads `NKC_Hillside_Levee.g10` after the g10->g08 compaction,
+  and RAS Mapper was opened with it in that state and displayed everything
+  correctly (Hillside 2026-08-26). Leave these alone.
+- **Contagious** — RAS Mapper reads it and writes it back into the `.rasmap`,
+  destroying a correct value there. The title attributes in the table below.
+  These must be written.
+
+A field that gets copied into another project file is not cosmetic; it is a
+source. That is the whole carve-out.
+
+Which HDF attributes exist is version- and results-dependent, so every write is
+best-effort-if-present and the report lists what was touched:
+
+| group | attribute | holds | seen in |
+|---|---|---|---|
+| `Plan Data/Plan Information` | `Plan Name` | title | 5.0.3, 7.0 |
+| `Plan Data/Plan Information` | `Plan ShortID` | short ID | 5.0.3, 7.0 |
+| `Plan Data/Plan Information` | `Plan Title` | title | 7.0 only |
+| `Results/Unsteady` | `Plan Title` | title | unsteady runs |
+| `Results/Unsteady` | `Short ID` | short ID | unsteady runs |
+| `Geometry` | `Title` | title | 5.0.3, 7.0 |
+
+`Results/Steady` carries no title attributes (checked on the Wisconsin Floodway
+5.0.3 and 7.0 fixtures), and a `.u##.hdf` carries none either — a flow's name
+lives only in its text file and the `.rasmap`, which is why `retitle_flow` has no
+`update_hdf`. The `Results/Summary/Compute Messages (rtf)` / `(text)` datasets
+embed the old title in their `Plan: '<title>'` banner and are deliberately left
+alone: they are the run's log, a record of what actually executed.
+
+**Two traps in the HDF write** (`hdf_titles._set_str_attr`):
+1. *Padding is not uniform.* RAS writes these as fixed-length ASCII sized exactly
+   to the string, but `Plan Information` uses `H5T_STR_NULLTERM` while
+   `Results/Unsteady` uses `H5T_STR_SPACEPAD`. HDF5 cannot resize an attribute in
+   place, so each is deleted and recreated through the low-level API copying the
+   original's cset/strpad. Assigning via `attrs[k] = value` would normalize them
+   all to h5py's own convention.
+2. *`mtype` must be passed explicitly to `h5a.write`.* Left to infer one from the
+   numpy dtype, h5py picks a memory type that reserves a byte for a NUL
+   terminator, and the conversion silently truncates the last character —
+   `'Alpha'` lands as `'Alph'`. Caught by `test_hdf_string_not_truncated`.
+
+**RAS Mapper names the sub-layers inside a `<Results>` block generically**, and
+never from a stored title: the geometry node is literally `"Geometry"` and the
+plan node literally `"Plan"` (both observed live). The RASPlan one is the trap —
+it shares its `Type` with the `<Plans>` layer and is separated only by the `.hdf`
+suffix, which is exactly why `_PLAN_SECTIONS` keys `<Plans>` to the
+extension-LESS `Base.p##`. Guarded by
+`test_nested_results_plan_sublayer_never_matched`.
+
+`retitle_in_rasmap(path, base, kind, renames, only_sections=)` in `rasmap.py`
+does the display-name half: it edits only the `Name` attribute of a matched
+layer's opening tag (byte-for-byte elsewhere), XML-escapes the value, and invents
+no `Name` where a layer has none. It is keyed on the same section/type/suffix
+table the removal functions use, so the RASGeometry and RASEventConditions
+sub-layers nested inside a `<Results>` block — which name `Base.p##.hdf` — are
+never matched. `only_sections` exists because a plan's two layers do not show the
+same string: `<Plans>` shows the TITLE, `<Results>` shows the SHORT ID.
+
+### RESOLVED: a geometry / flow retitle does NOT fan out into the plan HDFs
+
+Every `.p##.hdf` keeps its own copy of the names of the geometry and flow it ran
+with, alongside its own:
+
+```
+Plan Data/Plan Information | Geometry Title    = 'FC gravity flow - 260824'
+Plan Data/Plan Information | Flow Title        = '002year'
+Plan Data/Plan Information | Geometry Filename = 'NKC_Hillside_Levee.g10'
+```
+
+`retitle_geom` / `retitle_flow` deliberately leave these alone. Tested live
+(Hillside 2026-08-26): g08 was retitled to `RENAME_TEST` while p58-p68 held
+finished results computed under the old title. Result:
+
+- The `<Geometries>` tree shows `RENAME_TEST` — the `.g##.hdf` write lands.
+- The geometry node inside a `<Results>` block is labeled with the **literal
+  generic string "Geometry"**, not with any stored title (confirmed in RAS
+  Mapper's own "RAS Geometry Properties" dialog, whose `Title:` field reads
+  `Geometry`). It has no `Name` attribute in the `.rasmap` because RAS Mapper
+  never derives one — so there is nothing for a stale value to overwrite.
+- That dialog's Summary panel reports the plan HDF's stored provenance verbatim:
+  `Geometry Title = FC gravity flow - 260824` next to
+  `Plan Title = FC 500year breach L7 260824` / `Plan Short ID = ...`. The plan's
+  own names show the NEW values (end-to-end confirmation that `retitle_plan`'s
+  HDF write is what RAS Mapper reads); the geometry name shows the OLD one.
+- Nothing breaks: the mesh loads, the result geometry HDF opens normally.
+
+So this copy is **inert but visible** — read-only in a properties dialog, never
+copied back into the `.rasmap`. And leaving it stale is not a compromise, it is
+correct: the result WAS computed against a geometry titled
+`FC gravity flow - 260824`. Rewriting it would falsify the run record, which is
+the same reason `Results/Summary/Compute Messages` is left alone. Two provenance
+fields, one rule, now with a live test behind it.
+
+The distinction this closes out: `<Results>` layers are contagious for the
+plan's OWN name (RAS Mapper derives the layer name from it and writes it back)
+and inert for every name the plan merely recorded.
+
+Same treatment for the same reason: the `.b##` run artifacts embed the plan
+title (`NKC_Hillside_Levee.b58` still contains `n only`). Compute inputs from a
+finished run, never displayed — left alone.
+
+Tests: `tests/test_retitle.py` (30, synthetic project with real h5py-built
+`.p##.hdf` / `.g##.hdf` so the padding and truncation behavior is exercised for
+real; the fixture `.rasmap` carries the nested Results sub-layers and varied
+attribute order copied from a live file). Baseline 488 -> 518.
 
 ## `.rasmap` Bound Accessor — `RasProject.rasmap` (`project/rasmap.py`)
 

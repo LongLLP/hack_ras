@@ -418,6 +418,100 @@ def remove_geoms_from_rasmap(
     return removed
 
 
+_NAME_RE = re.compile(r'Name="([^"]*)"', re.IGNORECASE)
+
+# Which sections/layer types carry the display name for each kind of file, as
+# (section, layer type, filename suffix). The suffix is what distinguishes a
+# top-level layer from the same-typed sub-layers inside a <Results> block,
+# which always name Base.p##.hdf — see _PLAN_SECTIONS.
+_TITLE_SECTIONS = {
+    "plan": _PLAN_SECTIONS,
+    "geom": (("Geometries", "rasgeometry", ".hdf"),),
+    "flow": (("EventConditions", "raseventconditions", ".hdf"),),
+}
+
+
+def _xml_attr_escape(value: str) -> str:
+    """Escape a string for use inside a double-quoted XML attribute."""
+    return (value.replace("&", "&amp;").replace("<", "&lt;")
+                 .replace(">", "&gt;").replace('"', "&quot;"))
+
+
+def retitle_in_rasmap(
+    rasmap_path: str, base_name: str, kind: str, renames: dict,
+    *, only_sections: tuple | None = None,
+) -> list:
+    """Rewrite the display `Name=` of the layers belonging to renames.
+
+    kind is 'plan', 'geom', or 'flow'; renames maps a file ID to its new
+    display name ({'p58': 'FC 002year 260824'}). A plan is named in TWO places
+    — its `<Plans>` RASPlan layer and, once it has been computed, its
+    `<Results>` RASResults layer — and those two do not carry the same string:
+    the `<Plans>` layer shows the plan TITLE, the `<Results>` layer shows the
+    SHORT ID. `only_sections` restricts the pass to the named sections so a
+    caller can write each with the right one; the default writes all of the
+    kind's sections with the same name. A geometry and a flow have one layer
+    each, named from their single title.
+
+    Only the `Name` attribute of a matched layer's opening tag is touched — the
+    file is byte-for-byte identical everywhere else, and a layer with no `Name`
+    attribute is left alone rather than having one invented. Returns
+    ['<section>/<id>', ...] for the layers actually renamed.
+
+    NOTE this is not sufficient on its own for `<Results>` or `<Geometries>`:
+    those layers point at an `.hdf`, and RAS Mapper refreshes their names from
+    it on load, undoing an edit made only here. See `hdf_titles.py`.
+    """
+    sections = _TITLE_SECTIONS[kind]
+    if only_sections is not None:
+        keep = {s.lower() for s in only_sections}
+        sections = tuple(s for s in sections if s[0].lower() in keep)
+    # IDs are matched verbatim against the layer's filename, so they must be
+    # fully formed ('p58', 'g08', 'u05'). Not normalized here because the flow
+    # kind spans two letters (u## and f##) and a steady flow has no layer at
+    # all — it simply matches nothing.
+    wanted = {str(k).strip().lower(): v for k, v in renames.items()}
+    renamed: list = []
+    if not wanted:
+        return renamed
+
+    with open(rasmap_path, "r", encoding="latin-1", newline="") as f:
+        text = f.read()
+
+    edits: list[tuple[int, int, str]] = []
+    for section, layer_type, suffix in sections:
+        inner = _section_inner(text, section)
+        if not inner:
+            continue
+        for bstart, _bend, tag in _top_level_layer_blocks(text, *inner):
+            type_m = _TYPE_RE.search(tag)
+            if not type_m or type_m.group(1).lower() != layer_type:
+                continue
+            basename = _layer_basename(tag)
+            if basename is None:
+                continue
+            for fid, new_name in wanted.items():
+                if basename != f"{base_name}.{fid}{suffix}":
+                    continue
+                name_m = _NAME_RE.search(tag)
+                if not name_m:
+                    break
+                edits.append((
+                    bstart + name_m.start(1),
+                    bstart + name_m.end(1),
+                    _xml_attr_escape(new_name),
+                ))
+                renamed.append(f"{section}/{fid}")
+                break
+
+    if edits:
+        for start, end, value in sorted(edits, reverse=True):
+            text = text[:start] + value + text[end:]
+        with open(rasmap_path, "w", encoding="latin-1", newline="") as f:
+            f.write(text)
+    return renamed
+
+
 def result_plan_ids(rasmap_path: str, base_name: str) -> set:
     """Set of plan IDs ('p##') that have a RASResults layer in `<Results>`.
 

@@ -38,6 +38,7 @@ from hack_ras.project.ras_project import RasProject
 from hack_ras.project.rasmap import (
     remove_geoms_from_rasmap,
     renumber_geoms_in_rasmap,
+    retitle_in_rasmap,
 )
 from hack_ras.resolve import expand_id_spec
 from hack_ras.utils.lines import content_of, eol_of, read_lines, write_lines
@@ -379,6 +380,83 @@ def reorder_geoms(project: RasProject, order) -> dict:
     if mapping:
         renumber_geoms(project, mapping)
     return mapping
+
+
+def retitle_geom(
+    project: RasProject,
+    geom_id: str,
+    new_title: str,
+    *,
+    clean_rasmap: bool = True,
+    update_hdf: bool = True,
+) -> dict:
+    """Rename a geometry in place, without changing its number.
+
+    A geometry has one title and no short identifier (the plan-side asymmetry —
+    only plans carry a `Short Identifier=`), so there is nothing to name apart
+    from `Geom Title=`.
+
+    Updates the `.g##` text file's `Geom Title=`, the `<Geometries>` RASGeometry
+    layer's display name in the `.rasmap` (`clean_rasmap=True`), and
+    `Geometry/Title` inside the `.g##.hdf` (`update_hdf=True`). That last one is
+    required rather than cosmetic: the `<Geometries>` layer's `Filename` points
+    at the `.g##.hdf`, so RAS Mapper refreshes the layer name from the HDF and
+    would revert a rasmap-only edit. See `hdf_titles.py`.
+
+    Raises GeomFileNotFound, ValueError for an orphan (on disk but not listed in
+    the .prj), DuplicateGeomTitle, or GeomRunActive. Returns a report:
+    `geom_id`, `old_title`, `new_title`, `rasmap_renamed`, `hdf_attrs`.
+    """
+    gid = _normalize_geom_id(geom_id)
+    path = geom_path(project, gid)
+    if not os.path.isfile(path):
+        raise GeomFileNotFound(f"Geometry file not found: {path}")
+    if gid not in project.model.geom_file_ids:
+        raise ValueError(
+            f"Geometry '{gid}' exists on disk but is not listed in "
+            f"{project.base_name}.prj (orphan) — refusing to retitle it."
+        )
+    _assert_no_geom_run_active(project, gid)
+
+    for other in project.model.geom_file_ids:
+        if other == gid:
+            continue
+        p = geom_path(project, other)
+        if os.path.isfile(p) and _read_geom_title(p) == new_title:
+            raise DuplicateGeomTitle(
+                f"Geometry title '{new_title}' is already used by '{other}' — "
+                "HEC-RAS requires unique geometry titles."
+            )
+
+    old_title = _read_geom_title(path)
+    lines = read_lines(path)
+    eol = eol_of(lines)
+    for i, line in enumerate(lines):
+        if content_of(line).startswith("Geom Title="):
+            lines[i] = f"Geom Title={new_title}{eol}"
+            break
+    write_lines(path, lines)
+
+    renamed: list = []
+    if clean_rasmap and os.path.isfile(project.rasmap_path):
+        renamed = retitle_in_rasmap(
+            project.rasmap_path, project.base_name, "geom", {gid: new_title}
+        )
+
+    attrs: list = []
+    if update_hdf:
+        from hack_ras.project.hdf_titles import retitle_geom_hdf
+        attrs = retitle_geom_hdf(path + ".hdf", new_title)
+
+    _invalidate_model(project)
+    logger.info("Retitled %s: %r -> %r", gid, old_title, new_title)
+    return {
+        "geom_id": gid,
+        "old_title": old_title,
+        "new_title": new_title,
+        "rasmap_renamed": renamed,
+        "hdf_attrs": attrs,
+    }
 
 
 def clone_geom(
