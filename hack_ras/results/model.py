@@ -205,6 +205,121 @@ class ConduitTimeSeries:
 
 
 @dataclass
+class ConduitProfile:
+    """
+    Along-conduit profile results for one pipe conduit at one instant (or envelope).
+
+    This is the data behind the RAS Mapper pipe-conduit profile plot. It is a
+    different resolution from ConduitTimeSeries: that reads the two lumped
+    per-conduit values (Pipes/Pipe Flow US and DS), while this reads every
+    computation FACE along the conduit.
+
+    Station convention
+    ------------------
+    ``station`` is HEC-RAS's ``ConduitStation``, which increases from the US node
+    to the DS node (verified on 195 conduits, including 10 adverse-slope pipes).
+    RAS Mapper's profile plot draws the reverse — downstream on the left — so use
+    ``station_from_ds`` to reproduce that x-axis.
+
+    Face coverage
+    -------------
+    Faces sit at internal cell boundaries, so the first face is typically half a
+    cell in from the US node and the last is short of the DS node. RAS assigns the
+    two end faces of a conduit to only one side of a junction, so a given conduit
+    may or may not carry a face at station 0.0 or at ``length``. The arrays are
+    returned exactly as stored (sorted by station) and are NOT padded out to the
+    node ends.
+
+    Attributes
+    ----------
+    network : str
+        Pipe network name this conduit belongs to.
+    conduit : str
+        Conduit name.
+    when : str
+        Resolved selector — a time-stamp string, 'Maximum', or 'Minimum'.
+    station : np.ndarray, shape (F,), dtype float64
+        Distance along the conduit from the US node, ascending.
+    invert : np.ndarray, shape (F,), dtype float64
+        Conduit invert elevation at each face.
+    wse : np.ndarray, shape (F,), dtype float64
+        Water surface at each face. When the conduit is surcharged this is the
+        piezometric head (the HGL), not a free surface — compare with ``crown``.
+    velocity, flow : np.ndarray, shape (F,), dtype float64
+    face_indices : np.ndarray, shape (F,), dtype int64
+        Column index of each face into the network's Face * result datasets.
+    us_node, ds_node : str
+    us_invert, ds_invert : float
+        Invert elevation at the two node ends, from the conduit geometry table.
+        The face arrays generally stop short of both ends, so these are the only
+        way to close the profile onto the nodes. For an ADVERSE-slope conduit
+        ``ds_invert > us_invert`` -- do not assume the invert falls with station.
+    length : float
+        Conduit Length from the geometry table (not the face station span).
+    rise, span : float
+        Conduit vertical and horizontal dimensions.
+    shape : str
+        e.g. 'Circular', 'Box'.
+    si_units : bool
+        Unit system of the model, used by ``energy_grade``.
+    """
+    network: str
+    conduit: str
+    when: str
+    station: np.ndarray
+    invert: np.ndarray
+    wse: np.ndarray
+    velocity: np.ndarray
+    flow: np.ndarray
+    face_indices: np.ndarray
+    us_node: str
+    ds_node: str
+    us_invert: float
+    ds_invert: float
+    length: float
+    rise: float
+    span: float
+    shape: str
+    si_units: bool = False
+
+    @property
+    def depth(self) -> np.ndarray:
+        """Water depth above the invert at each face."""
+        return self.wse - self.invert
+
+    @property
+    def crown(self) -> np.ndarray:
+        """Conduit soffit elevation (invert + rise) at each face."""
+        return self.invert + self.rise
+
+    @property
+    def is_surcharged(self) -> np.ndarray:
+        """Boolean per face: water surface at or above the crown."""
+        return self.wse >= self.crown
+
+    @property
+    def energy_grade(self) -> np.ndarray:
+        """
+        Energy grade line, wse + V^2 / 2g.
+
+        HEC-RAS does not store EG for pipe conduits; RAS Mapper derives it the
+        same way. Uses g = 32.174 ft/s^2 or 9.80665 m/s^2 per ``si_units``.
+        """
+        g = 9.80665 if self.si_units else 32.174
+        return self.wse + self.velocity ** 2 / (2.0 * g)
+
+    @property
+    def station_from_ds(self) -> np.ndarray:
+        """
+        Station measured from the DS node, i.e. the RAS Mapper plot x-axis.
+
+        Still ascending order is NOT guaranteed — this is ``length - station``,
+        so it descends. Reverse the whole profile if you want plot order.
+        """
+        return self.length - self.station
+
+
+@dataclass
 class Sa2dCell:
     """
     One cell on the HW or TW side of an SA 2D Area Conn structure.

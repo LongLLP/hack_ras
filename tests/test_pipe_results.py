@@ -19,12 +19,14 @@ try:
         read_pipe_network,
         read_node_timeseries,
         read_conduit_timeseries,
+        read_conduit_profile,
     )
     from hack_ras.results.model import (
         PipeNetwork,
         PipeConduit,
         NodeTimeSeries,
         ConduitTimeSeries,
+        ConduitProfile,
     )
     HAS_RESULTS = True
 except ImportError:
@@ -205,6 +207,191 @@ class TestReadConduitTimeseries(unittest.TestCase):
     def test_raises_key_error_for_unknown_conduit(self):
         with self.assertRaises(KeyError):
             read_conduit_timeseries(_HDF_FIXTURE, self.network, "__no_such_conduit__")
+
+
+@unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
+@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/")
+class TestReadConduitProfile(unittest.TestCase):
+    """
+    Along-conduit profile reader.
+
+    The station-direction and global-vs-local-index conventions asserted here were
+    established empirically against the Hillside model (215 conduits): see
+    docs/ai_context.md, 'Pipe Network Geometry & Results'.
+    """
+
+    def setUp(self):
+        networks = list_pipe_networks(_HDF_FIXTURE)
+        if not networks:
+            self.skipTest("no pipe networks in fixture")
+        self.net_name = networks[0]
+        self.network = read_pipe_network(_HDF_FIXTURE, self.net_name)
+        if not self.network.conduit_index:
+            self.skipTest("no conduits in first pipe network")
+        self.conduit_name = next(iter(self.network.conduit_index))
+
+    def _profile(self, when='Maximum'):
+        return read_conduit_profile(
+            _HDF_FIXTURE, self.network, self.conduit_name, when)
+
+    def test_returns_conduit_profile(self):
+        self.assertIsInstance(self._profile(), ConduitProfile)
+
+    def test_all_arrays_same_length(self):
+        pr = self._profile()
+        F = len(pr.station)
+        self.assertGreater(F, 0)
+        for arr in (pr.invert, pr.wse, pr.velocity, pr.flow, pr.face_indices):
+            self.assertEqual(len(arr), F)
+
+    def test_arrays_are_float64(self):
+        pr = self._profile()
+        for arr in (pr.station, pr.invert, pr.wse, pr.velocity, pr.flow):
+            self.assertEqual(arr.dtype, np.float64)
+
+    def test_station_is_ascending(self):
+        pr = self._profile()
+        self.assertTrue(np.all(np.diff(pr.station) >= 0))
+
+    def test_station_within_conduit_length(self):
+        pr = self._profile()
+        self.assertGreaterEqual(pr.station[0], 0.0)
+        self.assertLessEqual(pr.station[-1], pr.length + 1e-6)
+
+    def test_station_increases_from_us_to_ds(self):
+        """
+        Face invert must trend US->DS in the same SENSE as the conduit's own
+        US/DS elevations.
+
+        Compare signs rather than assuming downhill: the fixture contains an
+        adverse-slope conduit (C232, US 726.25 -> DS 727.52) whose invert
+        legitimately RISES with station. That conduit is the control case -- an
+        assertion that the invert always falls would pass for the wrong reason on
+        a purely downhill network.
+        """
+        checked = 0
+        for name in self.network.conduit_index:
+            pr = read_conduit_profile(_HDF_FIXTURE, self.network, name)
+            if len(pr.station) < 2:
+                continue
+            geom_drop = pr.us_invert - pr.ds_invert
+            face_drop = pr.invert[0] - pr.invert[-1]
+            if abs(geom_drop) < 0.02:
+                continue      # too flat to judge
+            self.assertEqual(
+                np.sign(geom_drop), np.sign(face_drop),
+                f"{name}: face invert trends opposite to the conduit's "
+                f"US({pr.us_invert})->DS({pr.ds_invert}) elevations -- "
+                f"station direction is not US->DS")
+            checked += 1
+        self.assertGreater(checked, 0, "no conduit had enough slope to check")
+
+    def test_adverse_slope_conduit_is_present_and_handled(self):
+        """Pin the control case, so the slope test cannot silently lose its teeth."""
+        adverse = [
+            n for n in self.network.conduit_index
+            if (lambda pr: pr.ds_invert - pr.us_invert > 0.02)(
+                read_conduit_profile(_HDF_FIXTURE, self.network, n))
+        ]
+        self.assertTrue(
+            adverse,
+            "fixture no longer contains an adverse-slope conduit; "
+            "test_station_increases_from_us_to_ds is weakened")
+        pr = read_conduit_profile(_HDF_FIXTURE, self.network, adverse[0])
+        self.assertTrue(np.all(np.diff(pr.station) >= 0))
+        self.assertGreater(pr.invert[-1], pr.invert[0])
+
+    def test_accepts_network_name_string(self):
+        by_obj = self._profile()
+        by_str = read_conduit_profile(
+            _HDF_FIXTURE, self.net_name, self.conduit_name, 'Maximum')
+        np.testing.assert_array_equal(by_obj.station, by_str.station)
+        np.testing.assert_array_equal(by_obj.wse, by_str.wse)
+
+    def test_timestamp_selector_matches_face_timeseries(self):
+        """A snapshot profile must equal the raw Face dataset row at those faces."""
+        import h5py
+        base = ("Results/Unsteady/Output/Output Blocks/Base Output"
+                "/Unsteady Time Series")
+        with h5py.File(_HDF_FIXTURE, 'r') as hdf:
+            stamps = [t.decode().strip()
+                      for t in hdf[f'{base}/Time Date Stamp'][()]]
+            raw = hdf[f'{base}/Pipe Networks/{self.net_name}'
+                      '/Face Water Surface'][1, :]
+        pr = self._profile(stamps[1])
+        np.testing.assert_allclose(pr.wse, raw[pr.face_indices], rtol=0, atol=0)
+
+    def test_maximum_envelope_at_least_matches_a_snapshot(self):
+        import h5py
+        base = ("Results/Unsteady/Output/Output Blocks/Base Output"
+                "/Unsteady Time Series")
+        with h5py.File(_HDF_FIXTURE, 'r') as hdf:
+            stamps = [t.decode().strip()
+                      for t in hdf[f'{base}/Time Date Stamp'][()]]
+        mx = self._profile('Maximum')
+        # Summary and time-series values are both stored float32, so allow a few
+        # ULP at elevation magnitudes (~750 ft -> ~1e-4 ft per ULP).
+        tol = 8.0 * np.spacing(np.abs(mx.wse).max().astype(np.float32))
+        for stamp in stamps:
+            snap = self._profile(stamp)
+            self.assertTrue(np.all(snap.wse <= mx.wse + tol))
+
+    def test_minimum_envelope_never_exceeds_maximum(self):
+        """
+        The only ordering guarantee RAS actually honours for the Minimum envelope.
+
+        Deliberately NOT asserted: that Minimum bounds the output time series from
+        below. It does not. On dry / near-dry faces RAS's Minimum Face Water
+        Surface sits ABOVE the smallest value in Unsteady Time Series -- by up to
+        0.278 ft on this fixture (5 of 93 faces) and 3.185 ft on the Hillside p10
+        model (58 of 2850 faces), because the two are referenced to different
+        dry-bed elevations. Maximum has no such problem (0 violations on both).
+        """
+        mn = self._profile('Minimum')
+        mx = self._profile('Maximum')
+        self.assertTrue(np.all(mn.wse <= mx.wse))
+        self.assertTrue(np.all(mn.flow <= mx.flow))
+
+    def test_derived_properties(self):
+        pr = self._profile()
+        np.testing.assert_allclose(pr.depth, pr.wse - pr.invert)
+        np.testing.assert_allclose(pr.crown, pr.invert + pr.rise)
+        np.testing.assert_allclose(pr.station_from_ds, pr.length - pr.station)
+        self.assertEqual(pr.is_surcharged.dtype, np.bool_)
+        # EG is never below WS, and the gap is exactly the velocity head.
+        g = 9.80665 if pr.si_units else 32.174
+        np.testing.assert_allclose(
+            pr.energy_grade - pr.wse, pr.velocity ** 2 / (2.0 * g))
+
+    def test_us_ds_nodes_match_pipe_network(self):
+        pr = self._profile()
+        conduit = self.network.conduits[self.conduit_name]
+        self.assertEqual(pr.us_node, conduit.us_node)
+        self.assertEqual(pr.ds_node, conduit.ds_node)
+
+    def test_face_inverts_lie_between_the_node_inverts(self):
+        """Faces stop short of both ends, so every face invert is interior."""
+        for name in self.network.conduit_index:
+            pr = read_conduit_profile(_HDF_FIXTURE, self.network, name)
+            lo, hi = sorted((pr.us_invert, pr.ds_invert))
+            self.assertTrue(
+                np.all(pr.invert >= lo - 0.01) and np.all(pr.invert <= hi + 0.01),
+                f"{name}: face invert outside the US/DS invert range")
+
+    def test_raises_key_error_for_unknown_conduit(self):
+        with self.assertRaises(KeyError):
+            read_conduit_profile(
+                _HDF_FIXTURE, self.network, "__no_such_conduit__")
+
+    def test_raises_key_error_for_unknown_network(self):
+        with self.assertRaises(KeyError):
+            read_conduit_profile(
+                _HDF_FIXTURE, "__no_such_network__", self.conduit_name)
+
+    def test_raises_value_error_for_unknown_timestamp(self):
+        with self.assertRaises(ValueError):
+            read_conduit_profile(
+                _HDF_FIXTURE, self.network, self.conduit_name, '01JAN1900 00:00:00')
 
 
 if __name__ == '__main__':

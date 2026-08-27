@@ -1216,6 +1216,74 @@ Results/…/Unsteady Time Series/Pipe Networks/{network}/Pipes/Pipe Flow US   (T
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Pipes/Vel DS / Vel US  (T, N_pipes)
 ```
 
+#### Along-conduit profiles — the RAS Mapper pipe profile plot
+
+The `Pipes/*` datasets are **lumped per conduit** (one US and one DS value each).
+The profile RAS Mapper draws along a conduit is at **face** resolution, and its
+x-axis comes from geometry:
+
+```
+Geometry/Pipe Networks/{network}/Faces Conduit ID and Stations   # struct, (N_faces,)
+    ConduitID  int32    global conduit index (see the index-space trap below)
+    ConduitStation float32   distance along the conduit from the US node
+    CellUS / CellDS int32
+    Elevation  float32   conduit invert at that face
+Geometry/Pipe Networks/{network}/Cells Node and Conduit IDs      # (N_cells, 2), -1 = n/a
+```
+
+Filter the face table on `ConduitID`, sort by `ConduitStation`, and use those row
+positions as column indices into `Face Water Surface` / `Face Velocity` /
+`Face Flow`. `read_conduit_profile()` does exactly this.
+
+**INDEX-SPACE TRAP — the IDs inside `Geometry/Pipe Networks/{net}/` are GLOBAL.**
+`ConduitID`, and the node/conduit IDs in `Cells Node and Conduit IDs`, index the
+*global* `Geometry/Pipe Conduits/Attributes` and `Geometry/Pipe Nodes/Attributes`
+tables — **not** the network-local results positions that `PipeNetwork.nodes` /
+`PipeNetwork.conduit_index` hold. `Node Indices` / `Conduit Indices` are the
+local→global map. Verified on Hillside p10 by comparing node-cell polygon
+centroids against `Geometry/Pipe Nodes/Points`: global interpretation gave a
+median offset of **1.16 ft**, local interpretation **1111 ft**. The two spaces are
+easy to conflate because `Conduit Indices` is often the identity permutation
+(it is on Hillside and on the test fixture) — but `Node Indices` is a genuine
+permutation in both, which proves they are different spaces. Never index the
+global attribute tables with a results position.
+
+**Station direction: `ConduitStation` increases US → DS.** Verified on Hillside
+p10 across all 215 conduits by comparing the sign of the face-invert trend against
+the sign of `US Elevation - DS Elevation`: 195 agree, **0 disagree**, 4 too flat to
+judge. The check includes **10 adverse-slope conduits** (DS invert above US), which
+rules out a trivial "invert always falls" artifact.
+
+**RAS Mapper plots the reverse.** Its profile x-axis runs downstream-on-the-left.
+Checked against four GUI screenshots on plan p10 (`002yr pumping`): C44503, 26C45,
+and the chained pair 26C57442 (US) + 26C46 (DS), where the GUI placed the DS
+conduit first and the axis extent equalled the summed conduit lengths. End
+velocities matched the reversed HDF order in every case (e.g. 26C57442: HDF
+0.52 ft/s at the DS end / 2.28 at the US end, plotted left-to-right as 0.6 → 2.3).
+Use `ConduitProfile.station_from_ds` to reproduce that axis. Caveat: all 215
+Hillside conduit polylines are drawn US→DS, so this model cannot separate
+"RAS Mapper always plots DS→US" from "RAS Mapper plots reverse-polyline-order".
+
+**Face coverage is partial at the ends.** Faces sit at internal cell boundaries, so
+the first is typically half a cell in from the US node and the last stops short of
+the DS node (C44503: 69 faces spanning 29.9–2061.1 ft of a 2076.0 ft conduit).
+Some conduits additionally carry a boundary face at station 0.0 or at the full
+length, stored *out of order at the end of the array* — always sort by station,
+never assume array order. Use `us_invert` / `ds_invert` to close a profile onto
+its nodes.
+
+**`Minimum *` is not a strict lower bound.** `Minimum Face Water Surface` sits
+ABOVE the smallest value in `Unsteady Time Series` on dry / near-dry faces — by up
+to 0.278 ft (5 of 93 faces) on the test fixture and 3.185 ft (58 of 2850 faces) on
+Hillside p10, because the two are referenced to different dry-bed elevations.
+`Maximum` has no such problem (0 violations on both models). `Minimum <= Maximum`
+always holds. Treat `Minimum` as indicative only.
+
+**EG and critical WS are not stored.** RAS Mapper derives the energy grade as
+`WS + V²/2g` (`ConduitProfile.energy_grade`) and computes critical depth from Q
+and the conduit section. Only WS is in the file; when the conduit is surcharged
+that stored WS *is* the HGL.
+
 ### Computation Block (high-frequency solver diagnostics)
 Path: `Results/Computation Block/`
 
@@ -1270,6 +1338,7 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `PipeNetwork` | `name`, `nodes dict[str,int]`, `conduits dict[str,PipeConduit]`, `conduit_index dict[str,int]`, `upstream_of dict`, `downstream_of dict` | `nodes[name]` → results column index |
 | `NodeTimeSeries` | `timestamps`, `depth`, `wse`, `inlet_flow`, `flow_in`, `flow_out` — all `(T,) float64` | `flow_in` = sum of `Pipe Flow DS` for conduits draining into node |
 | `ConduitTimeSeries` | `timestamps`, `flow_us`, `flow_ds`, `vel_us`, `vel_ds` — all `(T,) float64` | US/DS ends of the conduit |
+| `ConduitProfile` | `station`, `invert`, `wse`, `velocity`, `flow`, `face_indices` — all `(F,)`; plus `us_node`/`ds_node`, `us_invert`/`ds_invert`, `length`, `rise`, `span`, `shape`, `si_units` | Along-conduit profile at FACE resolution — the RAS Mapper profile plot. Properties: `depth`, `crown`, `is_surcharged`, `energy_grade` (`wse + V²/2g`), `station_from_ds` (RAS Mapper x-axis). `station` ascends US→DS |
 
 ### `reader.py` — public functions
 
@@ -1356,6 +1425,7 @@ alignment.
 | `read_pipe_network(hdf_path, network)` | `PipeNetwork` | Geometry, index maps, adjacency dicts for one network |
 | `read_node_timeseries(hdf_path, network, node_name)` | `NodeTimeSeries` | Depth, WSE, inlet flow, computed flow_in / flow_out |
 | `read_conduit_timeseries(hdf_path, network, conduit_name)` | `ConduitTimeSeries` | Flow and velocity at US and DS ends |
+| `read_conduit_profile(hdf_path, network, conduit_name, when='Maximum')` | `ConduitProfile` | Along-conduit profile at every face. `network` accepts a `PipeNetwork` **or** a bare network name. `when` = `'Maximum'`, `'Minimum'`, or a time-stamp string. Max/Min are PER-FACE ENVELOPES, not snapshots — pass a stamp for a physically consistent profile |
 
 ## Line-in-polygon measurement (`hack_ras/gis/clip.py`)
 

@@ -14,6 +14,7 @@ from .model import (
     AreaGeometry,
     CellVolumeTable,
     FaceGeometry,
+    ConduitProfile,
     ConduitTimeSeries,
     NodeTimeSeries,
     PipeConduit,
@@ -424,6 +425,10 @@ def interpolate_cell_volume(
 _PIPE_TS_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
     "/Unsteady Time Series/Pipe Networks/{network}"
+)
+_PIPE_SUM_BASE = (
+    "Results/Unsteady/Output/Output Blocks/Base Output"
+    "/Summary Output/Pipe Networks/{network}"
 )
 _SA2D_TS_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
@@ -1057,6 +1062,172 @@ def read_conduit_timeseries(
         flow_ds=flow_ds,
         vel_us=vel_us,
         vel_ds=vel_ds,
+    )
+
+
+# ---------------------------
+# Pipe conduit profiles
+# ---------------------------
+
+def _pipe_units_are_si(hdf) -> bool:
+    """
+    Determine the model unit system from an open plan HDF.
+
+    Prefers the Geometry group's 'SI Units' attribute, falls back to the root
+    'Units System' attribute. Defaults to False (US Customary) if neither exists.
+    """
+    try:
+        return _decode(hdf['Geometry'].attrs['SI Units']).lower() == 'true'
+    except (KeyError, AttributeError):
+        pass
+    try:
+        return _decode(hdf.attrs['Units System']).lower().startswith('si')
+    except (KeyError, AttributeError):
+        return False
+
+
+def read_conduit_profile(
+    hdf_path: str,
+    network,
+    conduit_name: str,
+    when: str = 'Maximum',
+) -> ConduitProfile:
+    """
+    Read the along-conduit profile (station, invert, WSE, velocity, flow) for one pipe.
+
+    This is what RAS Mapper's pipe-conduit profile plot draws. It reads every
+    computation FACE on the conduit, unlike read_conduit_timeseries which reads
+    only the two lumped per-conduit US/DS values.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file. A geometry-only .g##.hdf has no results and
+        raises KeyError.
+    network : PipeNetwork or str
+        The network containing the conduit, as a PipeNetwork from
+        read_pipe_network() or a bare network name from list_pipe_networks().
+    conduit_name : str
+        Conduit name as it appears in Geometry/Pipe Conduits/Attributes.
+    when : str, default 'Maximum'
+        'Maximum' or 'Minimum' for the per-face envelope from Summary Output, or
+        a time-stamp string (e.g. '01JAN2025 09:00:00') for an instant.
+
+    Returns
+    -------
+    ConduitProfile
+
+    Raises
+    ------
+    KeyError
+        If the network, conduit, or required HDF datasets are absent.
+    ValueError
+        If `when` is not a recognised time stamp for this plan.
+
+    Notes
+    -----
+    'Maximum' and 'Minimum' are PER-FACE ENVELOPES, not a snapshot: the peak WSE,
+    peak velocity, and peak flow at one face need not occur at the same time, and
+    neighbouring faces need not peak together. For a physically consistent
+    profile, pass an explicit time stamp.
+
+    'Minimum' is NOT a strict lower bound on the output time series. On dry or
+    near-dry faces RAS's Minimum Face Water Surface sits ABOVE the smallest value
+    in Unsteady Time Series -- measured at up to 0.278 ft (5 of 93 faces) on the
+    test fixture and 3.185 ft (58 of 2850 faces) on Hillside p10, because the two
+    are referenced to different dry-bed elevations. 'Maximum' has no such problem
+    (0 violations on both models). Treat 'Minimum' as indicative only.
+
+    The IDs stored in Geometry/Pipe Networks/{net}/Faces Conduit ID and Stations
+    are GLOBAL indices into Geometry/Pipe Conduits/Attributes -- NOT the network-
+    local results positions held in PipeNetwork.conduit_index. The two spaces
+    coincide only when the network's Conduit Indices happens to be the identity
+    permutation. This function resolves the global index explicitly.
+    """
+    net_name = network.name if hasattr(network, 'name') else str(network)
+
+    with h5py.File(hdf_path, 'r') as hdf:
+        si_units = _pipe_units_are_si(hdf)
+
+        raw_conduits = hdf['Geometry/Pipe Conduits/Attributes'][()]
+        names = [_decode(r['Name']) for r in raw_conduits]
+        try:
+            global_idx = names.index(conduit_name)
+        except ValueError:
+            raise KeyError(
+                f"Conduit '{conduit_name}' not found in "
+                f"Geometry/Pipe Conduits/Attributes of {hdf_path}"
+            ) from None
+        row = raw_conduits[global_idx]
+
+        grp_path = f'Geometry/Pipe Networks/{net_name}'
+        if grp_path not in hdf:
+            raise KeyError(
+                f"Pipe network '{net_name}' not found in {hdf_path}"
+            )
+        grp = hdf[grp_path]
+
+        # Confirm the conduit really belongs to this network. Conduit Indices maps
+        # results position -> global index, so membership is a lookup in its values.
+        if global_idx not in set(int(v) for v in grp['Conduit Indices'][()]):
+            raise KeyError(
+                f"Conduit '{conduit_name}' is not part of pipe network "
+                f"'{net_name}'"
+            )
+
+        faces = grp['Faces Conduit ID and Stations'][()]
+        sel = np.where(faces['ConduitID'] == global_idx)[0]
+        if sel.size == 0:
+            raise KeyError(
+                f"Conduit '{conduit_name}' has no faces in pipe network "
+                f"'{net_name}' -- the network geometry may be stale"
+            )
+        sel = sel[np.argsort(faces['ConduitStation'][sel], kind='stable')]
+
+        station = faces['ConduitStation'][sel].astype(np.float64)
+        invert = faces['Elevation'][sel].astype(np.float64)
+
+        ts_base = _PIPE_TS_BASE.format(network=net_name)
+        sum_base = _PIPE_SUM_BASE.format(network=net_name)
+
+        if when in ('Maximum', 'Minimum'):
+            # Summary datasets are (2, N_faces): row 0 = value, row 1 = time in days.
+            wse = hdf[f'{sum_base}/{when} Face Water Surface'][0, :][sel]
+            velocity = hdf[f'{sum_base}/{when} Face Velocity'][0, :][sel]
+            flow = hdf[f'{sum_base}/{when} Face Flow'][0, :][sel]
+        else:
+            stamps = [_decode(t) for t in hdf[_TS_DATES][()]]
+            try:
+                t_idx = stamps.index(when)
+            except ValueError:
+                raise ValueError(
+                    f"Time stamp '{when}' not found in {hdf_path}. "
+                    f"Expected 'Maximum', 'Minimum', or one of {len(stamps)} "
+                    f"stamps from '{stamps[0]}' to '{stamps[-1]}'."
+                ) from None
+            wse = hdf[f'{ts_base}/Face Water Surface'][t_idx, :][sel]
+            velocity = hdf[f'{ts_base}/Face Velocity'][t_idx, :][sel]
+            flow = hdf[f'{ts_base}/Face Flow'][t_idx, :][sel]
+
+    return ConduitProfile(
+        network=net_name,
+        conduit=conduit_name,
+        when=when,
+        station=station,
+        invert=invert,
+        wse=np.asarray(wse, dtype=np.float64),
+        velocity=np.asarray(velocity, dtype=np.float64),
+        flow=np.asarray(flow, dtype=np.float64),
+        face_indices=sel.astype(np.int64),
+        us_node=_decode(row['US Node']),
+        ds_node=_decode(row['DS Node']),
+        us_invert=float(row['US Elevation']),
+        ds_invert=float(row['DS Elevation']),
+        length=float(row['Conduit Length']),
+        rise=float(row['Rise']),
+        span=float(row['Span']),
+        shape=_decode(row['Shape']),
+        si_units=si_units,
     )
 
 
