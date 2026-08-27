@@ -7,175 +7,164 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Two items are open. In rough priority:
+Four items are open. In rough priority:
 
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
-2. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+2. **Interior flood-volume peak (E2) and the analysis script (E4)** — §E below.
+3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
 
-(§D, the `flows` subsystem, and §C, the `project.rasmap` accessor, were both
-BUILT on 2026-08-10 — see below.)
+**Built 2026-08-27:** `read_pump_curves` / `pump_station_capacity` (E1's data
+layer), `read_node_rims`, `read_node_max_wse`, `read_volume_accounting` /
+`list_volume_accounting`, and `PathProfile.surcharge_margin` (E3a complete). What
+remains of E1 is the metric on top of the readers; E2 needs the peak computation;
+E3b needs the comparison on top of its two readers.
 
-Everything else once listed here is DONE — see the "DONE" section below and the
-`ai_context.md` session notes.
+### E. Pipe-network analysis helpers — DEFERRED 2026-08-27
 
-### D. `flows` subsystem — DONE 2026-08-10 (`project/flows.py`)
+Requested as part of a pumped-vs-gravity interior drainage study, and explicitly
+deferred by the user. The underlying HDF data was confirmed present before
+deferring, so these are build-when-wanted, not research. User decisions recorded
+2026-08-27 are marked **DECIDED**. Model-specific evidence lives in the agent
+memory note, not in this repo.
 
-**Built as specified below, with four design decisions confirmed with the user
-first — all of which came from the fact that steady and unsteady numbering are
-INDEPENDENT namespaces (f01 and u01 coexist), which plans/geoms never face:**
+---
 
-1. Every ID must carry its kind prefix; a bare number raises `ValueError` rather
-   than guessing a namespace. Applies to mappings, single IDs, and id-specs
-   (`'u09-u11'`, and both endpoints of a range must carry it).
-2. Cross-kind moves (`u01` -> `f01`) refused — a format conversion, not a rename.
-   Cross-kind ranges and mixed-kind `reorder_flows` orders likewise.
-3. `compact_flows(project, kinds=("unsteady","steady"))` — both by default, but
-   either kind can be compacted without disturbing the other (the user asked for
-   this explicitly). Both kinds' mappings still go through ONE `renumber_flows`
-   call, so validation precedes any file change.
-4. `reorder_flows(project, order)` included, mirroring `plans.reorder_plans`:
-   complete-list requirement, kind inferred from the (homogeneous) IDs.
+**E1. "Pump capacity exceeded for N hours."**
 
-Also added `renumber_flows_in_rasmap` to `project/rasmap.py`. Tests:
-`tests/test_flow_ops.py` (47, synthetic mixed-kind) +
-`tests/test_flow_ops_fixture.py` (8, real models — 2D-culvert for unsteady incl.
-its genuine stale u03 prj entry + stale EC layer, Wisconsin Floodway for steady).
-Baseline 371 -> 426. See the Flow File Operations section of `ai_context.md`.
+Data: pump curves at `Geometry/Pump Stations/Pump Groups/Efficiency Curves Info`
+(per-group `[start, count]`) and `.../Efficiency Curves Values` (`(N, 2)` float32;
+column 0 = head, column 1 = flow). `read_pump_station` already returns per-group
+flow, a `pumps_on` count, and each pump's `ws_on` / `ws_off`.
 
-One correction to the original spec below: it said a steady `.f##.hdf` should be
-renamed "if present". No such file exists in any local model, and RAS does not
-write one — the family lists both candidates and filters by `os.path.isfile`, so
-this is handled, but do not expect a steady sidecar.
+Definitions — all three are to be supported; the user's **first choice is (a)**:
 
-The original specification follows, for the record.
+  * **(a) FIRST CHOICE — inflow exceeding total pump station capacity**, summed
+    over all pump groups and all pumps in the station.
+  * (b) every pump in the station running at once (`pumps_on == n_pumps`).
+  * (c) headwater stage climbing above a nominated elevation.
 
-The missing third file-type subsystem. hack_ras has `project/plans.py` and
-`project/geoms.py` but **nothing for flow files** — so flow
-delete/renumber/compact currently has to be done with hand-written raw-line
-edits (done twice already: registering pasted u12-u17, then deleting the unused
-ones + renumbering u12->u09). Those ad-hoc edits work but lack the tested
-collision-safety the plan/geom machinery has.
+**DECIDED — capacity is the HEAD-DEPENDENT value interpolated from the pump
+curve** at each time step, not a nameplate / best-head rating. The user's
+reasoning: a theoretical best-head capacity is never "experienced" by the system
+during the simulation, so it cannot tell you whether outflow was actually
+pump-limited.
 
-Scope it to cover BOTH flow kinds. As of 2026-08-07 steady flow is a
-first-class parsed type (`ProjectModel.steady_file_ids` from the .prj's
-`Flow File=f##`), and `delete_plan(delete_unused_flow=True)` already picks the
-right .prj key per kind via `plans._prj_flow_key`. A `flows.py` that handled
-only `.u##` would re-open the flow==unsteady assumption that this session spent
-its time removing. The two kinds differ in the .prj key and in the `.rasmap`
-(`<EventConditions>` is keyed to `Base.u##.hdf`; steady flow has no EC layer),
-but not in the plan-side reference — every plan names its flow with the SAME
-`Flow File=` line whether it holds an f## or a u##.
+This is not a cosmetic choice. On the motivating model a station's summed
+best-head capacity was ~28% higher than its summed worst-head capacity, and the
+observed peak station flow fell BETWEEN the two — so "capacity exceeded" fires
+under the head-dependent reading and does not fire under the nameplate reading.
 
-Build `project/flows.py` mirroring `geoms.py`:
-- `renumber_flows(project, mapping)` / `renumber_flow` — bulk + single,
-  collision/cycle-safe (`.renumtmp` hop).
-- `insert_flow_gap`, `compact_flows`, `clone_flow` (new `Flow Title=`,
-  `DuplicateFlowTitle`), `delete_flow` + bulk `delete_flows` (by id-spec).
-- Add `renumber_flows_in_rasmap` to `project/rasmap.py`
-  (`remove_flows_from_rasmap` already exists for the delete side).
+Interpolate against the head actually seen at each step (`stage_hw` / `stage_tw`
+from `read_pump_station`), summed over all groups and all pumps in the station.
 
-Reference graph a flow renumber must rewrite (verified this session):
-- family files: `.u##` and `.u##.hdf` (preprocessor output; regenerated on run
-  but rename it if present). No `.x##`-equivalent for flows.
-- `.prj` `Unsteady File=` entries.
-- **every plan's `Flow File=u##`** line (a flow is a shared dependency, like a
-  geometry — this is the cross-reference that makes it a subsystem).
-- `.rasmap`: the `<EventConditions>` RASEventConditions layer token
-  (`Base.u##.hdf`). (The RASEventConditions sub-layer INSIDE a `<Results>` block
-  names `Base.p##.hdf`, so it is never matched — same rule as geoms.)
-- No "Current Unsteady" key in the `.prj` (flow is chosen per-plan), so nothing
-  global to repoint — simpler than plans, like geoms.
-- Delete semantics: mirror `delete_geom` — refuse if any plan still references
-  the flow (`FlowInUse`) unless `force=True`; `clean_rasmap=True` drops the EC
-  layer via `remove_flows_from_rasmap`.
-- Left alone (same policy): `.u##.hdf` internals; the `Flow Filename` attr inside
-  each `.p##.hdf`. Confirmed empirically 2026-08-07 that this is NOT merely
-  cosmetic — a renumbered `.p##.hdf` keeps its whole stale provenance block
-  (`Plan Data/Plan Information` → `Plan Filename`, `Geometry Filename`, and by
-  the same mechanism `Flow Filename`). hack_ras must not edit a binary to fix
-  it; RAS rewrites the HDF on the next compute. Read these with h5py — `strings`
-  does not surface them.
+**DECIDED — interpolate the crossing times.** Do not report a count of output
+intervals: at a 30-minute output interval that quantizes every answer to 0.5 h,
+which is coarse next to the duration being measured. Interpolate where the
+inflow curve crosses the head-dependent capacity curve and sum the exceedance
+durations.
 
-Once built, this session's cleanup would have been:
-`delete_flows(project, "09-11,13-17"); compact_flows(project)`.
+---
 
-### A. Blocked Obstructions (`#Block Obstruct=`) + `Levee=` — writer / merge support
+**E2. Interior surface flood volume.**
 
-Domain: **geometry-merge / xsedit** (NOT the plan/geometry file-ops). As of
-2026-07-21 both blocks are PARSED read-only (`blocks/xs_block_obstruct.py` →
-`CrossSection.blocked_obstructions`; `blocks/xs_levee.py` → `CrossSection.levee`),
-but there is **no writer / `merge.py` support** — a merged/edited cross-section
-currently drops them. Build when a merge use case actually needs to carry
-obstructions/levees through.
+**DECIDED** — the user must be able to specify either:
 
-Plan (still applies): a `MergeConfig.obstruct_source` field, a `_KEY_PREFIXES`
-entry, a `merge_obstruct()` reusing `_write_triplet_lines()`, and GUI wiring.
-Format facts: blocked obstructions use the same 8-char `[start, end, elevation]`
-triplet layout as IFAs (`normal` flag 0 with left/right + 0.0-edge sentinels /
-`multiple_block` flag -1 with literal stations), but with **no** `Permanent`
-follower line (obstructions are always solid). Fuller detail lives in the
-`ai_context.md` "Future Features — Not Yet Implemented" section.
+  * **(1) volume at a specific time code** — the ponded volume at one named
+    output time stamp, and
+  * **(2) peak ponded volume**, where each simulation is allowed its own,
+    chronologically independent peak (plan A and plan B need not peak together).
 
-### C. `project.rasmap` accessor — DONE 2026-08-10
+Sources: end-of-run standing volume is available directly as group attributes at
+`Results/Unsteady/Summary/Volume Accounting/Volume Accounting 2D/{area}/`
+(`Vol Ending`, `Cum Inflow`, `Cum Outflow`, `Error`, `Error Percent`, all
+acre-feet). A volume at an
+arbitrary time, and a peak, must instead be built from `read_cell_volume_table` +
+`interpolate_cell_volume` (both already exist) against the WSE at that time.
 
-**Built as specified below.** `RasMap` lives in `project/rasmap.py` (next to the
-functions it wraps) and takes `(rasmap_path, base_name)`, so it has no
-`RasProject` dependency and creates no import cycle — `rasmap.py` imports
-nothing from the package. `RasProject` gained `rasmap_path` and `rasmap`, both
-`cached_property` (safe: the accessor holds no parsed state, so it cannot go
-stale; only the two bound strings are cached, and they are fixed for the
-project's lifetime).
+**DECIDED — the peak is the maximum of the TOTAL ponded-volume time series**,
+i.e. a single physically consistent instant: "at some point in the run there was
+this much water ponded in the area". NOT the sum of per-cell maxima, which is an
+envelope that never actually occurred. The area is user-specified (defaults to the
+interior drainage area), and each simulation finds its own peak independently in
+time.
 
-Two judgment calls beyond the spec below, both minor: `renumber_flows` was added
-to the method list (the spec predates `flows.py`), and `exists` is a method
-rather than a property, following `pathlib.Path.exists()`. The mutating methods
-raise from the underlying `open()` when the .rasmap is absent — `exists()` is the
-guard. +7 tests in `tests/test_rasmap.py`, each pairing the accessor call with
-the equivalent free-function call so the sugar cannot drift. Verified read-only
-against the live Pattison model. Baseline 433 -> 440. See the ".rasmap Bound
-Accessor" section of `ai_context.md`.
+---
 
-The original specification follows, for the record.
+**E3. Two smaller items raised in the same conversation.**
 
-The rasmap functions in `project/rasmap.py` are stateless free functions taking
-`(rasmap_path, base_name, …)`, so callers must build the path and pass base_name
-every time, e.g.:
-`sort_rasmap_layers(os.path.join(proj.folder, proj.base_name + ".rasmap"), proj.base_name)`.
+**E3a. Surcharge along the profile — REFRAMED 2026-08-27, LARGELY ALREADY BUILT.**
 
-Add, on `RasProject`: a `rasmap_path` property, and a `rasmap` property returning
-a thin **bound helper** (`RasMap`) that carries `(path, base_name)` and delegates
-to the existing free functions — so usage becomes `proj.rasmap.sort()`,
-`proj.rasmap.remove_plans([...])`, `proj.rasmap.layer_refs()`,
-`proj.rasmap.result_plan_ids()`, etc. Chosen over a standalone `RasMap(path)`
-(user, 2026-07-28): a standalone object would have to re-derive base_name from the
-filename, and callers almost always already hold a `RasProject`.
+Originally requested as "surcharge propagated N feet upstream". That framing was
+abandoned once the profiles were plotted, because a single anchored number cannot
+be defined without arbitrary choices, and the two real trunks examined broke it in
+opposite directions:
 
-Deliberately **thin**: it binds path+base_name and forwards to the stateless
-functions — it does NOT parse the `.rasmap` XML into a model (that would break the
-"narrow, RAS-Mapper-owns-the-file" design). The free functions stay (delete_plan /
-renumber_* call them internally); the helper is pure sugar. ~30 lines + a couple
-of tests. Methods to expose: `sort`, `remove_plans` / `remove_geoms` /
-`remove_flows`, `renumber_plans` / `renumber_geoms`, `layer_refs`,
-`result_plan_ids`, `source_data_folders`, `exists`.
+  * on one trunk the surcharged reach began at the UPSTREAM end and stopped well
+    short of the pump (the pump draws the wet well down), so a number anchored at
+    the pump reports nothing useful;
+  * on the other EVERY face was surcharged including the upstream end, so any
+    number is a lower bound — the surcharge continues past the traced path.
 
-### B. Dry-run / preview on the mutating ops  (LOW PRIORITY)
+**DECIDED — report surcharge as a SERIES along the whole profile, not a scalar.**
+This dissolves the anchor question, the gap-tolerance question, and the
+report-format question all at once: gaps and extents are simply visible in the
+series, and any summary statistic a reader wants can be derived downstream
+without the library having to pick a definition.
 
-A `dry_run=True` (or a preview function) so a mutating op computes its full
-change-set — files renamed/deleted, `.prj` / `.rasmap` / plan-file edits,
-warnings, current-plan repoint — and returns it WITHOUT writing, so the change
-can be shown for confirmation before touching a real model.
+`PathProfile.is_surcharged` (boolean per face) already provides this. The only
+work left is:
 
-**Low priority** (confirmed by the user 2026-07-28): the user always backs up
-models before asking for these ops (covers rollback), and `project_health`
-verifies after — so a before-commit preview is optional. If built, it is the
-highest-effort item: it touches every mutating op (`renumber_plans`/`geoms`,
-`delete_plan(s)`/`geom(s)`, `clone_*`, `insert_*_gap`, `compact_*`), each of which
-must build its plan-of-changes then apply-or-return — best done as a deliberate
-refactor. Pairs with the health inspector (item A, done): they share the
-"describe the delta / describe the state" rendering.
+  * add `PathProfile.surcharge_margin` — `wse - crown`, positive when surcharged
+    and negative freeboard when not. Strictly more informative than the boolean:
+    it shows HOW MUCH, is continuous, and plots as a signed series against
+    station. One line on the dataclass.
+  * write both columns into the report alongside station / invert / crown / WSE.
 
-**Not planned:** a thin CLI (`python -m hack_ras ...`) — deferred indefinitely;
-the agent scripts these fine and the user didn't want the maintenance surface.
+**Still worth flagging in the output:** when the first or last face of a path is
+surcharged, the reach extends beyond the traced path. That is a note on the
+series endpoints, not a correction to a headline number, but a reader should not
+have to notice it themselves.
+
+**E3b. "Max HGL above rim at N nodes."** Needs (a) a max-over-time WSE for ALL
+pipe nodes at once — from `.../Nodes/Water Surface`, since Summary Output's
+`Maximum Water Surface` is per CELL, not per node — and (b) a rim accessor.
+
+**DECIDED** — the rim source is user-selectable:
+
+  * **(1) the node's terrain elevation** (`Geometry/Pipe Nodes/Attributes`
+    `Terrain Elevation`, which equals `Invert Elevation + Depth` exactly), or
+  * **(2) the terrain override elevation where one is set, falling back to the
+    terrain elevation where it is not.**
+
+`Terrain Elevation Override` is NaN on most nodes, so option (2) can differ from
+option (1) at only a handful — small, but silent, so the two must be genuinely
+distinct code paths and the output should report which rim source was used.
+
+**DECIDED — report ALL nodes regardless of type, and include the node type as
+a column** so the caller can filter afterwards. Do not pre-filter by type.
+
+**DECIDED — "exceeded" is `>=`**, chosen to be conservative: a max HGL that
+exactly reaches the rim counts as an exceedance. No additional tolerance.
+
+
+---
+
+**E4. The pumped-vs-gravity analysis script.** Phase 3, still to build. A new
+config-driven folder under `Scripts/`, comparing plan PAIRS within ONE model
+(Existing vs Future, pumped vs gravity) rather than two models. Two things to
+build in from the start:
+
+  * **Persist the `ConduitPath` conduit list in the output**, so a later run can
+    pin the identical route with one line instead of re-deriving it. Node
+    sequences are already recoverable from an existing workbook's Node column,
+    but the conduit list is the exact handle.
+  * **Match by NAME across the paired geometries** — a pumped geometry drops the
+    outfall conduits, so row-position matching will not work. `read_path_profile`
+    already raises rather than reading silently when a path's conduits are absent
+    from a plan.
+
+The existing `Scripts/Pipe_Profile_Comparison` workbook machinery (sheets, chart
+styling, delta blocks) carries over; only the comparison axis changes.
 
 ---
 

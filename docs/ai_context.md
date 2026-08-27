@@ -1284,6 +1284,136 @@ always holds. Treat `Minimum` as indicative only.
 and the conduit section. Only WS is in the file; when the conduit is surcharged
 that stored WS *is* the HGL.
 
+### Pump Stations
+```
+Geometry/Pump Stations/Attributes            # struct, one row per station
+Geometry/Pump Stations/Points                # (N, 2) station locations
+Geometry/Pump Stations/Pump Groups/Attributes            # Pump Station ID -> group
+Geometry/Pump Stations/Pump Groups/Pumps/Attributes      # Pump Group ID -> pump
+Geometry/Pump Stations/Pump Groups/Efficiency Curves Info    # (G, 2) [start, count]
+Geometry/Pump Stations/Pump Groups/Efficiency Curves Values  # (N, 2) head/flow pairs
+
+Results/…/Unsteady Time Series/Pumping Stations/{station}/Structure Variables  (T, V)
+```
+
+Useful `Attributes` fields: `Name`, `Inlet Pipe Node`, `Outlet Pipe Node`,
+`Inlet SA/2D`, `Outlet SA/2D`, `Highest Pump Line Elevation`, `Pump Groups`.
+Pump rows carry `WS On` / `WS Off` trigger elevations.
+
+**The whole group is ABSENT in a gravity-flow geometry** — `list_pump_stations()`
+returns `[]`, which is normal, not an error.
+
+**Never index `Structure Variables` positionally.** The column count and order
+vary per station: on Hillside, `26thAve PumpSta` writes 11 columns and
+`RockCr PumpSta` writes 5. Every column is named by the dataset's
+`Variable_Unit` attribute — `(V, 2)` byte pairs of `(name, unit)`, e.g.
+`(b'Flow', b'cfs')`, `(b'Stage HW', b'ft')`, `(b'Pump 1', b'cfs')`,
+`(b'Pump 1', b'Pumps on')`. `read_pump_station` maps by that attribute.
+
+**Per-pump results are PER GROUP, not per pump.** A group of three pumps writes
+one flow column plus a `Pumps on` count running 0..3. Hillside's `26thAve
+PumpSta` has 4 groups of 1 pump; `RockCr PumpSta` has 1 group of 3.
+
+Pipe-node references are written as `'Base [J314]'` — network name, then node in
+brackets. `read_pump_station` splits these into `inlet_network` / `inlet_node`;
+a station tied to a 2D area instead leaves them `None` and fills `inlet_area`.
+
+**The pump curve is PER PUMP, not per group.** `Efficiency Curves Values` is
+`(N, 2)` — column 0 = static head ascending, column 1 = flow descending — and
+`Efficiency Curves Info` gives each group's `[start, count]`, indexed by the
+GLOBAL pump-group row (select a station's groups via `Pump Station ID`). A group
+of three pumps sharing one curve delivers THREE TIMES the tabulated flow with all
+three running: verified against results, where `group flow / curve(head)` equals
+the `pumps_on` count exactly (1.00, 2.00, 3.00 with no scatter) on every group of
+a real model. Summing curves without the multiplier understates a multi-pump
+station threefold. `PumpCurve.group_capacity()` applies `n_pumps`;
+`PumpCurve.capacity()` is one pump. Despite the name, these are the pump curves —
+there is no separate head/flow dataset.
+
+**Head can run outside the tabulated curve.** Observed on a real station: head
+(`stage_tw - stage_hw`) reached 19.33 ft against a curve tabulated only to
+18.17 ft. `capacity()` CLAMPS to the end of the curve rather than extrapolating —
+an extrapolated pump curve is meaningless — and `in_range()` / the `n_clamped`
+count from `pump_station_capacity()` report when that happened, so a silently
+clamped capacity never passes for a real one.
+
+**Compare capacity against INFLOW, not the station's own outflow.** RAS delivers
+exactly `pumps_on x curve(head)`, so station outflow equals full capacity whenever
+every pump runs and can never exceed it — testing outflow against capacity is
+nearly a tautology. The meaningful question is whether the water ARRIVING exceeded
+what the pumps could move, i.e. `NodeTimeSeries.flow_in + inlet_flow` at the
+station's inlet node.
+
+### Pipe node rim elevations — two sources, and `Depth` follows the override
+`Geometry/Pipe Nodes/Attributes` carries `Invert Elevation`, `Depth`,
+`Terrain Elevation`, `Terrain Elevation Override` (NaN where unset) and
+`Node Type`. Two defensible rim elevations exist and they are NOT interchangeable:
+
+* **terrain** — `Terrain Elevation`, sampled from the DEM.
+* **override** — `Terrain Elevation Override` where the modeller set one, falling
+  back to the terrain elevation elsewhere.
+
+They agree at every node with no override, so on many geometries the choice looks
+academic. Where one IS set they can differ substantially, and **the override is
+what RAS itself uses**: `Invert Elevation + Depth` reproduces the override, not
+the terrain elevation. Measured on a real model, one outfall node carried terrain
+728.67 against an override of 719.00 — a 9.67 ft difference. Because an override
+is typically LOWER than the DEM value, defaulting to terrain would silently
+under-count rim exceedances. `read_node_rims(hdf, source='override'|'terrain')`
+defaults to `'override'` for that reason and returns both plus the raw fields.
+
+Node types (`Junction`, `Start`, `External`, `Closed`, `Culvert Opening`) are
+returned unfiltered so callers filter afterwards; the reader does not decide what
+counts as a node.
+
+**Node maxima are not in Summary Output.** `Summary Output/Pipe Networks/{net}/
+Maximum Water Surface` is per CELL, not per node — `read_node_max_wse` reduces the
+`Nodes/Water Surface` time series instead, and returns the time index of each
+node's peak alongside the value.
+
+### Two geometries of one model can be DIFFERENT pipe networks
+A model often carries paired geometries for the same system — commonly a
+free-outfall variant and one where the outfall is replaced by a pump station.
+The pumped variant typically **drops the outfall node and its conduit**, so the
+two geometries have different node and conduit counts even though they describe
+the same trunk system. Assume nothing about them lining up.
+
+- **Compare pipe networks by NAME, never by row position.** Node and conduit
+  ordering and counts are per-geometry.
+- Conduits shared between the two usually keep an identical length, so a shared
+  station axis over the shared reach is exact.
+- **But the face count of a conduit at a TERMINAL node depends on whether a
+  downstream conduit exists.** A conduit whose DS node continues downstream gets
+  a boundary face that the same conduit does not get when its DS node is
+  terminal. Measured on a real paired model: of two trunk routes, one matched
+  face-for-face and the other differed in exactly one conduit — the last one into
+  the terminal node, which reached ~60 ft further along its own length in the
+  variant where the outfall continued. Plot each plan against its own station
+  column, or trim to the common faces.
+- `read_path_profile` raises rather than reading silently when a path's conduits
+  are absent from the plan's geometry — which is what feeding it a path traced on
+  the other geometry produces.
+
+### Resolving pipe-network forks by flow is PLAN-DEPENDENT
+Choosing a downstream branch by peak flow gives different answers in different
+plans, because the flow split itself changes between events. Measured across
+eight plans of one real model covering six fork nodes: **one fork flipped** its
+preferred branch between events (the losing branch gained ~8 cfs while the winner
+lost ~6), and a second came within 0.9 cfs of flipping.
+
+So: **trace a `ConduitPath` ONCE and reuse it for every plan being compared.**
+Re-tracing per plan can hand two plans different station axes with no error
+raised — a silent corruption of any profile comparison.
+
+`trace_path` raises `AmbiguousRoute` by default rather than guessing.
+`peak_flow_resolver` is opt-in and takes the plan HDF explicitly, so the plan
+dependence is visible at the call site, and it records each decision in
+`ConduitPath.forks`. `via=[...]` pins a route from geometry alone with no results
+involved — prefer it whenever the branch choice is already known.
+
+Note that `trace_path` first discards branches that cannot reach the destination,
+so most forks resolve themselves and only genuinely braided reaches ever raise.
+
 ### Computation Block (high-frequency solver diagnostics)
 Path: `Results/Computation Block/`
 
@@ -1338,6 +1468,15 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `PipeNetwork` | `name`, `nodes dict[str,int]`, `conduits dict[str,PipeConduit]`, `conduit_index dict[str,int]`, `upstream_of dict`, `downstream_of dict` | `nodes[name]` → results column index |
 | `NodeTimeSeries` | `timestamps`, `depth`, `wse`, `inlet_flow`, `flow_in`, `flow_out` — all `(T,) float64` | `flow_in` = sum of `Pipe Flow DS` for conduits draining into node |
 | `ConduitTimeSeries` | `timestamps`, `flow_us`, `flow_ds`, `vel_us`, `vel_ds` — all `(T,) float64` | US/DS ends of the conduit |
+| `Pump` | `name`, `ws_on`, `ws_off` | One physical pump's trigger elevations |
+| `PumpGroup` | `name`, `flow (T,)`, `pumps_on (T,)`, `pumps list[Pump]`, `n_pumps` | RAS reports flow and an on-count PER GROUP, not per pump |
+| `PumpStation` | `name`, `timestamps`, `flow`, `stage_hw`, `stage_tw`, `groups`, `inlet_network`/`inlet_node`, `outlet_network`/`outlet_node`, `inlet_area`/`outlet_area`, `highest_pump_line_elev`; properties `n_pumps`, `pumps_on` | Node fields parsed from RAS's `'Base [J314]'` form; `None` when the station is tied to a 2D area instead |
+| `PumpCurve` | `group`, `head (P,)`, `flow (P,)`, `n_pumps`; methods `capacity(head)`, `group_capacity(head)`, `in_range(head)` | Flow is PER PUMP; `capacity` clamps outside the tabulated range rather than extrapolating |
+| `NodeRims` | `names`, `node_types`, `invert`, `depth`, `terrain`, `override`, `rim`, `source`; `has_override`, `as_dict()` | `rim` follows the selected source; `invert + depth` reproduces the OVERRIDE rim |
+| `NodeMaxWse` | `network`, `names`, `wse (N,)`, `time_index (N,)`, `timestamps`; `as_dict()`, `time_of_max(node)` | Max over the run per node; Summary Output's equivalent is per CELL and cannot be used |
+| `VolumeAccounting` | `kind`, `name`, `vol_starting`, `vol_ending`, `cum_inflow`, `cum_outflow`, `error`, `error_percent`, `precip_excess`, `precip_excess_depth`, `units` | RAS's own mass balance, stored as group ATTRIBUTES. `vol_ending` is END-of-run, not the peak |
+| `ConduitPath` | `network`, `conduits`, `nodes`, `segments`, `bridges`, `forks`; properties `start`, `end` | ROUTE ONLY, no results — trace once and reuse across every plan compared |
+| `PathProfile` | `path`, `when`, `station`, `invert`, `crown`, `wse`, `velocity`, `flow`, `conduit_of`, `node_at`, `total_length`; properties `depth`, `is_surcharged`, `surcharge_margin`, `energy_grade` | One continuous profile chained along a ConduitPath, station accumulated across conduits and bridged gaps |
 | `ConduitProfile` | `station`, `invert`, `wse`, `velocity`, `flow`, `face_indices` — all `(F,)`; plus `us_node`/`ds_node`, `us_invert`/`ds_invert`, `length`, `rise`, `span`, `shape`, `si_units` | Along-conduit profile at FACE resolution — the RAS Mapper profile plot. Properties: `depth`, `crown`, `is_surcharged`, `energy_grade` (`wse + V²/2g`), `station_from_ds` (RAS Mapper x-axis). `station` ascends US→DS |
 
 ### `reader.py` — public functions
@@ -1425,6 +1564,20 @@ alignment.
 | `read_pipe_network(hdf_path, network)` | `PipeNetwork` | Geometry, index maps, adjacency dicts for one network |
 | `read_node_timeseries(hdf_path, network, node_name)` | `NodeTimeSeries` | Depth, WSE, inlet flow, computed flow_in / flow_out |
 | `read_conduit_timeseries(hdf_path, network, conduit_name)` | `ConduitTimeSeries` | Flow and velocity at US and DS ends |
+| `list_pump_stations(hdf_path)` | `list[str]` | Empty list when the geometry has no pump stations (normal for gravity flow) |
+| `read_pump_station(hdf_path, station)` | `PumpStation` | Total flow, HW/TW stage, per-group flow and on-count, pump trigger elevations, inlet/outlet connectivity. Columns mapped via the `Variable_Unit` attribute, never positionally |
+| `pump_stations_for_node(hdf_path, node, network=None)` | `list[str]` | Which station serves a given manhole |
+| `read_node_points(hdf_path)` | `dict[str, (x, y)]` | Pipe node coordinates |
+| `trace_path(network, start, end, via=None, resolver=None)` | `ConduitPath` | Downstream route. Branches that cannot reach `end` are discarded first; a genuine fork raises `AmbiguousRoute` unless `via` or a `resolver` is given |
+| `peak_flow_resolver(hdf_path, network)` | callable | Opt-in fork resolver preferring the greater peak \|flow\|. **PLAN-DEPENDENT** — see the empirical section above |
+| `join_paths(paths, node_points)` | `ConduitPath` | Join runs across a physical break (open channel, detention pond); station later advances by the true node-to-node distance |
+| `read_pump_curves(hdf_path, station)` | `dict[str, PumpCurve]` | Per-group head/flow curves. Flow is PER PUMP — see the Pump Stations section |
+| `pump_station_capacity(curves, head)` | `(np.ndarray, int)` | Total capacity with every pump running, plus a count of heads clamped outside a curve. Compare against INFLOW, not station outflow |
+| `read_node_rims(hdf_path, source='override')` | `NodeRims` | Rim elevations and node types. `'override'` (default, what RAS uses) or `'terrain'` |
+| `read_node_max_wse(hdf_path, network)` | `NodeMaxWse` | Max WSE per node over the run, vectorised; `network` accepts a `PipeNetwork` or a name |
+| `list_volume_accounting(hdf_path)` | `dict[str, list[str]]` | `{kind: [names]}`; empty when the plan has none |
+| `read_volume_accounting(hdf_path, name, kind='2D')` | `VolumeAccounting` | RAS's mass-balance totals for one area / pipe network / reach |
+| `read_path_profile(hdf_path, network, path, when='Maximum')` | `PathProfile` | Chain conduit profiles onto one station axis. Raises if a path conduit is absent from this plan's geometry |
 | `read_conduit_profile(hdf_path, network, conduit_name, when='Maximum')` | `ConduitProfile` | Along-conduit profile at every face. `network` accepts a `PipeNetwork` **or** a bare network name. `when` = `'Maximum'`, `'Minimum'`, or a time-stamp string. Max/Min are PER-FACE ENVELOPES, not snapshots — pass a stamp for a physically consistent profile |
 
 ## Line-in-polygon measurement (`hack_ras/gis/clip.py`)

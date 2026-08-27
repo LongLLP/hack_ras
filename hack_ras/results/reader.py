@@ -14,8 +14,17 @@ from .model import (
     AreaGeometry,
     CellVolumeTable,
     FaceGeometry,
+    ConduitPath,
     ConduitProfile,
     ConduitTimeSeries,
+    NodeMaxWse,
+    NodeRims,
+    PathProfile,
+    Pump,
+    PumpCurve,
+    PumpGroup,
+    PumpStation,
+    VolumeAccounting,
     NodeTimeSeries,
     PipeConduit,
     PipeNetwork,
@@ -426,6 +435,19 @@ _PIPE_TS_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
     "/Unsteady Time Series/Pipe Networks/{network}"
 )
+_PUMP_TS_BASE = (
+    "Results/Unsteady/Output/Output Blocks/Base Output"
+    "/Unsteady Time Series/Pumping Stations"
+)
+_PUMP_GEOM = "Geometry/Pump Stations"
+_PIPE_NODES = "Geometry/Pipe Nodes/Attributes"
+# RAS 7.0 moved the run summary under Results/Unsteady; 6.x and
+# earlier wrote it at Results/Summary. Check both, newest first.
+_VOL_ROOTS = (
+    "Results/Unsteady/Summary/Volume Accounting",
+    "Results/Summary/Volume Accounting",
+)
+
 _PIPE_SUM_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
     "/Summary Output/Pipe Networks/{network}"
@@ -1228,6 +1250,842 @@ def read_conduit_profile(
         span=float(row['Span']),
         shape=_decode(row['Shape']),
         si_units=si_units,
+    )
+
+
+# ---------------------------
+# Pump stations
+# ---------------------------
+
+def _split_network_node(raw: str):
+    """
+    Split a pump station's pipe-node reference into (network, node).
+
+    RAS writes these as ``'Base [J314]'``. Returns (None, None) for a blank
+    field, which is what a station tied to a 2D area or a 1D reach carries.
+    """
+    text = _decode(raw)
+    if not text:
+        return None, None
+    m = re.match(r'^(.*?)\s*\[(.*)\]$', text)
+    if not m:
+        return None, text
+    return m.group(1).strip(), m.group(2).strip()
+
+
+def list_pump_stations(hdf_path: str) -> list[str]:
+    """
+    Return the names of all pump stations in a plan HDF5 file.
+
+    Returns an empty list when the plan has none -- a gravity-flow geometry
+    simply omits the whole ``Geometry/Pump Stations`` group, so an empty result
+    is normal and not an error.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        try:
+            raw = hdf[f'{_PUMP_GEOM}/Attributes'][()]
+        except KeyError:
+            return []
+        return [_decode(r['Name']) for r in raw]
+
+
+def read_pump_station(hdf_path: str, station: str) -> PumpStation:
+    """
+    Read results and connectivity for one pump station.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    station : str
+        Station name, as returned by list_pump_stations().
+
+    Returns
+    -------
+    PumpStation
+
+    Raises
+    ------
+    KeyError
+        If the station or its results are absent.
+
+    Notes
+    -----
+    The result columns are NOT in a fixed order or count: each station's
+    ``Structure Variables`` dataset carries a ``Variable_Unit`` attribute naming
+    every column, and different stations have different widths (on the Hillside
+    model, one station writes 11 columns and the other 5). This reader maps
+    columns by that attribute; never index them positionally.
+
+    Per-pump results are reported PER GROUP, not per individual pump. A group of
+    three pumps has one flow column and a `pumps_on` count running 0..3. The
+    individual pumps appear in ``PumpGroup.pumps`` for their on/off trigger
+    elevations.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        try:
+            raw = hdf[f'{_PUMP_GEOM}/Attributes'][()]
+        except KeyError:
+            raise KeyError(
+                f"No pump stations in {hdf_path} -- this plan's geometry has "
+                f"no '{_PUMP_GEOM}' group (a gravity-flow geometry omits it)."
+            ) from None
+        names = [_decode(r['Name']) for r in raw]
+        try:
+            st_idx = names.index(station)
+        except ValueError:
+            raise KeyError(
+                f"Pump station '{station}' not found in {hdf_path}. "
+                f"Available: {names}"
+            ) from None
+        row = raw[st_idx]
+
+        ts_path = f'{_PUMP_TS_BASE}/{station}/Structure Variables'
+        if ts_path not in hdf:
+            raise KeyError(
+                f"No results for pump station '{station}' at {ts_path}"
+            )
+        ds = hdf[ts_path]
+        values = ds[()].astype(np.float64)
+        var_unit = ds.attrs.get('Variable_Unit')
+        if var_unit is None:
+            raise KeyError(
+                f"Pump station '{station}' results carry no 'Variable_Unit' "
+                f"attribute; column meanings cannot be resolved safely."
+            )
+        cols = [(_decode(v[0]), _decode(v[1])) for v in var_unit]
+
+        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+
+        # Group geometry: which groups belong to this station, and their pumps.
+        groups_meta, pumps_meta = [], []
+        gpath = f'{_PUMP_GEOM}/Pump Groups/Attributes'
+        if gpath in hdf:
+            groups_meta = hdf[gpath][()]
+        ppath = f'{_PUMP_GEOM}/Pump Groups/Pumps/Attributes'
+        if ppath in hdf:
+            pumps_meta = hdf[ppath][()]
+
+    def column(label: str, unit: str):
+        for i, (nm, un) in enumerate(cols):
+            if nm == label and un == unit:
+                return values[:, i]
+        return None
+
+    total = column('Flow', 'cfs')
+    if total is None:
+        total = np.zeros(len(timestamps), dtype=np.float64)
+    hw = column('Stage HW', 'ft')
+    tw = column('Stage TW', 'ft')
+    zeros = np.zeros(len(timestamps), dtype=np.float64)
+
+    # Pumps for a group are matched by the group's row index in the global table.
+    pumps_by_group: dict = {}
+    for pr in pumps_meta:
+        pumps_by_group.setdefault(int(pr['Pump Group ID']), []).append(
+            Pump(name=_decode(pr['Name']),
+                 ws_on=float(pr['WS On']), ws_off=float(pr['WS Off'])))
+
+    groups = []
+    for g_idx, g in enumerate(groups_meta):
+        if int(g['Pump Station ID']) != st_idx:
+            continue
+        gname = _decode(g['Name'])
+        gflow = column(gname, 'cfs')
+        gon = column(gname, 'Pumps on')
+        groups.append(PumpGroup(
+            name=gname,
+            flow=gflow if gflow is not None else zeros.copy(),
+            pumps_on=gon if gon is not None else zeros.copy(),
+            pumps=pumps_by_group.get(g_idx, []),
+        ))
+
+    in_net, in_node = _split_network_node(row['Inlet Pipe Node'])
+    out_net, out_node = _split_network_node(row['Outlet Pipe Node'])
+    in_area = _decode(row['Inlet SA/2D']) or None
+    out_area = _decode(row['Outlet SA/2D']) or None
+
+    return PumpStation(
+        name=station,
+        timestamps=timestamps,
+        flow=total,
+        stage_hw=hw if hw is not None else zeros.copy(),
+        stage_tw=tw if tw is not None else zeros.copy(),
+        groups=groups,
+        inlet_network=in_net,
+        inlet_node=in_node,
+        outlet_network=out_net,
+        outlet_node=out_node,
+        inlet_area=in_area,
+        outlet_area=out_area,
+        highest_pump_line_elev=float(row['Highest Pump Line Elevation']),
+    )
+
+
+def pump_stations_for_node(hdf_path: str, node: str,
+                           network: str = None) -> list[str]:
+    """
+    Return the names of pump stations whose inlet or outlet is `node`.
+
+    Convenience for the common question "which pump serves this manhole?".
+    `network` narrows the match when several pipe networks reuse a node name.
+    """
+    out = []
+    for name in list_pump_stations(hdf_path):
+        ps = read_pump_station(hdf_path, name)
+        for net, nd in ((ps.inlet_network, ps.inlet_node),
+                        (ps.outlet_network, ps.outlet_node)):
+            if nd == node and (network is None or net == network):
+                out.append(name)
+                break
+    return out
+
+
+# ---------------------------
+# Pipe network routing
+# ---------------------------
+
+class AmbiguousRoute(ValueError):
+    """Raised when more than one downstream branch reaches the destination."""
+
+
+def read_node_points(hdf_path: str) -> dict:
+    """
+    Return {node name: (x, y)} for every pipe node in the file.
+
+    Used to measure the real distance across a physical break when joining path
+    segments; also handy for placing nodes in GIS.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        attrs = hdf['Geometry/Pipe Nodes/Attributes'][()]
+        pts = hdf['Geometry/Pipe Nodes/Points'][()]
+    return {_decode(r['Name']): (float(pts[i][0]), float(pts[i][1]))
+            for i, r in enumerate(attrs)}
+
+
+def peak_flow_resolver(hdf_path: str, network: PipeNetwork):
+    """
+    Build a fork resolver that prefers the branch with the greater peak |flow|.
+
+    Returns a callable suitable for `trace_path(..., resolver=...)`.
+
+    WARNING -- this is PLAN-DEPENDENT. Flow distribution changes between plans,
+    so the same fork can resolve differently in different runs: on the Hillside
+    model, node BedJ293 prefers BedC195 in six of eight plans but BedC193 in the
+    two 10-year pumped runs. Trace the path ONCE with this resolver and reuse the
+    resulting ConduitPath for every plan you compare -- re-tracing per plan can
+    give two plans different station axes without any error being raised.
+    """
+    def resolve(node: str, candidates: list) -> str:
+        flows = {c: float(np.abs(
+            read_conduit_profile(hdf_path, network, c, 'Maximum').flow).max())
+            for c in candidates}
+        best = max(flows, key=flows.get)
+        detail = ', '.join(f'{c} ({flows[c]:.2f})' for c in candidates
+                           if c != best)
+        return best, (f'{node}: took {best} (peak |Q| {flows[best]:.2f} cfs) '
+                      f'over {detail}')
+    return resolve
+
+
+def _reaches(network: PipeNetwork, start_node: str, target: str) -> bool:
+    """Is `target` reachable downstream from `start_node`?"""
+    seen, stack = {start_node}, [start_node]
+    while stack:
+        cur = stack.pop()
+        if cur == target:
+            return True
+        for c in network.downstream_of.get(cur, []):
+            nxt = network.conduits[c].ds_node
+            if nxt not in seen:
+                seen.add(nxt)
+                stack.append(nxt)
+    return False
+
+
+def trace_path(network: PipeNetwork, start: str, end: str,
+               via: list = None, resolver=None) -> ConduitPath:
+    """
+    Trace the downstream route from `start` to `end` through a pipe network.
+
+    Branches that cannot reach the destination are discarded automatically, so a
+    node with several outgoing conduits is only treated as ambiguous when more
+    than one of them genuinely leads to `end`.
+
+    Parameters
+    ----------
+    network : PipeNetwork
+        From read_pipe_network().
+    start, end : str
+        Node names. Both must be in the network.
+    via : list[str], optional
+        Intermediate nodes the route must pass through, in order. The usual way
+        to pin a braided reach without needing results.
+    resolver : callable, optional
+        ``resolver(node, candidates) -> (chosen, note)`` used when more than one
+        branch reaches the destination. See `peak_flow_resolver`, and read its
+        warning about plan dependence. Without a resolver a genuine fork raises
+        AmbiguousRoute rather than guessing.
+
+    Returns
+    -------
+    ConduitPath
+        Route only -- no results. Reuse one path across every plan you compare.
+
+    Raises
+    ------
+    ValueError
+        If a node is unknown, or the destination is unreachable.
+    AmbiguousRoute
+        If a fork has several destination-reaching branches and no resolver.
+    """
+    for node in [start, end] + list(via or []):
+        if node not in network.nodes:
+            raise ValueError(
+                f"Node '{node}' is not in pipe network '{network.name}'")
+
+    waypoints = [start] + list(via or []) + [end]
+    conduits, nodes, forks = [], [start], []
+
+    for leg_start, leg_end in zip(waypoints, waypoints[1:]):
+        if leg_start == leg_end:
+            continue
+        if not _reaches(network, leg_start, leg_end):
+            raise ValueError(
+                f"No downstream route from '{leg_start}' to '{leg_end}' in "
+                f"network '{network.name}'. Check the order of `via` nodes, or "
+                f"split the path into segments if a physical break separates "
+                f"them.")
+        cur, guard = leg_start, 0
+        while cur != leg_end:
+            guard += 1
+            if guard > len(network.conduits) + 1:
+                raise ValueError(
+                    f"Route {leg_start} -> {leg_end} did not terminate; the "
+                    f"network may contain a loop.")
+            outs = network.downstream_of.get(cur, [])
+            live = [c for c in outs
+                    if _reaches(network, network.conduits[c].ds_node, leg_end)
+                    or network.conduits[c].ds_node == leg_end]
+            if not live:
+                raise ValueError(
+                    f"Route {leg_start} -> {leg_end} dead-ends at '{cur}'.")
+            if len(live) == 1:
+                chosen = live[0]
+            elif resolver is None:
+                raise AmbiguousRoute(
+                    f"Node '{cur}' has {len(live)} downstream branches that all "
+                    f"reach '{leg_end}': {live}. Pass `via=[...]` to pin the "
+                    f"route, or a `resolver` such as peak_flow_resolver(). "
+                    f"Note that resolving by flow is plan-dependent.")
+            else:
+                chosen, note = resolver(cur, live)
+                forks.append(note)
+            conduits.append(chosen)
+            cur = network.conduits[chosen].ds_node
+            nodes.append(cur)
+
+    return ConduitPath(network=network.name, conduits=conduits, nodes=nodes,
+                       segments=[(start, end)], bridges=[], forks=forks)
+
+
+def join_paths(paths: list, node_points: dict) -> ConduitPath:
+    """
+    Join several traced paths into one route across physical breaks.
+
+    Use this where the run is hydraulically continuous but has no conduit -- an
+    open channel or a surface detention pond between two pipe systems. The
+    station axis later advances by the straight-line distance between the
+    joining nodes, so it stays a real distance.
+
+    Parameters
+    ----------
+    paths : list[ConduitPath]
+        In downstream order.
+    node_points : dict
+        From read_node_points().
+
+    Raises
+    ------
+    ValueError
+        If the list is empty, mixes networks, or a joining node has no coordinate.
+    """
+    if not paths:
+        raise ValueError('join_paths requires at least one ConduitPath')
+    nets = {p.network for p in paths}
+    if len(nets) > 1:
+        raise ValueError(f'Cannot join paths from different networks: {nets}')
+
+    out = ConduitPath(network=paths[0].network,
+                      conduits=list(paths[0].conduits),
+                      nodes=list(paths[0].nodes),
+                      segments=list(paths[0].segments),
+                      bridges=list(paths[0].bridges),
+                      forks=list(paths[0].forks))
+    for nxt in paths[1:]:
+        a, b = out.nodes[-1], nxt.nodes[0]
+        for node in (a, b):
+            if node not in node_points:
+                raise ValueError(
+                    f"Node '{node}' has no coordinate; cannot measure the "
+                    f"break between '{a}' and '{b}'.")
+        gap = float(np.hypot(node_points[a][0] - node_points[b][0],
+                             node_points[a][1] - node_points[b][1]))
+        out.bridges.append((a, b, gap))
+        out.conduits.extend(nxt.conduits)
+        out.nodes.extend(nxt.nodes)
+        out.segments.extend(nxt.segments)
+        out.forks.extend(nxt.forks)
+    return out
+
+
+def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
+                      when: str = 'Maximum') -> PathProfile:
+    """
+    Read one continuous profile along a ConduitPath.
+
+    Chains read_conduit_profile over the path's conduits onto a single station
+    axis, advancing by each conduit's length and by the measured distance across
+    any bridged break.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    network : PipeNetwork
+        Must be the network the path was traced in, read from THIS plan.
+    path : ConduitPath
+    when : str, default 'Maximum'
+        'Maximum', 'Minimum', or a time-stamp string. See read_conduit_profile
+        for the envelope caveats, which apply here unchanged.
+
+    Returns
+    -------
+    PathProfile
+
+    Raises
+    ------
+    ValueError
+        If the path was traced in a different network, or a conduit on the path
+        is missing from this plan -- which is what happens when a gravity-flow
+        and a pumped geometry are mixed up, since the pumped geometry drops the
+        outfall conduits.
+    """
+    if path.network != network.name:
+        raise ValueError(
+            f"Path was traced in network '{path.network}' but was given "
+            f"network '{network.name}'")
+    missing = [c for c in path.conduits if c not in network.conduit_index]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} conduit(s) on the path are absent from this "
+            f"plan's geometry: {missing[:5]}. The two geometries are not the "
+            f"same network -- a gravity-flow geometry carries outfall conduits "
+            f"that a pumped geometry does not.")
+
+    bridge_at = {a: (b, gap) for a, b, gap in path.bridges}
+    station, invert, crown, wse, vel, flow, owner = [], [], [], [], [], [], []
+    node_at = {}
+    offset = 0.0
+    prev_ds = None
+
+    for cname in path.conduits:
+        pr = read_conduit_profile(hdf_path, network, cname, when)
+        if prev_ds is not None and prev_ds in bridge_at:
+            offset += bridge_at[prev_ds][1]
+        node_at[len(station)] = pr.us_node
+        station.extend(offset + pr.station)
+        invert.extend(pr.invert)
+        crown.extend(pr.invert + pr.rise)
+        wse.extend(pr.wse)
+        vel.extend(pr.velocity)
+        flow.extend(pr.flow)
+        owner.extend([cname] * len(pr.station))
+        offset += pr.length
+        prev_ds = pr.ds_node
+        si = pr.si_units
+
+    if station:
+        node_at[len(station) - 1] = path.nodes[-1]
+
+    return PathProfile(
+        path=path,
+        when=when,
+        station=np.asarray(station, dtype=np.float64),
+        invert=np.asarray(invert, dtype=np.float64),
+        crown=np.asarray(crown, dtype=np.float64),
+        wse=np.asarray(wse, dtype=np.float64),
+        velocity=np.asarray(vel, dtype=np.float64),
+        flow=np.asarray(flow, dtype=np.float64),
+        conduit_of=np.asarray(owner, dtype=object),
+        node_at=node_at,
+        total_length=offset,
+        si_units=bool(si) if station else False,
+    )
+
+
+# ---------------------------
+# Pump curves
+# ---------------------------
+
+def read_pump_curves(hdf_path: str, station: str) -> dict:
+    """
+    Read the head/flow curve for every pump group of one station.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to a plan or geometry HDF containing pump stations.
+    station : str
+        Station name, as returned by list_pump_stations().
+
+    Returns
+    -------
+    dict[str, PumpCurve]
+        Keyed by pump group name, matching PumpGroup.name and the results
+        column labels.
+
+    Raises
+    ------
+    KeyError
+        If the station or the curve datasets are absent.
+
+    Notes
+    -----
+    RAS stores these under `Pump Groups/Efficiency Curves Info` (per group
+    `[start, count]` into the values array) and `.../Efficiency Curves Values`
+    (`(N, 2)`: column 0 = static head ascending, column 1 = delivered flow
+    descending). The "Efficiency" name is RAS's; the content is the pump curve.
+
+    **The tabulated flow is PER PUMP.** A group of three pumps sharing one curve
+    delivers three times that flow with all three running -- verified against
+    results, where `group flow / curve(head)` equals the `pumps_on` count exactly.
+    `PumpCurve.n_pumps` carries the count and `group_capacity()` applies it.
+
+    `Efficiency Curves Info` is indexed by the GLOBAL pump-group row, so the
+    rows belonging to a station must be selected via `Pump Station ID` -- the
+    same global-vs-local distinction that applies to pipe network indices.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        try:
+            stations = hdf[f'{_PUMP_GEOM}/Attributes'][()]
+        except KeyError:
+            raise KeyError(
+                f"No pump stations in {hdf_path} -- this geometry has no "
+                f"'{_PUMP_GEOM}' group."
+            ) from None
+        names = [_decode(r['Name']) for r in stations]
+        try:
+            st_idx = names.index(station)
+        except ValueError:
+            raise KeyError(
+                f"Pump station '{station}' not found in {hdf_path}. "
+                f"Available: {names}"
+            ) from None
+
+        gpath = f'{_PUMP_GEOM}/Pump Groups/Attributes'
+        ipath = f'{_PUMP_GEOM}/Pump Groups/Efficiency Curves Info'
+        vpath = f'{_PUMP_GEOM}/Pump Groups/Efficiency Curves Values'
+        for path in (gpath, ipath, vpath):
+            if path not in hdf:
+                raise KeyError(f"Pump curve dataset missing: {path}")
+        groups = hdf[gpath][()]
+        info = hdf[ipath][()]
+        values = hdf[vpath][()]
+
+    curves = {}
+    for g_idx, g in enumerate(groups):
+        if int(g['Pump Station ID']) != st_idx:
+            continue
+        start, count = int(info[g_idx][0]), int(info[g_idx][1])
+        block = values[start:start + count]
+        curves[_decode(g['Name'])] = PumpCurve(
+            group=_decode(g['Name']),
+            head=block[:, 0].astype(np.float64),
+            flow=block[:, 1].astype(np.float64),
+            n_pumps=int(g['Pumps']),
+        )
+    return curves
+
+
+def pump_station_capacity(curves: dict, head) -> tuple:
+    """
+    Total station capacity with every pump running, at the given head(s).
+
+    This is the denominator for "was outflow limited by the pumps?" -- the
+    head-dependent capacity actually available during the run, NOT a nameplate
+    or best-head rating. A best-head rating is never experienced by the system
+    and so cannot answer that question.
+
+    **Compare this against INFLOW, not against the station's own outflow.** RAS
+    delivers exactly `pumps_on x curve(head)`, so station outflow equals this
+    total whenever every pump is running and can never exceed it -- testing
+    outflow against capacity is very nearly a tautology. The meaningful question
+    is whether the water ARRIVING exceeded what the pumps could move, so use the
+    inflow at the pump's inlet node (conduit inflow plus surface inlet flow, i.e.
+    NodeTimeSeries.flow_in + NodeTimeSeries.inlet_flow).
+
+    Parameters
+    ----------
+    curves : dict[str, PumpCurve]
+        From read_pump_curves().
+    head : float or array-like
+        Static head. For a station discharging over a fixed pump line this is
+        `stage_tw - stage_hw` from read_pump_station().
+
+    Returns
+    -------
+    (capacity, n_clamped) : (np.ndarray, int)
+        `capacity` is the summed flow across all groups, same shape as `head`.
+        `n_clamped` counts head values that fell outside at least one group's
+        tabulated curve and were clamped to its end rather than extrapolated --
+        report it, because it does happen on real models and a silently clamped
+        capacity is a quiet under- or over-statement.
+
+    Raises
+    ------
+    ValueError
+        If `curves` is empty.
+    """
+    if not curves:
+        raise ValueError('pump_station_capacity requires at least one PumpCurve')
+    h = np.atleast_1d(np.asarray(head, dtype=np.float64))
+    total = np.zeros_like(h)
+    covered = np.ones_like(h, dtype=bool)
+    for curve in curves.values():
+        total += curve.group_capacity(h)
+        covered &= curve.in_range(h)
+    return total, int(np.sum(~covered))
+
+
+# ---------------------------
+# Pipe node rims and maxima
+# ---------------------------
+
+def read_node_rims(hdf_path: str, source: str = 'override') -> NodeRims:
+    """
+    Read rim elevations and node types for every pipe node.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to a plan or geometry HDF.
+    source : {'override', 'terrain'}, default 'override'
+        Which rim to place in `NodeRims.rim`.
+
+        * ``'override'`` -- the modeller's `Terrain Elevation Override` where one
+          is set, falling back to `Terrain Elevation` elsewhere. This is what RAS
+          itself uses: `Invert Elevation + Depth` reproduces the override, not
+          the terrain elevation. Default because it is the effective rim.
+        * ``'terrain'`` -- the raw DEM-sampled `Terrain Elevation` everywhere,
+          ignoring any override.
+
+    Returns
+    -------
+    NodeRims
+
+    Raises
+    ------
+    KeyError
+        If the node attribute table is absent.
+    ValueError
+        If `source` is not one of the two accepted values.
+
+    Notes
+    -----
+    The two sources agree at every node with no override, so on many models they
+    are identical and the choice looks academic. Where an override IS set they
+    can differ by many feet, and because the override is usually LOWER than the
+    DEM value, using `'terrain'` under-counts rim exceedances. Both are offered
+    because the choice belongs to the analyst, not the reader.
+
+    Node types are returned unfiltered -- 'Junction', 'Start', 'External',
+    'Closed' and 'Culvert Opening' all occur -- so callers can filter afterwards
+    rather than having the reader decide what counts.
+    """
+    if source not in ('override', 'terrain'):
+        raise ValueError(
+            f"source must be 'override' or 'terrain', got {source!r}")
+
+    with h5py.File(hdf_path, 'r') as hdf:
+        if _PIPE_NODES not in hdf:
+            raise KeyError(f'No pipe nodes in {hdf_path} ({_PIPE_NODES})')
+        raw = hdf[_PIPE_NODES][()]
+
+    names = [_decode(r['Name']) for r in raw]
+    types = [_decode(r['Node Type']) for r in raw]
+    invert = raw['Invert Elevation'].astype(np.float64)
+    depth = raw['Depth'].astype(np.float64)
+    terrain = raw['Terrain Elevation'].astype(np.float64)
+    override = raw['Terrain Elevation Override'].astype(np.float64)
+
+    if source == 'terrain':
+        rim = terrain.copy()
+    else:
+        rim = np.where(np.isnan(override), terrain, override)
+
+    return NodeRims(names=names, node_types=types, invert=invert, depth=depth,
+                    terrain=terrain, override=override, rim=rim, source=source)
+
+
+def read_node_max_wse(hdf_path: str, network) -> NodeMaxWse:
+    """
+    Maximum water surface over the run at every node of one pipe network.
+
+    Reads the whole `Nodes/Water Surface` block once and reduces it, rather than
+    looping read_node_timeseries per node.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    network : PipeNetwork or str
+        From read_pipe_network(), or a bare network name.
+
+    Returns
+    -------
+    NodeMaxWse
+
+    Raises
+    ------
+    KeyError
+        If the network or its node results are absent.
+
+    Notes
+    -----
+    Summary Output's `Maximum Water Surface` for a pipe network is per CELL, not
+    per node, so it cannot be used here.
+
+    Node result columns are network-LOCAL positions; `PipeNetwork.nodes` maps a
+    node name to its column. Do not index the global
+    `Geometry/Pipe Nodes/Attributes` table with a results column.
+    """
+    if hasattr(network, 'nodes'):
+        net = network
+    else:
+        net = read_pipe_network(hdf_path, str(network))
+
+    base = _PIPE_TS_BASE.format(network=net.name)
+    ws_path = f'{base}/Nodes/Water Surface'
+    with h5py.File(hdf_path, 'r') as hdf:
+        if ws_path not in hdf:
+            raise KeyError(f'Node water surface results missing: {ws_path}')
+        values = hdf[ws_path][()].astype(np.float64)
+        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+
+    order = sorted(net.nodes.items(), key=lambda kv: kv[1])
+    names = [name for name, _ in order]
+    cols = [col for _, col in order]
+    block = values[:, cols]
+
+    return NodeMaxWse(
+        network=net.name,
+        names=names,
+        wse=block.max(axis=0),
+        time_index=block.argmax(axis=0).astype(np.int64),
+        timestamps=timestamps,
+    )
+
+
+# ---------------------------
+# Volume accounting
+# ---------------------------
+
+def _vol_root(hdf):
+    for root in _VOL_ROOTS:
+        if root in hdf:
+            return root
+    return None
+
+
+def list_volume_accounting(hdf_path: str) -> dict:
+    """
+    Return {kind: [names]} for every volume-accounting entry in a plan.
+
+    `kind` is RAS's sub-group name with the 'Volume Accounting ' prefix removed,
+    e.g. '2D', 'Pipe Networks', '1D'. Returns an empty dict if the plan carries
+    no volume accounting.
+    """
+    out: dict = {}
+    with h5py.File(hdf_path, 'r') as hdf:
+        root = _vol_root(hdf)
+        if root is None:
+            return out
+        for sub in hdf[root]:
+            node = hdf[f'{root}/{sub}']
+            if not isinstance(node, h5py.Group):
+                continue
+            kind = sub.replace('Volume Accounting', '').strip() or sub
+            out[kind] = [k for k in node
+                         if isinstance(hdf[f'{root}/{sub}/{k}'], h5py.Group)]
+    return out
+
+
+def read_volume_accounting(hdf_path: str, name: str,
+                           kind: str = '2D') -> VolumeAccounting:
+    """
+    Read RAS's volume-accounting summary for one area, pipe network, or reach.
+
+    Parameters
+    ----------
+    hdf_path : str
+        Path to the .p##.hdf file.
+    name : str
+        Area / network / reach name, as listed by list_volume_accounting().
+    kind : str, default '2D'
+        '2D', 'Pipe Networks', or '1D'.
+
+    Returns
+    -------
+    VolumeAccounting
+
+    Raises
+    ------
+    KeyError
+        If the plan has no volume accounting, or the entry is absent.
+
+    Notes
+    -----
+    These are RAS's own mass-balance totals, stored as group ATTRIBUTES rather
+    than datasets. `vol_ending` is the volume standing in the area at the END of
+    the run; it is NOT the peak. For a pumped-vs-gravity comparison the two
+    answer different questions -- the peak says how bad it got, the ending volume
+    says whether the pumps cleared it. A peak must be built separately from the
+    cell volume tables; see read_cell_volume_table / interpolate_cell_volume.
+
+    Check `error_percent` before quoting any of these: it is RAS's own closure
+    error for the area.
+    """
+    with h5py.File(hdf_path, 'r') as hdf:
+        root = _vol_root(hdf)
+        if root is None:
+            raise KeyError(
+                f'No volume accounting in {hdf_path}; looked at {_VOL_ROOTS}')
+        sub = f'Volume Accounting {kind}'
+        path = f'{root}/{sub}/{name}'
+        if path not in hdf:
+            available = list_volume_accounting(hdf_path)
+            raise KeyError(
+                f"Volume accounting '{kind}' / '{name}' not found in "
+                f'{hdf_path}. Available: {available}')
+        attrs = dict(hdf[path].attrs)
+
+    def num(key):
+        val = attrs.get(key)
+        return float('nan') if val is None else float(val)
+
+    return VolumeAccounting(
+        kind=kind,
+        name=name,
+        vol_starting=num('Vol Starting'),
+        vol_ending=num('Vol Ending'),
+        cum_inflow=num('Cum Inflow'),
+        cum_outflow=num('Cum Outflow'),
+        error=num('Error'),
+        error_percent=num('Error Percent'),
+        precip_excess=num('Precip Excess (acre feet)'),
+        precip_excess_depth=num('Precip Excess (inches)'),
+        units=_decode(attrs.get('Vol Accounting in', b'')) or 'unknown',
     )
 
 

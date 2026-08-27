@@ -205,6 +205,391 @@ class ConduitTimeSeries:
 
 
 @dataclass
+class Pump:
+    """One physical pump inside a pump group (Geometry/.../Pumps/Attributes)."""
+    name: str
+    ws_on: float
+    ws_off: float
+
+
+@dataclass
+class PumpGroup:
+    """
+    One pump group of a pump station, with its results time series.
+
+    RAS reports flow and an on-count PER GROUP, not per individual pump: a group
+    of three pumps has one flow column and a `pumps_on` count that runs 0..3.
+    The individual pumps are carried in `pumps` for their trigger elevations.
+
+    Attributes
+    ----------
+    name : str
+        Group name as it appears in both the geometry table and the results
+        Variable_Unit attribute.
+    flow : np.ndarray, shape (T,), dtype float64
+    pumps_on : np.ndarray, shape (T,), dtype float64
+        Number of pumps running in this group at each output step.
+    pumps : list[Pump]
+    """
+    name: str
+    flow: np.ndarray
+    pumps_on: np.ndarray
+    pumps: list = field(default_factory=list)
+
+    @property
+    def n_pumps(self) -> int:
+        return len(self.pumps)
+
+
+@dataclass
+class PumpStation:
+    """
+    Results and connectivity for one HEC-RAS pump station.
+
+    Attributes
+    ----------
+    name : str
+    timestamps : np.ndarray, shape (T,), dtype str
+    flow : np.ndarray, shape (T,), dtype float64
+        Total station flow.
+    stage_hw, stage_tw : np.ndarray, shape (T,), dtype float64
+        Headwater (wet well) and tailwater stage.
+    groups : list[PumpGroup]
+    inlet_network, inlet_node : str or None
+        Pipe network and node the station draws FROM, parsed from the geometry
+        table's 'Base [J314]' form. None when the station is not tied to a pipe
+        node (it may be tied to a 2D area or a 1D reach instead).
+    outlet_network, outlet_node : str or None
+        Where it discharges to, same parsing.
+    inlet_area, outlet_area : str or None
+        2D flow area / storage area equivalents, when used instead of a node.
+    highest_pump_line_elev : float
+    """
+    name: str
+    timestamps: np.ndarray
+    flow: np.ndarray
+    stage_hw: np.ndarray
+    stage_tw: np.ndarray
+    groups: list = field(default_factory=list)
+    inlet_network: object = None
+    inlet_node: object = None
+    outlet_network: object = None
+    outlet_node: object = None
+    inlet_area: object = None
+    outlet_area: object = None
+    highest_pump_line_elev: float = float('nan')
+
+    @property
+    def n_pumps(self) -> int:
+        """Total individual pumps across all groups."""
+        return sum(g.n_pumps for g in self.groups)
+
+    @property
+    def pumps_on(self) -> np.ndarray:
+        """Total pumps running across all groups at each output step."""
+        if not self.groups:
+            return np.zeros(len(self.timestamps), dtype=np.float64)
+        return np.sum([g.pumps_on for g in self.groups], axis=0)
+
+
+@dataclass
+class PumpCurve:
+    """
+    One pump group's head/flow curve, from Efficiency Curves Info/Values.
+
+    **The curve is PER PUMP, not per group.** A group of three pumps sharing one
+    curve delivers three times the tabulated flow when all three run. Verified
+    against results: `group flow / curve(head)` equals the `pumps_on` count
+    exactly (1.00, 2.00, 3.00 with no scatter) on every group of a real model.
+    Use `group_capacity` for the whole group; `capacity` is one pump.
+
+    Attributes
+    ----------
+    group : str
+        Pump group name; matches PumpGroup.name and the results column label.
+    n_pumps : int
+        Number of pumps in the group that share this curve.
+    head : np.ndarray, shape (P,), dtype float64
+        Static head, ascending.
+    flow : np.ndarray, shape (P,), dtype float64
+        Delivered flow PER PUMP at that head, descending.
+    """
+    group: str
+    head: np.ndarray
+    flow: np.ndarray
+    n_pumps: int = 1
+
+    def capacity(self, head):
+        """
+        Interpolate ONE pump's delivered flow at the given head(s).
+
+        Values outside the tabulated head range are CLAMPED to the end of the
+        curve, never extrapolated -- a pump curve extrapolated past its ends is
+        meaningless. Use `in_range` to find out whether that happened; it does on
+        real models (a station was observed running to 19.33 ft of head against a
+        curve tabulated only to 18.17 ft).
+        """
+        return np.interp(np.asarray(head, dtype=np.float64), self.head, self.flow)
+
+    def group_capacity(self, head):
+        """Full-group capacity: `n_pumps` x one pump's flow at that head."""
+        return self.n_pumps * self.capacity(head)
+
+    def in_range(self, head) -> np.ndarray:
+        """Boolean: is each head within the tabulated curve, i.e. not clamped?"""
+        h = np.asarray(head, dtype=np.float64)
+        return (h >= self.head[0]) & (h <= self.head[-1])
+
+
+@dataclass
+class NodeRims:
+    """
+    Rim elevations and types for every pipe node in a geometry.
+
+    Two rim sources exist and they are NOT interchangeable:
+
+    * ``'terrain'`` -- ``Terrain Elevation``, sampled from the DEM.
+    * ``'override'`` -- ``Terrain Elevation Override`` where the modeller set
+      one, falling back to the terrain elevation where they did not.
+
+    They agree at every node with no override. Where one IS set they can differ
+    substantially, and the override is what RAS itself uses: ``Invert Elevation +
+    Depth`` reproduces the override, not the terrain elevation. Measured on a
+    real model, one outfall node carried terrain 728.67 against an override of
+    719.00 -- a 9.67 ft difference, and using the terrain value would have
+    UNDER-counted rim exceedances there.
+
+    Attributes
+    ----------
+    names : list[str]
+    node_types : list[str]
+        e.g. 'Junction', 'Start', 'External', 'Closed', 'Culvert Opening'.
+        Reported so callers can filter afterwards rather than the reader
+        pre-filtering.
+    invert, depth, terrain : np.ndarray, shape (N,), dtype float64
+    override : np.ndarray, shape (N,), dtype float64
+        NaN where the modeller set no override.
+    rim : np.ndarray, shape (N,), dtype float64
+        The rim per the selected `source`.
+    source : str
+        'override' or 'terrain'.
+    """
+    names: list
+    node_types: list
+    invert: np.ndarray
+    depth: np.ndarray
+    terrain: np.ndarray
+    override: np.ndarray
+    rim: np.ndarray
+    source: str
+
+    @property
+    def has_override(self) -> np.ndarray:
+        """Boolean per node: the modeller set an explicit override."""
+        return ~np.isnan(self.override)
+
+    def as_dict(self) -> dict:
+        """{node name: rim elevation} for the selected source."""
+        return {n: float(v) for n, v in zip(self.names, self.rim)}
+
+
+@dataclass
+class NodeMaxWse:
+    """
+    Maximum water surface over the run at every node of one pipe network.
+
+    Summary Output's `Maximum Water Surface` is per CELL, not per node, so this
+    is computed from the `Nodes/Water Surface` time series.
+
+    Attributes
+    ----------
+    network : str
+    names : list[str]
+        Node names, in results-column order.
+    wse : np.ndarray, shape (N,), dtype float64
+    time_index : np.ndarray, shape (N,), dtype int64
+        Index into `timestamps` at which each node peaked.
+    timestamps : np.ndarray, shape (T,), dtype str
+    """
+    network: str
+    names: list
+    wse: np.ndarray
+    time_index: np.ndarray
+    timestamps: np.ndarray
+
+    def as_dict(self) -> dict:
+        """{node name: maximum WSE}."""
+        return {n: float(v) for n, v in zip(self.names, self.wse)}
+
+    def time_of_max(self, node: str) -> str:
+        """Time stamp at which `node` reached its maximum."""
+        try:
+            i = self.names.index(node)
+        except ValueError:
+            raise KeyError(
+                f"Node '{node}' not in pipe network '{self.network}'") from None
+        return str(self.timestamps[self.time_index[i]])
+
+
+@dataclass
+class VolumeAccounting:
+    """
+    RAS's volume-accounting summary for one 2D area, pipe network, or 1D reach.
+
+    All volumes are in the unit named by `units` (RAS writes acre-feet on US
+    Customary models). `vol_ending` is the volume left in the area at the END of
+    the run -- it is NOT the peak, and for a pumped-vs-gravity comparison the two
+    answer different questions.
+
+    Attributes
+    ----------
+    kind : str
+        '2D', 'Pipe Networks', or '1D'.
+    name : str
+    vol_starting, vol_ending, cum_inflow, cum_outflow, error : float
+    error_percent : float
+    precip_excess, precip_excess_depth : float
+        NaN where RAS did not write them (pipe networks carry no precipitation).
+    units : str
+    """
+    kind: str
+    name: str
+    vol_starting: float
+    vol_ending: float
+    cum_inflow: float
+    cum_outflow: float
+    error: float
+    error_percent: float
+    precip_excess: float
+    precip_excess_depth: float
+    units: str
+
+
+@dataclass
+class ConduitPath:
+    """
+    An ordered downstream route through a pipe network.
+
+    Produced by `trace_path` (one contiguous run of conduits) or by `join_paths`
+    (several runs joined across a physical break, e.g. an open pond).
+
+    A ConduitPath is a decision about ROUTE ONLY -- it holds no results. Trace it
+    once and reuse it across every plan you compare, so each plan lands on the
+    same station axis. That matters: resolving a fork by flow is PLAN-DEPENDENT
+    (on the Hillside model, node BedJ293 picks a different branch in the 10-year
+    pumped runs than in the other six), so re-tracing per plan can silently give
+    two plans different axes.
+
+    Attributes
+    ----------
+    network : str
+    conduits : list[str]
+        Conduit names in downstream order.
+    nodes : list[str]
+        Node names, len(conduits) + 1 for a single segment.
+    segments : list[tuple[str, str]]
+        (start_node, end_node) of each contiguous run.
+    bridges : list[tuple[str, str, float]]
+        (from_node, to_node, distance_ft) for each joined break.
+    forks : list[str]
+        Human-readable record of how each ambiguous fork was resolved.
+    """
+    network: str
+    conduits: list = field(default_factory=list)
+    nodes: list = field(default_factory=list)
+    segments: list = field(default_factory=list)
+    bridges: list = field(default_factory=list)
+    forks: list = field(default_factory=list)
+
+    def __len__(self) -> int:
+        return len(self.conduits)
+
+    @property
+    def start(self) -> str:
+        return self.nodes[0]
+
+    @property
+    def end(self) -> str:
+        return self.nodes[-1]
+
+
+@dataclass
+class PathProfile:
+    """
+    A continuous profile along a ConduitPath, chained across its conduits.
+
+    Same per-face quantities as ConduitProfile, but with `station` accumulated
+    over the whole route so it can be plotted as one line. Where the path crosses
+    a bridged break, the station advances by the true node-to-node distance.
+
+    Attributes
+    ----------
+    path : ConduitPath
+    when : str
+        'Maximum', 'Minimum', or a time-stamp string.
+    station : np.ndarray, shape (F,), dtype float64
+        Distance from the path's start node, ascending.
+    invert, crown, wse, velocity, flow : np.ndarray, shape (F,), dtype float64
+    conduit_of : np.ndarray, shape (F,), dtype object
+        Conduit name each face belongs to.
+    node_at : dict[int, str]
+        Row index -> node name, for labelling junctions on a chart.
+    total_length : float
+        Sum of conduit lengths plus bridged gaps.
+    si_units : bool
+    """
+    path: ConduitPath
+    when: str
+    station: np.ndarray
+    invert: np.ndarray
+    crown: np.ndarray
+    wse: np.ndarray
+    velocity: np.ndarray
+    flow: np.ndarray
+    conduit_of: np.ndarray
+    node_at: dict = field(default_factory=dict)
+    total_length: float = 0.0
+    si_units: bool = False
+
+    @property
+    def depth(self) -> np.ndarray:
+        """Water depth above the invert at each face."""
+        return self.wse - self.invert
+
+    @property
+    def is_surcharged(self) -> np.ndarray:
+        """Boolean per face: water surface at or above the crown."""
+        return self.wse >= self.crown
+
+    @property
+    def surcharge_margin(self) -> np.ndarray:
+        """
+        Signed head relative to the conduit crown, `wse - crown`, per face.
+
+        Positive = surcharged by that much; negative = that much freeboard. This
+        is the preferred way to REPORT surcharge: a continuous series along the
+        profile rather than a single anchored number. A scalar "surcharge
+        extended N feet" cannot be defined without arbitrary choices -- where to
+        anchor it, whether a short gap breaks a run -- and real trunks break the
+        obvious definitions in both directions (a pumped trunk whose surcharge
+        stops short of the pump, and one surcharged over its whole length so any
+        number is only a lower bound). The series has none of those problems, and
+        any summary statistic can be derived from it downstream.
+
+        Note that if the FIRST or LAST element is positive, the surcharged reach
+        continues beyond the traced path; report that rather than implying the
+        path bounds it.
+        """
+        return self.wse - self.crown
+
+    @property
+    def energy_grade(self) -> np.ndarray:
+        """Energy grade line, wse + V^2 / 2g. See ConduitProfile.energy_grade."""
+        g = 9.80665 if self.si_units else 32.174
+        return self.wse + self.velocity ** 2 / (2.0 * g)
+
+
+@dataclass
 class ConduitProfile:
     """
     Along-conduit profile results for one pipe conduit at one instant (or envelope).
