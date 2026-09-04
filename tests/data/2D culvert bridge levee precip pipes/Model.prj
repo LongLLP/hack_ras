@@ -4,6 +4,7 @@ Default Exp/Contr=0.3,0.1
 English Units
 Geom File=g02
 Geom File=g03
+Geom File=g04
 Unsteady File=u02
 Unsteady File=u03
 Unsteady File=u04

@@ -1777,6 +1777,118 @@ below).  The script resolves full geometry paths from the project file via
 `resolve_id`, writes the new geometry, and appends `Geom File=<geom_out>` to
 the `.prj` so HEC-RAS recognises the new file without a manual edit.
 
+## Culvert Groups (`hack_ras/geometry/culverts.py`)
+
+Read-only reader for culvert groups, ASCII or HDF, returning a flat
+`List[CulvertGroup]`:
+
+```python
+from hack_ras.geometry.culverts import (
+    read_culverts, read_culverts_ascii, read_culverts_hdf)
+
+groups = read_culverts(geom_path)                    # ASCII (default)
+groups = read_culverts(geom_path, prefer_hdf=True)   # HDF when a sibling exists
+```
+
+**ASCII is primary, not a fallback.** Two independent reasons:
+
+1. The geometry HDF has **no solution-criteria column** (it is not under
+   `Geometry/Structures` at all), so an HDF-only read silently loses that field.
+   `read_culverts_hdf` reports `solution_criteria=None` rather than implying the
+   default.
+2. **RAS 5.0.3 wrote no culvert table into the geometry HDF whatsoever**, even
+   for a geometry whose ASCII has culverts — `Culvert Groups` is a 7.0-era
+   addition (`tests/data/Wisconsin Floodway/SterpCreek.g01` is 5.0.3 and has
+   none; `g02`, the same model re-saved by 7.0, does). 4.1 and older wrote no
+   HDF at all. `prefer_hdf=True` therefore falls through to the ASCII on
+   `KeyError`.
+
+What the HDF adds is RAS's own decoded enum labels and nothing else.
+
+### Five keywords, one layout
+
+`grep "^Culvert="` finds a MINORITY of culverts. RAS rewrites the keyword
+automatically when a group's barrel count crosses 1:
+
+| keyword | context | `form` |
+|---|---|---|
+| `Multiple Barrel Culv=` | 1D bridge/culvert node, >1 barrel | `multi_barrel` |
+| `Culvert=` | 1D bridge/culvert node, single barrel | `single_barrel` |
+| `Connection Culv=` | SA/2D connection | `connection` |
+| `LW Culv=` | lateral structure | `lateral` |
+| `IW Culv=` | inline structure | `inline` |
+
+The four "grouped" forms share ONE comma-separated layout:
+
+```
+<kw>=shape,rise,span,length,n_top,ent_loss,exit_loss,chart,scale,
+     US_inv,DS_inv,barrels,name,solution_criteria,us_distance[,use_momentum]
+```
+
+then a station line — two 8-char fixed-width fields per barrel (US sta, DS sta),
+10 fields per line, wrapping only on field boundaries.
+
+`Culvert=` is the lone outlier: no barrel count and no station line; its single
+barrel's stations sit inline at positions 11 and 13, shifting name to 14,
+solution criteria 15, us_distance 16, use_momentum 17.
+
+The trailing `use_momentum` field is **optional** — absent in older files
+(15-field grouped / 16-field single) — so field count is never assumed.
+
+Sibling lines are keyword-prefixed (`Culvert `, `Conn Culv `, `LW Culv `,
+`IW Culv `) and each has a defined meaning when absent:
+
+| sibling | HDF column | absent means |
+|---|---|---|
+| `Bottom n` | `Mann Bottom` | equals `Mann Top` |
+| `Bottom Depth` | `Depth for Bottom Mann` | 0.0 |
+| `Depth Blocked` | `Depth Blocked` | 0.0 |
+
+Barrel *name* rows are keyword-specific (`BC Culvert Barrel=` 1D,
+`Conn Culvert Barrel=` 2D; lateral/inline have none).
+
+Positions 1-13 and 15 were confirmed **uniquely** against RAS-written HDF over
+220 culvert groups spanning four keywords; the two flag fields were confirmed by
+a purpose-built RAS 7.0 GUI experiment (fixtures `SterpCreek.g03`,
+`Model.g04`). The reader agrees with the HDF on 17 fields across 284
+ASCII/HDF pairs.
+
+### Enums — verified values only
+
+`SOLUTION_CRITERIA`: `0` Computed Flow Control, `1` Inlet Control,
+`2` Outlet Control (each set in the GUI and re-read).
+
+`use_momentum`: **ASCII stores `-1` for true, the HDF stores `1`.** The GUI
+checkbox reads "Use Momentum (GIS/2D only)" and the option is used **only in 2D**
+— RAS still writes the flag on 1D culverts, where it is inert.
+
+`SHAPE_NAMES` / `CHART_DESCS` / `SCALE_DESCS` are **deliberately partial**: only
+codes actually observed in RAS output are mapped (4 shapes, 5 charts), and
+anything else resolves to `None` rather than a guessed label. HEC-RAS defines
+more shapes and ~60 FHWA charts. Integer codes are always exposed.
+
+### Empirical RAS behavior the reader encodes
+
+- **Circular span is never trustworthy.** A box→circular switch writes span
+  BLANK, and any *later* save normalizes that blank to equal rise — so the field
+  is either empty or RAS-derived, never independent. A circular span differing
+  from rise has never been observed. `span` is reported as `None` whenever the
+  shape is circular (on both paths — the HDF writer fills `Span = Rise`); use
+  `rise` / the `diameter` property. Do not compare `span` for circular culverts.
+- **Changing shape silently resets `Chart #`** (box chart 8 → circular chart 1),
+  so chart/scale are partly RAS-derived and weak as QC signals.
+- **Barrel name rows reorder unpredictably on save** when barrels share
+  identical stations. The `barrels` count is authoritative; the reader never
+  infers count from the name rows.
+- HDF culvert attributes are **float32**, so an authored 106.2 reads back as
+  106.19999694824219. The reader formats to 7 significant digits — float32's
+  real precision — recovering the typed value without inventing any.
+
+Not wired into `GeometryParser`: culverts hang off structures rather than cross
+sections, so this is a self-contained linear pass over the raw lines. That keeps
+the lossless roundtrip and `CrossSection` untouched, at the cost of a second
+read of the file.
+
 ## Current Work
 *(Last updated: 2026-08-03, session 18)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
