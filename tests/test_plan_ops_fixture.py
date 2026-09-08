@@ -66,19 +66,20 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
             return f.read()
 
     def test_plan_short_ids_reads_sidecars_and_skips_missing(self):
-        # prj lists p02, p03, p04, p05 — but p03's file was deleted in the GUI,
-        # so it is skipped (not mapped to an empty short id).
+        # prj lists p02, p03, p04, p05, p06 — but p03's file was deleted in the
+        # GUI, so it is skipped (not mapped to an empty short id).
         self.assertEqual(
             plan_short_ids(self.project),
             {"p02": "Test Model",
              "p04": "Test higher IA and nvals",
-             "p05": "Continue higher IA and nvals"},
+             "p05": "Continue higher IA and nvals",
+             "p06": "Fingerprint"},
         )
 
     def test_full_sequence_on_ras_authored_files(self):
-        # fixture sanity: prj lists 4 plans but p03/u03 files are gone
+        # fixture sanity: prj lists 5 plans but p03/u03 files are gone
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p02", "p03", "p04", "p05"])
+                         ["p02", "p03", "p04", "p05", "p06"])
         self.assertFalse(os.path.exists(self.path("Model.p03")))
         self.assertFalse(os.path.exists(self.path("Model.u03")))
         self.assertIn("Breach Start=True,756.8,,,False,,,0",
@@ -95,9 +96,10 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         self.assertEqual(report["unsteady"], ["u03"])
         self.assertIsNone(report["current_plan"])  # p05 still exists
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p02", "p04", "p05"])
+                         ["p02", "p04", "p05", "p06"])
 
         # --- bulk renumber: chain p02->p01, p04->p02, p05->p03 ---
+        # p06 is deliberately left out of the map: it must ride along untouched.
         report = renumber_plans(self.project, {
             "p02": "p01", "p04": "p02", "p05": "p03"})
 
@@ -118,9 +120,12 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         # u04's restart reference followed p04 -> p02, chain-safely
         self.assertIn("Restart Filename=Model.p02.01JAN2025 1600.rst",
                       self.read("Model.u04"))
-        # prj followed (Current Plan was p05)
+        # prj followed (Current Plan was p05); p06 untouched by the renumber
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p01", "p02", "p03"])
+                         ["p01", "p02", "p03", "p06"])
+        self.assertTrue(os.path.isfile(self.path("Model.p06")))
+        self.assertTrue(os.path.isfile(
+            self.path("Model.p06.01JAN2025 1400.rst")))
         self.assertIn("Current Plan=p03", self.read("Model.prj"))
         # rasmap tokens remapped; old numbers gone
         self.assertGreater(report["rasmap_tokens"], 0)
@@ -134,7 +139,7 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         # --- housekeeping passes are clean no-ops now ---
         self.assertEqual(sync_prj(self.project)["plan"], [])
         self.assertEqual(sort_prj_entries(self.project)["plan"],
-                         ["p01", "p02", "p03"])
+                         ["p01", "p02", "p03", "p06"])
 
         # --- clone the breach plan: WS Elev trigger -> no warning ---
         with self.assertNoLogs("hack_ras.project.plans", level="WARNING"):
@@ -176,8 +181,8 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         self.assertNotIn("Model.u04.hdf", rasmap)
 
     def test_flags_computed_results_missing_from_rasmap(self):
-        # All computed results (p02, p04, p05) are listed in the rasmap Results
-        # section -> nothing flagged.
+        # All computed results (p02, p04, p05, p06) are listed in the rasmap
+        # Results section -> nothing flagged.
         self.assertEqual(plans_with_unlisted_results(self.project), [])
         # Drop p04's rasmap layers, simulating a plan that was run headlessly
         # and never added to RAS Mapper's Results tree. Its .p04.hdf has a

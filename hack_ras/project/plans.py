@@ -123,6 +123,29 @@ def _read_plan_ref(path: str, key: str) -> str | None:
     return None
 
 
+def read_plan_sidecar(plan_path: str) -> dict:
+    """Read a ``.p##`` plan file's identity and file references.
+
+    Returns ``{'title', 'short_id', 'geom_id', 'flow_id'}`` — ``geom_id`` and
+    ``flow_id`` are None when the plan names none, the strings are '' when the
+    line is absent.  Reads BOM-safely via
+    :func:`hack_ras.utils.lines.read_lines`, without which a BOM'd plan reports
+    an empty title (nine Model_Hillside plans carry one).
+
+    A plan-consuming script needs these four values constantly; this exists so
+    each one does not re-open the file with its own hand-rolled loop.
+
+    Raises FileNotFoundError if the plan file does not exist.
+    """
+    return {
+        "title": _read_plan_title(plan_path),
+        "short_id": _read_plan_ref(plan_path, "Short Identifier") or "",
+        "geom_id": _read_plan_ref(plan_path, "Geom File"),
+        "flow_id": (_read_plan_ref(plan_path, "Flow File")
+                    or _read_plan_ref(plan_path, "Unsteady File")),
+    }
+
+
 def plan_short_ids(project: RasProject) -> dict[str, str]:
     """Map each plan listed in the .prj to its 'Short Identifier=' value.
 

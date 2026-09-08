@@ -49,7 +49,7 @@ required config key and exits with an error if it is missing.
   `GeometryParser` reads with `utf-8-sig` instead, so a BOM never reaches
   `raw_lines` (where it used to hide `Geom Title=` and make `GeometryWriter` raise
   `UnicodeEncodeError`); nothing re-attaches it, because every `GeometryWriter` call
-  site writes a NEW file — the shifter, `merge`, and the Mesh_Health snapper all take
+  site writes a NEW file — the shifter, `merge`, and the Geometry_Mesh_Health snapper all take
   an output path and never overwrite their source
 - **Typed exceptions over None**: resolution and lookup functions raise typed exceptions
   (`ValueError`, `GeometryFileNotFound`, etc.) rather than returning `None`
@@ -224,7 +224,8 @@ Shared raw-line I/O helpers live in `hack_ras/utils/lines.py`
 from hack_ras import RasProject, plans, geoms, sync, rasmap, health  # module re-exports
 from hack_ras.project.plans import (   # or import the names directly
     renumber_plan, renumber_plans, insert_plan_gap, reorder_plans,
-    clone_plan, delete_plan, plan_short_ids, plans_with_unlisted_results)
+    clone_plan, delete_plan, plan_short_ids, plans_with_unlisted_results,
+    read_plan_sidecar)
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 from hack_ras.project.rasmap import (              # .rasmap-specific ops
     remove_plans_from_rasmap, remove_flows_from_rasmap,  # (delete_plan calls
@@ -234,6 +235,9 @@ from hack_ras.project.rasmap import (              # .rasmap-specific ops
 project = RasProject(r"...\Model.prj")
 plan_short_ids(project)                  # {plan_id: 'Short Identifier='} in prj order;
                                          #   skips plans whose .p## file is missing
+read_plan_sidecar(plan_path)             # {'title','short_id','geom_id','flow_id'} from
+                                         #   one .p## — BOM-safe; use instead of
+                                         #   hand-rolling a 'Geom File=' loop per script
 sync_prj(project)                        # drop prj entries whose files are missing; fix Current Plan
 renumber_plans(project, {"p20": "p02",   # bulk renumber: chains/cycles auto-ordered
                          "p02": "p06"})  #   ('<name>.renumtmp' hop breaks cycles)
@@ -358,7 +362,7 @@ alone.
   protect (never delete) when collecting result GIS. A folder referenced by BOTH a
   results map and a source layer (a plan whose Short ID collides with, say, the
   terrain folder) stays protected. Consumed by
-  `Scripts/Results_GIS/copy_results_gis.py`.
+  `Scripts/DataMgmt_Results_Collection/copy_results_gis.py`.
 
 ## Geometry File Operations (`hack_ras/project/geoms.py`)
 
@@ -769,6 +773,13 @@ from `hack_ras/geometry/blocks/base.py` to split data lines.
 | `Levee=` | `blocks/xs_levee.py` | `levee: Levee` | single line; left/right sta+elev, `None` per absent side |
 | `#Block Obstruct=` | `blocks/xs_block_obstruct.py` | `blocked_obstructions: BlockedObstructions` | 8-char triplets `[start,end,elev]`; `normal` (flag 0) / `multiple_block` (flag -1); no `Permanent` follower |
 
+### Parsed non-cross-section blocks
+
+| Block header | Handler | `GeometryFile` field | Notes |
+|---|---|---|---|
+| `Storage Area 2D Points=` | `blocks/storage_area_2d.py` | `storage_areas_2d: List[StorageArea2D]` | 16-char fields; 2D-mesh cell seeds; `N = 0` is header-only |
+| `Connection=` family | `blocks/connection.py` | `connections: Dict[str, Connection]` | Centerline (16-char) + weir/terrain profiles (8-char). See **SA/2D Connections** — stationing is arc length, NOT the fractional XS rule |
+
 ### Manning's n formats
 
 All formats store data as `(station, n_value, position_code)` triplets in 8-char
@@ -985,7 +996,7 @@ interpolated = np.interp(wse, elev, vol)
 - `cell_plan_area` comes from **`AreaGeometry.plan_areas[cell_idx]`** (i.e. RAS's own
   `Cells Surface Area`), not from `polygons[cell_idx].area`. The two agree to float32
   round-off on a 7.0 HDF, but `plan_areas` needs no reconstruction and stays correct on
-  the pre-7.0 fallback path. `Scripts/Profile_Lines_Volume/extract_volume.py` uses it.
+  the pre-7.0 fallback path. `Scripts/Results_Profile_Lines_Volume/extract_volume.py` uses it.
 
 ### Output Blocks
 The `Results/Unsteady/Output/Output Blocks/` group contains three named output blocks:
@@ -1463,6 +1474,8 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `CellVolumeTable` | `info (N_cells,2) int32`, `values (total_pairs,2) float32` | `info[i] = [start, count]`; `values[:,0]` = elevation, `values[:,1]` = volume |
 | `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64`, `station_start: float`, `station_end: float` | `station` = mean of segment midpoint stations (center); `station_start`/`station_end` = min/max face-point stations bounding the cell's segments; default `nan` |
 | `Sa2dConnection` | `name: str`, `timestamps (T,) str`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
+| `BreachState` | `connection`, `fired: bool`, `hdf_path_kind`, `center_station`, `breach_at`, `breach_at_days`, `bottom_width`, `bottom_elev`, `left_slope`, `right_slope`, `top_width`, `max_flow`, `max_velocity`, `max_flow_area`, `time_of_max_top_width`, `columns` | The widest state REACHED, not the plan's terminal geometry. `fired=False` = defined but never triggered. `top_width` is None unless a crest elevation was supplied |
+| `ConnectionCenterline` | `name`, `points (N,2)`, `profile (M,2)`, `us_area`, `ds_area`, `mode`, `snn_id`, `parts` | HDF twin of the ASCII `Connection Line=` / `Conn Weir SE=` blocks |
 | `PipeNode` | `name: str`, `system_name: str` | From `Geometry/Pipe Nodes/Attributes` |
 | `PipeConduit` | `name: str`, `us_node: str`, `ds_node: str` | From `Geometry/Pipe Conduits/Attributes` |
 | `PipeNetwork` | `name`, `nodes dict[str,int]`, `conduits dict[str,PipeConduit]`, `conduit_index dict[str,int]`, `upstream_of dict`, `downstream_of dict` | `nodes[name]` → results column index |
@@ -1485,7 +1498,9 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | Function | Returns | Notes |
 |----------|---------|-------|
 | `list_areas(hdf_path)` | `list[str]` | Names of 2D flow areas; empty list if none |
-| `list_sa2d_connections(hdf_path)` | `list[str]` | Names of SA 2D Area Conn groups; empty if none |
+| `list_sa2d_connections(hdf_path)` | `list[str]` | Names of SA 2D Area Conn groups; empty if none. Raw group names — an interior connection appears area-prefixed |
+| `list_connections(hdf_path)` | `list[str]` | Every structure name in `Geometry/Structures`; works on a `.g##.hdf` too |
+| `list_breach_connections(hdf_path)` | `list[str]` | Connections with breach output, area prefix stripped and de-duplicated; empty if no breach formed |
 | `list_pipe_networks(hdf_path)` | `list[str]` | Names of pipe networks; empty if none |
 
 #### Plan / geometry
@@ -1509,6 +1524,10 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | Function | Returns | Notes |
 |----------|---------|-------|
 | `read_sa2d_connection(hdf_path, connection)` | `Sa2dConnection` | HW and TW cell WSE time series + stations; cells sorted by station |
+| `read_breach_timeseries(hdf_path, connection)` | `dict` | `timestamps`, `kind`, `structure`, `breaching`, `weir`. Finds both HDF layouts; column names come from `Variable_Unit`. See **Breach Results** for the two traps |
+| `read_breach_state(hdf_path, connection, crest_elev=None)` | `BreachState` | The breach the run actually opened; raises `KeyError` if the plan wrote no breach output |
+| `read_plan_breach_data(hdf_path)` | `list[dict]` | `Plan Data/Breach Data`: `name`, `kind`, `bottom_width`, `side_slopes`. Mirrors `Breach Geom` fields 2/4/5 |
+| `read_connection_centerline(hdf_path, connection)` | `ConnectionCenterline` | Centerline + profile from `Geometry/Structures`; use to cross-check an ASCII parse |
 | `read_sa2d_areas(hdf_path, connection)` | `tuple[str, str]` | `(hw_area, tw_area)` — looks up `US SA/2D` / `DS SA/2D` via `SNN ID == Node Pointer` |
 
 #### 1D steady-flow cross-section results
@@ -1610,7 +1629,7 @@ Measured on a real 21-section table at `tol=1.0` ft, clean crossings came in at
 (10) sits in a wide gap. `LineInPolygon` fields: `length` (the width to report),
 `along_boundary`, `widened_length` (length against `polygon.buffer(tol)` — the
 number to quote when reporting the problem), `clean_crossing` (`4*tol`), `tol`,
-`coincident`, and the `empty` property. Consumer: `Scripts/FWDT_Output`.
+`coincident`, and the `empty` property. Consumer: `Scripts/Results_FWDT_Output`.
 
 ## GIS Profile Line Workflow (`hack_ras/gis/`)
 `compute_profile_stations(line, area_data)` takes a shapely `LineString` and a dict of
@@ -1735,7 +1754,7 @@ Verified end-to-end on Hillside `p47` (g07) and `p58` (g09): 7792 face polygons 
 (973→978), 0.08 (591→602) — which is the g07/g09 edit, and is exactly what a cell-centre
 layer could not see.
 
-`Scripts/Mesh_nvals/` drives it.
+`Scripts/Geometry_Mesh_nvals/` drives it.
 
 ## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
 
@@ -1768,7 +1787,7 @@ is not modified).  River/reach/RS matching is case- and whitespace-insensitive.
 All other geometry content is passed through byte-for-byte.
 
 The companion CLI script is at
-`Hillside_Levee_Scripts/XS GIS Shifter/shift_xs_gis.py` (YAML-configured,
+`Scripts/Geometry_XS_GIS_Shift/shift_xs_gis.py` (YAML-configured,
 `python shift_xs_gis.py config.yaml`).
 
 Config keys: `prj_path`, `geom_in` (e.g. `g16`), `geom_out` (e.g. `g17`),
@@ -1888,6 +1907,133 @@ Not wired into `GeometryParser`: culverts hang off structures rather than cross
 sections, so this is a self-contained linear pass over the raw lines. That keeps
 the lossless roundtrip and `CrossSection` untouched, at the cost of a second
 read of the file.
+
+## SA/2D Connections (`hack_ras/geometry/blocks/connection.py`, `geometry/conn_interp.py`)
+
+`GeometryParser` populates `GeometryFile.connections`, a `{name: Connection}` dict, from
+the `Connection=` block family. One `Connection` carries:
+
+| Field | Source line | Notes |
+|-------|-------------|-------|
+| `name` | `Connection=` | Padded to 16 chars in the file, stripped here — compares directly against an HDF `S16` name |
+| `label_xy` | `Connection=` fields 2-3 | The anchor RAS draws the NAME at. **Not** a geometry point |
+| `centerline` | `Connection Line= N` | N `(x, y)` in projected units; same 16-char layout as `XS GIS Cut Line=` |
+| `weir_profile` | `Conn Weir SE= N` | N `(station, elevation)`; the spillway/levee crest RAS routes flow over. `N = 0` happens (bridge-mode connections) |
+| `terrain_profile` | `Connection Centerline Profile= N` | Ground under the centerline. RAS writes 0 points on ~94% of connections |
+| `up_sa` / `dn_sa` | `Connection Up/Dn SA=` | HW / TW area names; **equal** for a connection interior to one 2D area |
+| `weir_coef`, `weir_width` | `Conn Weir Coef=`, `Conn Weir WD=` | |
+| `routing_type` | `Conn Routing Type=` | Drives `.mode` / `.is_weir_mode` |
+| `last_edited` | `Connection Last Edited Time=` | RAS stamps this on a GUI edit — useful for spotting an accidental change |
+
+`Conn Routing Type=` maps to the connection Mode the GUI shows and the geometry HDF
+stores in `Structures/Attributes['Mode']` (`CONN_ROUTING_MODES`): **1 = Weir/Gate/Culverts**,
+**32 = Bridge Opening**. Verified by matching every ASCII connection to its HDF row
+across Model_Hillside, Model_PCA, Model_LAX and the test fixtures (178 type-1,
+32 type-32, no exceptions). Other RAS routing
+types exist but have not been seen, so an unknown value gives `mode is None`.
+
+### Stationing — arc length, and RAS enforces it
+A connection's weir stationing **is** distance along its centerline, the opposite of the
+cross-section rule. HEC-RAS holds the two lengths to within **1 ft or 0.5%, whichever is
+smaller**, and refuses to run the model otherwise. See **Mapping RAS Stations to GIS
+Coordinates** in `dev_rules.md` for the full survey and the bridge-mode exemption. Use
+`conn_interp`: `station_to_xy`, `clip_polyline`, `clamp_station`, `elev_at`,
+`terrain_elev_at`, `centerline_length`, `profile_length`, `station_drift`,
+`station_tolerance`, `stationing_enforced`, `stationing_ok`, `check_stationing`
+(raises `ConnectionStationMismatch`).
+
+## Breach Definitions (`hack_ras/project/breach.py`)
+
+`read_breach_definitions(plan_path)` returns a `list[BreachDefinition]` in file order.
+A plan with no breach has **no `Breach` lines at all**, so the presence of `Breach Loc=`
+is the enabled flag — there is no separate on/off key. A plan may define several
+breaches; each repeats the whole group with its own method, geometry, trigger and
+curves, so the progression / downcutting / widening tables are **per breach**, not global.
+
+`Breach Loc=<river>,<reach>,<rs>,<is-connection>,<connection>` — first three fields blank
+for an SA/2D connection breach, field 4 says which kind.
+
+`Breach Geom=` field order, read off the RAS 7.0 GUI (not inferred), corroborated by an
+independent fingerprint plan and by `Plan Data/Breach Data` in the HDF:
+
+| # | Field | Notes |
+|---|-------|-------|
+| 1 | Center Station | Equals the HDF's `Centerline Breach` attribute |
+| 2 | Bottom width | GUI label depends on method: "Final Bottom Width" (User Entered) / "Max Possible Bottom Width" (Simplified Physical) |
+| 3 | Bottom elevation | "Final Bottom Elevation" / "Min Possible Bottom Elev" |
+| 4 | Left side slope | run/rise; 0 = vertical walls |
+| 5 | Right side slope | |
+| 6 | Failure Mode | `True` = Piping, `False` = Overtopping |
+| 7 | Piping Coefficient | |
+| 8 | Initial Piping Elev | |
+| 9 | Breach Formation Time (hrs) | **Blank under Simplified Physical** (GUI greys it out) |
+| 10 | Breach Weir Coef | |
+
+`Breach Method=`: **0 = User Entered Data, 1 = Simplified Physical** (GUI-confirmed).
+The DLBreach tab was greyed out in every plan seen, so its code is unknown and
+`method_name` returns None rather than guessing.
+
+Per-breach extras: `Breach Progression= N` + N pairs, `Simplified Physical Breach
+Downcutting/Widening= N` + N pairs (all 8-char `#Sta/Elev=` layout), `Starting Notch
+Depth=` and `Initial Piping Diameter=` (Simplified Physical only; the latter only with
+Piping), `Mass Wasting Options=`.
+
+`Breach Start=F1..F8` → `BreachTrigger`. The GUI's three "Trigger Failure at" modes:
+F1 True = **WS Elev**, F5 True = **WS Elev + Duration**, both False = **Set Time**.
+F2 is dual-labelled — "Starting WS" under WS Elev, "Immediate Initiation WS" under
+WS Elev + Duration; F3/F4 are the Set Time date/time; F6 Threshold WS, F7 Duration
+Above Threshold (hrs), F8 Accumulate Duration (-1 = checked).
+
+**Every field is stored even when the active mode or method ignores it.** A plan showing
+a trigger WS may in fact fire at a set time, and a Simplified Physical breach retains a
+stale piping coefficient. The `active_*` properties and `starting_ws` /
+`immediate_initiation_ws` / `set_time` return a value only where it applies.
+
+`BreachDefinition.top_width(crest_elev)` gives the widest the opening can get:
+`bottom_width + (left+right slope) * max(crest - bottom_elev, 0)`. Confirmed against
+RAS's own realised geometry on Model_Hillside Current_Model_extra p25 and p26, whose
+asymmetric slopes (1/1.1 and 3.1/3.2) came back exactly, top widths matching to four
+decimals. Pair it with `conn_interp.elev_at(conn, center_station)`.
+
+## Breach Results (`hack_ras/results/reader.py`)
+
+`read_breach_state(hdf_path, connection, crest_elev=None)` → `BreachState`: the breach
+the run actually opened. `fired` separates "defined but never triggered" (a legitimate
+outcome) from "no breach output". The realised geometry is the **widest state reached**,
+not the plan's terminal geometry — a run ending mid-formation stops short, and the side
+slopes grow with it (observed: a plan whose final slopes are 2/3 was still at 0.61/0.92
+at the end of the simulation), so `top_width` peaks at whichever step maximises it,
+which need not be the widest-bottom step. Without `crest_elev` the top width is None.
+
+Also: `list_breach_connections(hdf_path)`, `read_plan_breach_data(hdf_path)` (reads
+`Plan Data/Breach Data`; `Names` are kind-prefixed, `b'Connection|<name>'`), and
+`read_connection_centerline(hdf_path, connection)` → `ConnectionCenterline` (the HDF
+twin of the ASCII blocks, for cross-checks; agrees with the ASCII parse to the digit on
+all 221 connections across Model_Hillside, Model_PCA, Model_LAX and the fixtures).
+
+### Two traps in `Breaching Variables`
+1. **Column count is not fixed.** An overtopping breach has 9 columns; a **piping**
+   breach has 10, the extra one being `Top-Elevation` (which RAS then leaves
+   unpopulated). Confirmed on four plans. Column names therefore come from the
+   dataset's own `Variable_Unit` attribute, never a hardcoded list — the same fix
+   also corrects `Structure Variables`, which has 5 columns on a culvert connection
+   and 4 on a levee.
+2. **Pre-breach rows are blanked inconsistently** — NaN under `SA 2D Area Conn`, **zero**
+   under `2D Hyd Conn`. Test `Bottom-Width > 0`, not `isfinite`; an `isfinite` test
+   reports a never-fired breach as fired and gives a minimum invert of 0.
+
+### Where a connection's results live — the group is not always named after it
+| Connection joins | Path | Group name |
+|------------------|------|------------|
+| two different areas (or area + storage area) | `Unsteady Time Series/SA 2D Area Conn/<conn>` | the connection name |
+| one area, both sides the same mesh | `Unsteady Time Series/2D Flow Areas/<area>/2D Hyd Conn/<conn>` **and** `SA 2D Area Conn/<area> <conn>` | area-prefixed in the second |
+
+For an interior connection RAS writes the data **twice**, and the two copies are
+byte-identical (same shape, values, and `Breach at` / `Centerline Breach` attributes), so
+either is authoritative. `read_breach_timeseries` tries all three spellings — a bare
+lookup on the connection name silently misses every interior connection —
+and `list_breach_connections` strips the area prefix so the two spellings collapse to one
+entry.
 
 ## Current Work
 *(Last updated: 2026-08-03, session 18)*

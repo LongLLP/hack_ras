@@ -92,12 +92,13 @@ class TestUnsteadyFlowOpsOnRealModel(unittest.TestCase):
         self.assertEqual(_plan_flow(self.folder, "Model.p05"), "u03")
 
     def test_swap_on_real_files_repoints_shared_flow_and_rasmap(self):
-        # u02 is shared by p02 and p04; u04 belongs to p05
+        # u02 is shared by p02, p04 and p06; u04 belongs to p05
         report = renumber_flows(self.project, {"u02": "u04", "u04": "u02"})
         self.assertEqual(_plan_flow(self.folder, "Model.p02"), "u04")
         self.assertEqual(_plan_flow(self.folder, "Model.p04"), "u04")
         self.assertEqual(_plan_flow(self.folder, "Model.p05"), "u02")
-        self.assertEqual(len(report["plan_refs"]), 3)
+        self.assertEqual(_plan_flow(self.folder, "Model.p06"), "u04")
+        self.assertEqual(len(report["plan_refs"]), 4)
         # both RAS-authored .hdf sidecars followed their flow file
         self.assertEqual(len(report["files"]), 4)
         self.assertEqual([n for n in os.listdir(self.folder)
@@ -105,16 +106,16 @@ class TestUnsteadyFlowOpsOnRealModel(unittest.TestCase):
 
     def test_results_nested_event_conditions_survive_a_renumber(self):
         before = self.rasmap()
-        self.assertEqual(before.count("RASEventConditions"), 6)
+        self.assertEqual(before.count("RASEventConditions"), 7)
         renumber_flows(self.project, {"u04": "u09"})
         after = self.rasmap()
-        # the three results-nested EC layers name Base.p##.hdf and are untouched
-        for pid in ("p02", "p04", "p05"):
+        # the results-nested EC layers name Base.p##.hdf and are untouched
+        for pid in ("p02", "p04", "p05", "p06"):
             self.assertEqual(before.count(f"Model.{pid}.hdf"),
                              after.count(f"Model.{pid}.hdf"))
         self.assertIn("Model.u09.hdf", after)
         self.assertNotIn("Model.u04.hdf", after)
-        self.assertEqual(after.count("RASEventConditions"), 6)
+        self.assertEqual(after.count("RASEventConditions"), 7)
 
     def test_delete_shared_flow_refused_then_forced(self):
         with self.assertRaises(FlowInUse) as ctx:
@@ -122,7 +123,8 @@ class TestUnsteadyFlowOpsOnRealModel(unittest.TestCase):
         self.assertIn("p02", str(ctx.exception))
 
         report = delete_flow(self.project, "u02", force=True)
-        self.assertEqual(sorted(report["referencing_plans"]), ["p02", "p04"])
+        self.assertEqual(sorted(report["referencing_plans"]),
+                         ["p02", "p04", "p06"])
         self.assertEqual(report["rasmap_removed"], ["u02"])
         self.assertFalse(os.path.exists(self.path("Model.u02")))
         self.assertFalse(os.path.exists(self.path("Model.u02.hdf")))

@@ -2,10 +2,10 @@
 
 from __future__ import annotations
 from typing import List, Optional
-from .model import GeometryFile, CrossSection, XSGISCutLine, StorageArea2D
+from .model import GeometryFile, CrossSection, XSGISCutLine, StorageArea2D, Connection
 from .blocks import river_reach, xs_metadata, xs_gis, xs_sta_elev, xs_ineff
 from .blocks import xs_mann, xs_bank_sta, xs_levee, xs_block_obstruct
-from .blocks import storage_area_2d
+from .blocks import storage_area_2d, connection as conn_block
 
 class GeometryParser:
     """
@@ -31,9 +31,11 @@ class GeometryParser:
         current_reach = None
         current_xs = None
         current_storage_area = None  # name of the storage area currently being read
+        current_conn = None          # Connection currently being read
 
         # Track (xs, start_line) for post-loop end-line assignment
         _xs_starts: List[tuple] = []  # (CrossSection, start_line_index)
+        _conn_starts: List[tuple] = []  # (Connection, start_line_index)
 
         i = 0
         N = len(lines)
@@ -76,6 +78,70 @@ class GeometryParser:
                 ))
                 i += consumed
                 continue
+
+            # --- Connection= (SA/2D connection name header) ---
+            # Matches only the name line ("Connection=L4 Ozark-Holmes ,x,y"),
+            # never the sibling "Connection <thing>=" / "Conn <thing>=" lines.
+            if line.startswith("Connection="):
+                name, label_xy = conn_block.parse_connection_header(line)
+                current_conn = Connection(name=name, label_xy=label_xy,
+                                          _raw_line_start=i)
+                geom.connections[name] = current_conn
+                _conn_starts.append((current_conn, i))
+                i += 1
+                continue
+
+            if current_conn is not None:
+                # --- Connection Line= (centerline polyline) ---
+                if line.startswith("Connection Line="):
+                    pts, consumed = conn_block.parse_connection_line(lines, i)
+                    current_conn.centerline = pts
+                    i += consumed
+                    continue
+
+                # --- Conn Weir SE= (spillway / levee crest profile) ---
+                if line.startswith("Conn Weir SE="):
+                    pairs, consumed = conn_block.parse_conn_sta_elev(lines, i)
+                    current_conn.weir_profile = pairs
+                    i += consumed
+                    continue
+
+                # --- Connection Centerline Profile= (terrain under centerline) ---
+                if line.startswith("Connection Centerline Profile="):
+                    pairs, consumed = conn_block.parse_conn_sta_elev(lines, i)
+                    current_conn.terrain_profile = pairs
+                    i += consumed
+                    continue
+
+                if line.startswith("Connection Desc="):
+                    current_conn.description = conn_block.parse_text_field(line)
+                    i += 1
+                    continue
+                if line.startswith("Connection Up SA="):
+                    current_conn.up_sa = conn_block.parse_text_field(line)
+                    i += 1
+                    continue
+                if line.startswith("Connection Dn SA="):
+                    current_conn.dn_sa = conn_block.parse_text_field(line)
+                    i += 1
+                    continue
+                if line.startswith("Connection Last Edited Time="):
+                    current_conn.last_edited = conn_block.parse_text_field(line)
+                    i += 1
+                    continue
+                if line.startswith("Conn Weir Coef="):
+                    current_conn.weir_coef = conn_block.parse_float_field(line)
+                    i += 1
+                    continue
+                if line.startswith("Conn Weir WD="):
+                    current_conn.weir_width = conn_block.parse_float_field(line)
+                    i += 1
+                    continue
+                if line.startswith("Conn Routing Type="):
+                    rt = conn_block.parse_float_field(line)
+                    current_conn.routing_type = None if rt is None else int(rt)
+                    i += 1
+                    continue
 
             # --- Type RM Length (XS metadata header) ---
             if line.startswith("Type RM Length"):
@@ -159,5 +225,12 @@ class GeometryParser:
                 xs._raw_line_end = _xs_starts[j + 1][1]
             else:
                 xs._raw_line_end = N
+
+        # Same for connections: end = start of the next connection (or EOF).
+        for j, (conn, start) in enumerate(_conn_starts):
+            if j + 1 < len(_conn_starts):
+                conn._raw_line_end = _conn_starts[j + 1][1]
+            else:
+                conn._raw_line_end = N
 
         return geom

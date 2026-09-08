@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 639 passing tests (plus any added in the current
+All tests must pass. The baseline is 705 passing tests (plus any added in the current
 session), and 1 skipped by design — a 5.0.3 fixture HDF that has no culvert table.
 If a new test is added, the new count becomes the baseline.
 
@@ -71,6 +71,14 @@ Implemented block parsers (as of 2026-06-23):
   Populates `CrossSection.manning_def`.
 - `blocks/xs_bank_sta.py` — `Bank Sta=left,right`: single-line parse; returns
   `((float, float), 1)`.  Populates `CrossSection.bank_stations`.
+- `blocks/connection.py` — the `Connection=` block family (SA/2D connections).
+  Header gives name + label anchor (a GUI draw position, NOT a geometry point);
+  `Connection Line=` is the 16-char XY layout of `XS GIS Cut Line=` and
+  `Conn Weir SE=` / `Connection Centerline Profile=` the 8-char layout of
+  `#Sta/Elev=`, so both delegate to those parsers rather than re-implementing the
+  field mechanics.  Populates `GeometryFile.connections` (a dict keyed by name).
+  Station mapping lives in `geometry/conn_interp.py` — see **Mapping RAS Stations
+  to GIS Coordinates**, and note it is NOT the cross-section rule.
 
 ## Comparing River / Reach Names — always normalize both sides
 
@@ -92,9 +100,9 @@ case-folds. `geometry.shift._normalize_names` and `results.model._normalize_name
 are aliases of it; `tests/test_names.py` pins them so they cannot drift.
 
 ## Mapping RAS Stations to GIS Coordinates
-When a script needs to place station-referenced XS features (IFAs, bank stations,
-Manning breaks, etc.) in GIS space, use the helpers in `hack_ras/geometry/xs_interp.py`:
+**Cross sections and SA/2D connections use opposite rules. Pick the right module.**
 
+### Cross sections — fractional (`geometry/xs_interp.py`)
 ```python
 from hack_ras.geometry.xs_interp import station_to_xy, clip_xs_polyline
 
@@ -108,6 +116,41 @@ cannot be used as a direct arc-length offset.  `xs_interp.py` converts stations 
 fraction of the full XS station range, then walks that fraction of the cut-line arc
 length.  Do NOT implement ad-hoc station-to-XY conversion in scripts — always use these
 helpers to avoid subtle geometry errors.
+
+### SA/2D connections — direct arc length (`geometry/conn_interp.py`)
+```python
+from hack_ras.geometry import conn_interp
+
+xy   = conn_interp.station_to_xy(conn, station)       # -> (x, y)
+pts  = conn_interp.clip_polyline(conn, sta0, sta1)    # -> List[(x, y)]
+elev = conn_interp.elev_at(conn, station)             # weir crest elevation
+ok   = conn_interp.stationing_ok(conn)                # RAS's length contract
+```
+
+A connection's `Conn Weir SE=` stationing **is** arc length along its
+`Connection Line=` polyline, so the fractional mapping must NOT be used here.  HEC-RAS
+requires the station/elevation length to match the GIS centerline length to within
+**1 ft or 0.5%, whichever is smaller**, and refuses to run the model otherwise — GIS was
+bolted onto 1D modeling after the fact, while the 2D side was built with a tight
+GIS-to-model coupling.  Verified deliberately: truncating a levee's weir profile made
+RAS reject the geometry.
+
+The rule applies to **weir-mode connections only** (`Conn Routing Type= 1`,
+`Mode = Weir/Gate/Culverts`).  Surveyed over all 221 connections in Model_Hillside,
+Model_PCA, Model_LAX and the test fixtures: 178 of 178 weir-mode connections comply,
+worst drift 0.032 ft; 12 of 32 `Bridge Opening` connections (`Conn Routing Type= 32`)
+violate it — five in LAX_River_2D.g01/g12 by up to 21.9 ft and GMF_DFA.g01/g02's
+`CTHE` by 419.7 ft — in geometries that run fine;
+their station/elevation data is a bridge opening profile, not a spillway spanning the
+line.  `stationing_enforced()` encodes that split, and an unrecognized routing type is
+reported as unenforced rather than failed.
+
+The named violators are a **dated snapshot** of live project models that keep being
+edited — re-run the survey rather than trusting the counts.  The weir-mode/bridge-mode
+split is the stable part, and the only part the code depends on.
+
+Placement functions clamp rather than validate; call `stationing_ok()` (flag) or
+`check_stationing()` (raise) yourself when a bad geometry should be surfaced.
 
 ## Adding a New HEC-RAS File Type
 Create a new package under `hack_ras/` with:
@@ -172,6 +215,34 @@ tests/data/
                                            truth for the ASCII-vs-HDF culvert cross-check.
     Model.p02.hdf                       ← results reader / pipe network tests
     Model.p02                           ← plan sidecar (used by read_plan_metadata)
+    Model.p06 / .p06.hdf / .rst         ← BREACH FIELD FINGERPRINT, authored in the RAS
+                                           7.0 GUI (2026-09-08) so every breach control
+                                           holds a distinct, identifiable value:
+                                           Center Station 1234, Final Bottom Width 111,
+                                           Final Bottom Elevation 742, Left Side Slope 2,
+                                           Right Side Slope 3 (ASYMMETRIC ON PURPOSE —
+                                           this is what pins Breach Geom field order and
+                                           exercises the top-width geometry, since every
+                                           other breach fixture has vertical walls),
+                                           Failure Mode Piping, Piping Coefficient 0.44,
+                                           Initial Piping Elev 750.5, Formation Time
+                                           3.75 hr, Breach Weir Coef 2.11, Set Time
+                                           trigger. Breaches the `Levee` connection on
+                                           g02, and uses u02 (shared with p02/p04).
+                                           test_breach.py asserts these GUI values, so it
+                                           checks the decoder against HEC-RAS itself.
+                                           The weir breach sits LOWER than the cells it
+                                           connects — RAS warns and runs anyway — and the
+                                           run ends before the breach finishes forming, so
+                                           its realised side slopes (0.61/0.92) are
+                                           partway to 2/3: the fixture that proves the
+                                           realised breach is the widest state REACHED,
+                                           not the plan's terminal geometry.
+                                           Registered in the .rasmap Results tree like
+                                           every other run plan, so the untouched fixture
+                                           reports no unlisted results; the tests that
+                                           need a flagged plan still make one by calling
+                                           remove_plans_from_rasmap on a temp copy.
     Terrain/_ESRI projection StatePlane.prj  ← CRS-resolution tests (find_crs_prj via rasmap;
                                            ESRI-prj-rejection test)
     Features/

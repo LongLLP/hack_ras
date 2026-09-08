@@ -123,6 +123,84 @@ class StorageArea2D:
     _data_end: int = field(default=-1, repr=False, compare=False)     # one past the last coordinate line
 
 
+# Conn Routing Type= -> the connection Mode shown in the RAS GUI and stored in
+# the geometry HDF's Structures/Attributes 'Mode' field. Verified by matching
+# every ASCII connection against its HDF row across the sample models: type 1
+# is always 'Weir/Gate/Culverts' (178 connections) and type 32 always
+# 'Bridge Opening' (32). Other RAS routing types exist but have not been seen,
+# so an unrecognized value maps to None rather than a guess.
+CONN_ROUTING_MODES = {
+    1: "Weir/Gate/Culverts",
+    32: "Bridge Opening",
+}
+
+
+@dataclass
+class Connection:
+    """An SA/2D connection — the ``Connection=`` block (levee, weir, or
+    hydraulic structure joining two 2D areas/storage areas, or crossing a
+    single one).
+
+    ``centerline`` is the ``Connection Line=`` polyline in projected map units;
+    ``weir_profile`` is the ``Conn Weir SE=`` (station, elevation) pairs — the
+    spillway/levee crest RAS routes flow over; ``terrain_profile`` is the
+    ``Connection Centerline Profile=`` pairs, the ground surface sampled under
+    the centerline (usually empty — RAS writes 0 points unless the profile has
+    been pulled from terrain in the GUI).  RAS's own breach plot draws these two
+    as "Spillway" and "Centerline Terrain".
+
+    **Stationing is arc length**, unlike a cross section: HEC-RAS requires a
+    connection's station/elevation length to match its GIS centerline length
+    and refuses to run otherwise, so a station is a direct distance along
+    ``centerline``.  See :mod:`hack_ras.geometry.conn_interp`, which owns that
+    mapping and the tolerance check — do not mix up ``xs_interp``'s fractional
+    mapping, which is for cross sections only.
+
+    ``up_sa`` / ``dn_sa`` are the headwater / tailwater area names
+    (``Connection Up SA=`` / ``Dn SA=``); the two are equal for a connection
+    interior to a single 2D area.
+
+    The ``_raw_line_*`` indices locate the block within
+    ``GeometryFile.raw_lines``; they are positional bookkeeping, not semantics.
+    """
+    name: str
+    label_xy: Optional[Tuple[float, float]] = None
+    description: str = ""
+    centerline: List[Tuple[float, float]] = field(default_factory=list)
+    weir_profile: List[Tuple[float, float]] = field(default_factory=list)
+    terrain_profile: List[Tuple[float, float]] = field(default_factory=list)
+    up_sa: str = ""
+    dn_sa: str = ""
+    weir_coef: Optional[float] = None
+    weir_width: Optional[float] = None
+    routing_type: Optional[int] = None
+    last_edited: str = ""
+
+    _raw_line_start: int = field(default=-1, repr=False, compare=False)
+    _raw_line_end: int = field(default=-1, repr=False, compare=False)
+
+    @property
+    def mode(self) -> Optional[str]:
+        """RAS connection Mode from ``Conn Routing Type=``, or None if unknown.
+
+        Matches the geometry HDF's ``Structures/Attributes`` ``Mode`` field —
+        see :data:`CONN_ROUTING_MODES`.  The mode decides whether the weir
+        profile is a spillway spanning the whole centerline (``Weir/Gate/
+        Culverts``) or a bridge opening that need not
+        (:mod:`hack_ras.geometry.conn_interp`).
+        """
+        return CONN_ROUTING_MODES.get(self.routing_type)
+
+    @property
+    def is_weir_mode(self) -> bool:
+        """True for a ``Weir/Gate/Culverts`` connection (levees, spillways).
+
+        These are the connections a breach can be placed on, and the ones whose
+        stationing HEC-RAS holds to its GIS length.
+        """
+        return self.routing_type == 1
+
+
 @dataclass
 class Reach:
     name: str
@@ -138,6 +216,7 @@ class GeometryFile:
     title: Optional[str] = None
     rivers: Dict[str, River] = field(default_factory=dict)
     storage_areas_2d: List[StorageArea2D] = field(default_factory=list)
+    connections: Dict[str, Connection] = field(default_factory=dict)
 
     raw_lines: List[str] = field(default_factory=list)  # for passthrough/editing
 

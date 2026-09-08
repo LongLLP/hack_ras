@@ -32,6 +32,8 @@ from .model import (
     PlanMetadata,
     Sa2dCell,
     Sa2dConnection,
+    BreachState,
+    ConnectionCenterline,
 )
 
 
@@ -706,6 +708,90 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
     )
 
 
+_STRUCTURES = "Geometry/Structures"
+
+
+def list_connections(hdf_path: str) -> list:
+    """Names of every structure in ``Geometry/Structures`` (connections included).
+
+    Works on a geometry HDF (``.g##.hdf``) as well as a plan HDF, since both
+    carry the Geometry group.  Returns an empty list when the file has no
+    structures.
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        if f"{_STRUCTURES}/Attributes" not in hdf:
+            return []
+        return [_decode(r["Connection"])
+                for r in hdf[f"{_STRUCTURES}/Attributes"][()]]
+
+
+def read_connection_centerline(hdf_path: str,
+                               connection: str) -> ConnectionCenterline:
+    """Read one connection's centerline and profile from a RAS HDF.
+
+    The HDF equivalent of the geometry file's ``Connection Line=`` and
+    ``Conn Weir SE=`` blocks, useful as an independent check on an ASCII parse
+    (the pattern the culvert reader already uses).  Verified to agree with the
+    ASCII parse to the digit on 221 connections across five models, including
+    every one whose stationing is out of contract — so a disagreement means a
+    parse bug, not a RAS quirk.
+
+    ``Geometry/Structures`` stores all structures in flat arrays with a
+    per-structure index/count row:
+
+    * ``Centerline Info[i]`` = (point index, point count, part index, part count)
+    * ``Centerline Points`` = every structure's vertices, concatenated
+    * ``Table Info[i]['Centerline Profile (Index)'/'(Count)']`` slices
+      ``Profile Data``
+
+    Raises
+    ------
+    KeyError
+        If the file has no Structures group, or no such connection.
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        if f"{_STRUCTURES}/Attributes" not in hdf:
+            raise KeyError(f"{hdf_path} has no {_STRUCTURES}/Attributes group.")
+        struct = hdf[_STRUCTURES]
+        attrs = struct["Attributes"][()]
+        matches = [i for i, r in enumerate(attrs)
+                   if _decode(r["Connection"]) == connection]
+        if not matches:
+            raise KeyError(
+                f"Connection {connection!r} not found in {hdf_path}; "
+                f"available: {[_decode(r['Connection']) for r in attrs]}"
+            )
+        i = matches[0]
+        row = attrs[i]
+
+        info = struct["Centerline Info"][()][i]
+        start, count = int(info[0]), int(info[1])
+        points = struct["Centerline Points"][()][start:start + count]
+
+        parts = ()
+        if "Centerline Parts" in struct:
+            parts = tuple(int(v) for v in struct["Centerline Parts"][()][i])
+
+        profile = np.empty((0, 2), dtype=np.float64)
+        if "Table Info" in struct and "Profile Data" in struct:
+            table = struct["Table Info"][()][i]
+            p_start = int(table["Centerline Profile (Index)"])
+            p_count = int(table["Centerline Profile (Count)"])
+            if p_count:
+                profile = struct["Profile Data"][()][p_start:p_start + p_count]
+
+        return ConnectionCenterline(
+            name=connection,
+            points=np.asarray(points, dtype=np.float64),
+            profile=np.asarray(profile, dtype=np.float64),
+            us_area=_decode(row["US SA/2D"]),
+            ds_area=_decode(row["DS SA/2D"]),
+            mode=_decode(row["Mode"]),
+            snn_id=int(row["SNN ID"]),
+            parts=parts,
+        )
+
+
 def read_sa2d_areas(hdf_path: str, connection: str) -> tuple[str, str]:
     """
     Return (hw_area, tw_area) for an SA 2D Area Conn by looking up
@@ -748,11 +834,104 @@ _SA2D_BREACHING_COLS = (
     "Breach Flow", "Breach Velocity", "Breach Flow Area",
 )
 
+_SA2D_CONN_ROOT = (
+    "Results/Unsteady/Output/Output Blocks/Base Output"
+    "/Unsteady Time Series/SA 2D Area Conn"
+)
+_AREAS_ROOT = (
+    "Results/Unsteady/Output/Output Blocks/Base Output"
+    "/Unsteady Time Series/2D Flow Areas"
+)
+_HYD_CONN_TS = _AREAS_ROOT + "/{area}/2D Hyd Conn/{connection}"
+
+
+def _area_names(hdf) -> list:
+    """2D flow area names that have time-series output."""
+    return list(hdf[_AREAS_ROOT]) if _AREAS_ROOT in hdf else []
+
+
+def _find_connection_group(hdf, connection: str):
+    """Locate a connection's time-series group, or (None, '').
+
+    Returns ``(group, kind)`` where *kind* is ``'SA 2D Area Conn'`` or
+    ``'2D Hyd Conn'``.
+
+    How RAS files a connection depends on what it joins, and the group is
+    **not always named after the connection**:
+
+    * joining two different areas (or an area and a storage area) — the group
+      is ``SA 2D Area Conn/<connection>``.  Model_Hillside's L1-L7 levees, each
+      between the RockCr and Interior meshes, and the test fixture's ``Levee``.
+    * interior to a single area, both sides the same mesh — RAS writes the
+      data **twice**: as ``2D Flow Areas/<area>/2D Hyd Conn/<connection>`` and
+      as ``SA 2D Area Conn/<area> <connection>``, area name prefixed.
+      Model_Hillside's C1-C9 road crossings inside RockCr (``RockCr C1 Walker
+      Road``), Model_PCA's GMF embankment (``Perimeter 1 GMF``), and the
+      fixture's ``Watershed Bridge`` / ``Watershed Culvert``.
+
+    The duplicate pair is byte-identical — same shape, same values, same
+    ``Breach at`` / ``Centerline Breach`` attributes (verified on Model_PCA's GMF,
+    GMF_DFA.p02.hdf) —
+    so either is authoritative.  All three spellings are tried, because a bare
+    lookup on the connection name alone silently misses every interior
+    connection.
+    """
+    path = _SA2D_TS_BASE.format(connection=connection)
+    if path in hdf:
+        return hdf[path], "SA 2D Area Conn"
+    for area in _area_names(hdf):
+        path = _HYD_CONN_TS.format(area=area, connection=connection)
+        if path in hdf:
+            return hdf[path], "2D Hyd Conn"
+    for area in _area_names(hdf):
+        path = _SA2D_TS_BASE.format(connection=f"{area} {connection}")
+        if path in hdf:
+            return hdf[path], "SA 2D Area Conn"
+    return None, ""
+
+
+def _unprefix_connection(group_name: str, areas: list) -> str:
+    """Strip a leading ``'<area> '`` from an SA 2D Area Conn group name.
+
+    ``'Perimeter 1 GMF'`` -> ``'GMF'``; a name that carries no area prefix is
+    returned unchanged.  Longest area first, so a name is not half-stripped
+    when one area name prefixes another.
+    """
+    for area in sorted(areas, key=len, reverse=True):
+        prefix = f"{area} "
+        if group_name.startswith(prefix):
+            return group_name[len(prefix):]
+    return group_name
+
+
+def _variable_columns(dataset, fallback: tuple) -> tuple:
+    """Column names for a *Variables dataset, from its own metadata.
+
+    RAS stamps a ``Variable_Unit`` attribute of ``(name, unit)`` rows on these
+    datasets.  Reading it beats hardcoding a column list, because the width is
+    not fixed: ``Breaching Variables`` has nine columns for an overtopping
+    breach and ten for a piping one (the extra column is ``Top-Elevation``,
+    which RAS then leaves unpopulated).  Confirmed across four plans — two
+    overtopping with 9, two piping with 10 — so a hardcoded 9 silently
+    mislabels every column of a piping breach from ``Bottom-Width`` on.
+
+    Falls back to *fallback* only when the attribute is missing.
+    """
+    raw = dataset.attrs.get("Variable_Unit")
+    if raw is None:
+        return fallback
+    names = tuple(_decode(row[0]) for row in raw)
+    return names or fallback
+
 
 def read_breach_timeseries(hdf_path: str, connection: str) -> dict:
     """
     Read Structure Variables, Breaching Variables, and Weir Variables time
-    series for one SA 2D Area Conn feature.
+    series for one SA/2D connection.
+
+    Handles both HDF layouts (see :func:`_find_connection_group`) and takes
+    column names from each dataset's own ``Variable_Unit`` attribute rather
+    than a fixed list (see :func:`_variable_columns`).
 
     Parameters
     ----------
@@ -769,56 +948,210 @@ def read_breach_timeseries(hdf_path: str, connection: str) -> dict:
         np.ndarray, shape (T,), str — HEC-RAS time-date stamp strings,
         e.g. ``'01JAN2025 00:30:00'``.
 
+    ``'kind'``
+        str — ``'SA 2D Area Conn'`` or ``'2D Hyd Conn'``, whichever parent held
+        the data.
+
     ``'structure'``
-        dict[str, np.ndarray] — always present.
-        Keys: ``'Total Flow'``, ``'Weir Flow'``, ``'Stage HW'``, ``'Stage TW'``.
+        dict[str, np.ndarray] — always present.  Typically
+        ``'Total Flow'``, ``'Weir Flow'``, ``'Stage HW'``, ``'Stage TW'``.
 
     ``'breaching'``
-        dict[str, np.ndarray] or None — present only when a breach has occurred.
-        Keys: ``'Stage HW'``, ``'Stage TW'``, ``'Bottom-Width'``,
+        dict[str, np.ndarray] or None — present only when the plan produced
+        breach output.  ``'Stage HW'``, ``'Stage TW'``, ``'Bottom-Width'``,
         ``'Bottom-Elevation'``, ``'Left Side Slope'``, ``'Right Side Slope'``,
-        ``'Breach Flow'``, ``'Breach Velocity'``, ``'Breach Flow Area'``.
+        ``'Breach Flow'``, ``'Breach Velocity'``, ``'Breach Flow Area'``, and
+        ``'Top-Elevation'`` on a piping breach.
+
+        **Rows before the breach are not blank in a consistent way**: they read
+        NaN under SA 2D Area Conn and zero under 2D Hyd Conn.  Test
+        ``Bottom-Width > 0``, not ``isfinite``, to find the breached steps —
+        :func:`read_breach_state` does.
 
     ``'weir'``
-        dict[str, np.ndarray] or None — present when weir overflow occurs.
-        Keys: ``'Weir Flow'``, ``'Sta US'``, ``'Sta DS'``, ``'Top Width'``,
-        ``'Max Depth'``, ``'Avg Depth'``, ``'Flow Area'``, ``'Coef'``,
-        ``'Submergence'``.
+        dict[str, np.ndarray] or None — present when there is weir overflow.
 
     Raises
     ------
     KeyError
         If the connection group or the Structure Variables dataset are absent.
     """
-    base = _SA2D_TS_BASE.format(connection=connection)
-
     with h5py.File(hdf_path, "r") as hdf:
+        group, kind = _find_connection_group(hdf, connection)
+        if group is None:
+            raise KeyError(
+                f"No SA 2D Area Conn or 2D Hyd Conn results for connection "
+                f"{connection!r} in {hdf_path}"
+            )
         timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
 
-        # Structure Variables — always present for any SA 2D Area Conn
-        sv = hdf[f"{base}/Structure Variables"][()].astype(np.float64)
-        structure = {name: sv[:, i] for i, name in enumerate(_SA2D_STRUCTURE_COLS)}
+        # Structure Variables — always present for any connection with results
+        sv_ds = group["Structure Variables"]
+        sv = sv_ds[()].astype(np.float64)
+        sv_cols = _variable_columns(sv_ds, _SA2D_STRUCTURE_COLS)
+        structure = {name: sv[:, i] for i, name in enumerate(sv_cols)}
 
-        # Breaching Variables — only exists when a breach has occurred in this plan
+        # Breaching Variables — only exists when the plan produced breach output
         breaching = None
-        bv_path = f"{base}/Breaching Variables"
-        if bv_path in hdf:
-            bv = hdf[bv_path][()].astype(np.float64)
-            breaching = {name: bv[:, i] for i, name in enumerate(_SA2D_BREACHING_COLS)}
+        if "Breaching Variables" in group:
+            bv_ds = group["Breaching Variables"]
+            bv = bv_ds[()].astype(np.float64)
+            bv_cols = _variable_columns(bv_ds, _SA2D_BREACHING_COLS)
+            breaching = {name: bv[:, i] for i, name in enumerate(bv_cols)}
 
         # Weir Variables — present when there is weir overflow
         weir = None
-        wv_path = f"{base}/Weir Variables"
-        if wv_path in hdf:
-            wv = hdf[wv_path][()].astype(np.float64)
-            weir = {name: wv[:, i] for i, name in enumerate(_SA2D_WEIR_COLS)}
+        if "Weir Variables" in group:
+            wv_ds = group["Weir Variables"]
+            wv = wv_ds[()].astype(np.float64)
+            wv_cols = _variable_columns(wv_ds, _SA2D_WEIR_COLS)
+            weir = {name: wv[:, i] for i, name in enumerate(wv_cols)}
 
     return {
         "timestamps": timestamps,
+        "kind":       kind,
         "structure":  structure,
         "breaching":  breaching,
         "weir":       weir,
     }
+
+
+def list_breach_connections(hdf_path: str) -> list:
+    """Connection names that produced breach output in this plan.
+
+    Searches both HDF layouts and returns **connection** names, not raw group
+    names: an interior connection is stored twice under two different
+    spellings (see :func:`_find_connection_group`), and the area prefix is
+    stripped so ``'Perimeter 1 GMF'`` and ``'GMF'`` collapse to one entry.
+
+    Empty when no breach output exists — including when the plan defines a
+    breach whose trigger never fired.
+    """
+    found = []
+    with h5py.File(hdf_path, "r") as hdf:
+        areas = _area_names(hdf)
+        if _SA2D_CONN_ROOT in hdf:
+            for name in hdf[_SA2D_CONN_ROOT]:
+                if "Breaching Variables" in hdf[f"{_SA2D_CONN_ROOT}/{name}"]:
+                    found.append(_unprefix_connection(name, areas))
+        for area in areas:
+            conns = f"{_AREAS_ROOT}/{area}/2D Hyd Conn"
+            if conns not in hdf:
+                continue
+            for name in hdf[conns]:
+                if "Breaching Variables" in hdf[f"{conns}/{name}"]:
+                    found.append(name)
+    # dict.fromkeys dedupes while keeping discovery order
+    return list(dict.fromkeys(found))
+
+
+def read_breach_state(hdf_path: str, connection: str,
+                      crest_elev: float = None) -> BreachState:
+    """Read the breach a run actually opened, as a :class:`BreachState`.
+
+    Pass *crest_elev* — the weir-crest elevation at the breach station, from
+    :func:`hack_ras.geometry.conn_interp.elev_at` — to get ``top_width``; the
+    trapezoid's top cannot be computed without it, and it is left None.
+
+    Returns a state with ``fired=False`` and geometry None when the plan
+    carries breach output that never developed (all-NaN or all-zero rows).
+
+    Raises
+    ------
+    KeyError
+        If the connection has no results group, or no Breaching Variables.
+    """
+    ts = read_breach_timeseries(hdf_path, connection)
+    br = ts["breaching"]
+    if br is None:
+        raise KeyError(
+            f"Connection {connection!r} has no Breaching Variables in "
+            f"{hdf_path}; no breach output was written for this plan."
+        )
+
+    with h5py.File(hdf_path, "r") as hdf:
+        group, _ = _find_connection_group(hdf, connection)
+        attrs = {k: v for k, v in group["Breaching Variables"].attrs.items()
+                 if k != "Variable_Unit"}
+
+    center = attrs.get("Centerline Breach")
+    state = BreachState(
+        connection=connection,
+        fired=False,
+        hdf_path_kind=ts["kind"],
+        center_station=None if center is None else float(center),
+        breach_at=_decode(attrs.get("Breach at", b"")),
+        breach_at_days=(float(attrs["Breach at Time (Days)"])
+                        if "Breach at Time (Days)" in attrs else None),
+        columns=tuple(br.keys()),
+    )
+
+    bw = br["Bottom-Width"]
+    be = br["Bottom-Elevation"]
+    # Pre-breach rows are NaN in one layout and 0 in the other, so a positive
+    # bottom width is the only reliable "this step is breached" test.
+    fired = np.isfinite(bw) & (bw > 0)
+    if not fired.any():
+        return state
+
+    ls, rs = br["Left Side Slope"], br["Right Side Slope"]
+    if crest_elev is None:
+        top = np.where(fired, bw, np.nan)
+    else:
+        top = np.where(fired,
+                       bw + (ls + rs) * np.maximum(crest_elev - be, 0.0),
+                       np.nan)
+    k = int(np.nanargmax(top))
+
+    state.fired = True
+    state.bottom_width = float(np.nanmax(bw[fired]))
+    state.bottom_elev = float(np.nanmin(be[fired]))
+    state.left_slope = float(ls[k])
+    state.right_slope = float(rs[k])
+    state.top_width = None if crest_elev is None else float(top[k])
+    state.max_flow = float(np.nanmax(br["Breach Flow"][fired]))
+    state.max_velocity = float(np.nanmax(br["Breach Velocity"][fired]))
+    state.max_flow_area = float(np.nanmax(br["Breach Flow Area"][fired]))
+    stamps = ts["timestamps"]
+    state.time_of_max_top_width = str(stamps[k]) if k < len(stamps) else ""
+    return state
+
+
+def read_plan_breach_data(hdf_path: str) -> list:
+    """Read ``Plan Data/Breach Data`` — the plan's breach definitions as run.
+
+    Returns a list of dicts with ``name``, ``kind``, ``bottom_width`` and
+    ``side_slopes``.  ``Names`` entries are pipe-delimited and kind-prefixed
+    (``b'Connection|Levee'``), so ``kind`` is the part before the ``|``.
+
+    This mirrors the ``.p##`` sidecar's own ``Breach Geom`` fields 2, 4 and 5 —
+    a fingerprint plan with bottom width 111 and side slopes 2/3 came back as
+    exactly ``[[2., 3.]]`` and ``[111.]`` — which is what pins the ASCII field
+    order down independently of the GUI.
+
+    Returns an empty list when the plan defines no breach.
+    """
+    rows = []
+    with h5py.File(hdf_path, "r") as hdf:
+        if "Plan Data/Breach Data" not in hdf:
+            return rows
+        group = hdf["Plan Data/Breach Data"]
+        if "Names" not in group:
+            return rows
+        names = [_decode(n) for n in group["Names"][()]]
+        widths = group["Bottom Widths"][()] if "Bottom Widths" in group else None
+        slopes = group["Side Slopes"][()] if "Side Slopes" in group else None
+        for i, full in enumerate(names):
+            kind, _, name = full.partition("|")
+            rows.append({
+                "name": name or full,
+                "kind": kind if name else "",
+                "bottom_width": (float(widths[i])
+                                 if widths is not None and i < len(widths) else None),
+                "side_slopes": (tuple(float(v) for v in slopes[i])
+                                if slopes is not None and i < len(slopes) else None),
+            })
+    return rows
 
 
 def read_simulation_start_time(hdf_path: str) -> datetime:

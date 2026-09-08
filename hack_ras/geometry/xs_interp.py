@@ -61,6 +61,62 @@ def _walk_to_dist(
     return points[-1]
 
 
+def _clip_by_distance(
+    points: List[Tuple[float, float]],
+    cum: List[float],
+    dist_start: float,
+    dist_end: float,
+) -> List[Tuple[float, float]]:
+    """Sub-polyline of *points* between two arc-length distances.
+
+    Entry and exit points are interpolated; interior vertices inside the range
+    are preserved.  Always returns at least two points (a degenerate range
+    yields the same point twice).  Distance-based and geometry-only, so it
+    serves both the fractional XS mapping and the direct arc-length mapping
+    connections use (:mod:`hack_ras.geometry.conn_interp`).
+    """
+    if dist_end <= dist_start:
+        pt = _walk_to_dist(points, cum, dist_start)
+        return [pt, pt]
+
+    result: List[Tuple[float, float]] = []
+
+    for i in range(len(points)):
+        d_prev = cum[i - 1] if i > 0 else 0.0
+        d_curr = cum[i]
+
+        # Interpolate entry point on the segment that crosses dist_start
+        if i > 0 and d_prev <= dist_start < d_curr and not result:
+            seg_len = d_curr - d_prev
+            t = (dist_start - d_prev) / seg_len if seg_len > 0 else 0.0
+            x = points[i - 1][0] + t * (points[i][0] - points[i - 1][0])
+            y = points[i - 1][1] + t * (points[i][1] - points[i - 1][1])
+            result.append((x, y))
+        elif i == 0 and dist_start == 0.0:
+            result.append(points[0])
+
+        # Include interior vertices that fall strictly within the range
+        if result and dist_start < d_curr < dist_end:
+            result.append(points[i])
+
+        # Interpolate exit point on the segment that crosses dist_end
+        if i > 0 and d_prev < dist_end <= d_curr:
+            seg_len = d_curr - d_prev
+            t = (dist_end - d_prev) / seg_len if seg_len > 0 else 0.0
+            x = points[i - 1][0] + t * (points[i][0] - points[i - 1][0])
+            y = points[i - 1][1] + t * (points[i][1] - points[i - 1][1])
+            result.append((x, y))
+            break
+
+    # Fallback for degenerate cases
+    if len(result) < 2:
+        result = [
+            _walk_to_dist(points, cum, dist_start),
+            _walk_to_dist(points, cum, dist_end),
+        ]
+    return result
+
+
 def _station_fraction(station: float, min_sta: float, max_sta: float) -> float:
     """Fractional position of *station* within [min_sta, max_sta], clamped to [0, 1]."""
     sta_range = max_sta - min_sta
@@ -160,44 +216,4 @@ def clip_xs_polyline(
     dist_start = _station_fraction(sta_start, min_sta, max_sta) * total
     dist_end   = _station_fraction(sta_end,   min_sta, max_sta) * total
 
-    if dist_end <= dist_start:
-        pt = _walk_to_dist(points, cum, dist_start)
-        return [pt, pt]
-
-    result: List[Tuple[float, float]] = []
-
-    for i in range(len(points)):
-        d_prev = cum[i - 1] if i > 0 else 0.0
-        d_curr = cum[i]
-
-        # Interpolate entry point on the segment that crosses dist_start
-        if i > 0 and d_prev <= dist_start < d_curr and not result:
-            seg_len = d_curr - d_prev
-            t = (dist_start - d_prev) / seg_len if seg_len > 0 else 0.0
-            x = points[i - 1][0] + t * (points[i][0] - points[i - 1][0])
-            y = points[i - 1][1] + t * (points[i][1] - points[i - 1][1])
-            result.append((x, y))
-        elif i == 0 and dist_start == 0.0:
-            result.append(points[0])
-
-        # Include interior vertices that fall strictly within the range
-        if result and dist_start < d_curr < dist_end:
-            result.append(points[i])
-
-        # Interpolate exit point on the segment that crosses dist_end
-        if i > 0 and d_prev < dist_end <= d_curr:
-            seg_len = d_curr - d_prev
-            t = (dist_end - d_prev) / seg_len if seg_len > 0 else 0.0
-            x = points[i - 1][0] + t * (points[i][0] - points[i - 1][0])
-            y = points[i - 1][1] + t * (points[i][1] - points[i - 1][1])
-            result.append((x, y))
-            break
-
-    # Fallback for degenerate cases
-    if len(result) < 2:
-        result = [
-            _walk_to_dist(points, cum, dist_start),
-            _walk_to_dist(points, cum, dist_end),
-        ]
-
-    return result
+    return _clip_by_distance(points, cum, dist_start, dist_end)

@@ -758,6 +758,107 @@ class Sa2dConnection:
 
 
 @dataclass
+class BreachState:
+    """The breach a run actually opened, for one connection.
+
+    Read from ``Breaching Variables``, which exists only once a breach has
+    formed.  ``fired`` distinguishes "this plan defines a breach that never
+    triggered" (a legitimate outcome) from "no breach data at all"; a
+    never-fired breach still yields an object, with ``fired`` False and the
+    geometry fields None.
+
+    The realised geometry is the **widest state reached**, not the plan's
+    terminal geometry — a run that ends before the breach finishes forming
+    stops short, and the side slopes grow with it (observed: a plan whose
+    final slopes are 2/3 was still at 0.61/0.92 when the simulation ended).
+    ``top_width`` therefore peaks at whichever time step maximises
+    ``bottom_width + (left+right slope) * (crest - bottom_elev)``, which need
+    not be the step with the widest bottom.
+
+    Attributes
+    ----------
+    connection : str
+        Connection name (HDF group key).
+    fired : bool
+        Whether a breach actually formed during the run.
+    hdf_path_kind : str
+        Which parent held the data: ``'SA 2D Area Conn'`` or ``'2D Hyd Conn'``.
+    center_station : float or None
+        ``Centerline Breach`` group attribute — the station RAS breached at.
+    breach_at : str
+        ``Breach at`` group attribute, e.g. ``'01JAN2025 12:37:00'``.
+    breach_at_days : float or None
+        ``Breach at Time (Days)`` group attribute, decimal days from sim start.
+    bottom_width, bottom_elev : float or None
+        Widest bottom width and lowest invert reached.
+    left_slope, right_slope : float or None
+        Side slopes at the widest-opening time step.
+    top_width : float or None
+        Widest opening reached at the crest; None when no crest was supplied.
+    max_flow, max_velocity, max_flow_area : float or None
+        Peaks over the breached time steps.
+    time_of_max_top_width : str
+        Time stamp of the widest opening.
+    columns : tuple[str, ...]
+        Column names as the HDF itself declared them (see
+        :func:`hack_ras.results.reader.read_breach_timeseries`).
+    """
+    connection: str
+    fired: bool
+    hdf_path_kind: str = ""
+    center_station: float = None
+    breach_at: str = ""
+    breach_at_days: float = None
+    bottom_width: float = None
+    bottom_elev: float = None
+    left_slope: float = None
+    right_slope: float = None
+    top_width: float = None
+    max_flow: float = None
+    max_velocity: float = None
+    max_flow_area: float = None
+    time_of_max_top_width: str = ""
+    columns: tuple = ()
+
+
+@dataclass
+class ConnectionCenterline:
+    """An SA/2D connection's geometry as stored in a RAS HDF.
+
+    The HDF twin of the geometry file's ``Connection Line=`` and
+    ``Conn Weir SE=`` blocks, for cross-checking an ASCII parse against what
+    RAS computed with.  ``parts`` carries the ``Centerline Parts`` row: every
+    connection seen is single-part, but the field exists so a multi-part line
+    is not silently joined end-to-end.
+
+    Attributes
+    ----------
+    name : str
+        Connection name.
+    points : np.ndarray, shape (N, 2)
+        Centerline vertices in projected map units.
+    profile : np.ndarray, shape (M, 2)
+        (station, elevation) pairs of the centerline profile.
+    us_area, ds_area : str
+        Headwater / tailwater 2D area or storage area names.
+    mode : str
+        ``'Weir/Gate/Culverts'``, ``'Bridge Opening'``, ...
+    snn_id : int
+        Node id linking to a results group's ``Node Pointer`` attribute.
+    parts : tuple
+        The structure's ``Centerline Parts`` row.
+    """
+    name: str
+    points: np.ndarray
+    profile: np.ndarray
+    us_area: str = ""
+    ds_area: str = ""
+    mode: str = ""
+    snn_id: int = -1
+    parts: tuple = ()
+
+
+@dataclass
 class SteadyProfileResults:
     """
     Per-cross-section water-surface elevations for a 1D steady-flow plan,
