@@ -9,6 +9,8 @@ model.  Bridge-mode connections are exempt; see
 """
 
 import math
+import numpy as np
+import os
 import unittest
 from pathlib import Path
 
@@ -27,6 +29,7 @@ DATA = Path(__file__).parent / "data"
 FIXTURE = DATA / "2D culvert bridge levee precip pipes"
 MODEL_G02 = FIXTURE / "Model.g02"
 MODEL_P06_HDF = FIXTURE / "Model.p06.hdf"
+MODEL_P02_HDF = FIXTURE / "Model.p02.hdf"
 
 
 class TestConnectionParse(unittest.TestCase):
@@ -251,6 +254,384 @@ class TestAsciiMatchesHdf(unittest.TestCase):
 
         with self.assertRaises(KeyError):
             read_connection_centerline(str(MODEL_P06_HDF), "No Such Levee")
+
+
+@unittest.skipUnless(HAS_H5PY, "h5py required")
+class TestSa2dResultLayouts(unittest.TestCase):
+    """The two connection modes write different result layouts.
+
+    A ``Weir/Gate/Culverts`` connection writes ``HW TW Cells`` plus
+    ``HW TW Segments`` weir stationing; a RAS 7.0 ``Bridge Opening`` connection
+    writes only ``Cell WS US`` / ``Cell WS DS`` under the same group, with no
+    stationing of any kind.  ``read_sa2d_connection`` must read both.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from hack_ras.results.reader import read_sa2d_connection
+
+        cls.read = staticmethod(read_sa2d_connection)
+        cls.hdf = str(MODEL_P02_HDF)
+
+    def test_both_modes_are_listed(self):
+        from hack_ras.results.reader import list_sa2d_connections
+
+        self.assertEqual(sorted(list_sa2d_connections(self.hdf)),
+                         ["Levee", "Watershed Bridge", "Watershed Culvert"])
+
+    def test_weir_mode_cells_carry_stations(self):
+        conn = self.read(self.hdf, "Watershed Culvert")
+        self.assertEqual([c.cell_idx for c in conn.hw_cells], [11, 13])
+        self.assertEqual([c.cell_idx for c in conn.tw_cells], [10, 12])
+        for cell in conn.hw_cells + conn.tw_cells:
+            self.assertFalse(math.isnan(cell.station))
+
+    def test_bridge_mode_is_read_and_stationed_from_the_geometry(self):
+        """The results group has no stationing; 2DBR US/DS Cells supplies it."""
+        from hack_ras.results.reader import read_bridge_cells
+
+        conn = self.read(self.hdf, "Watershed Bridge")
+        self.assertEqual(sorted(c.cell_idx for c in conn.hw_cells), [22, 24])
+        self.assertEqual(sorted(c.cell_idx for c in conn.tw_cells), [21, 23])
+
+        for cell in conn.hw_cells + conn.tw_cells:
+            self.assertFalse(math.isnan(cell.station))
+            self.assertLessEqual(cell.station_start, cell.station)
+            self.assertLessEqual(cell.station, cell.station_end)
+
+        # The stations are the geometry's, not invented here.
+        want = read_bridge_cells(self.hdf, "Bridge").stations("us")
+        for cell in conn.hw_cells:
+            self.assertAlmostEqual(cell.station, want[cell.cell_idx][1], places=4)
+
+    def test_bridge_cells_sort_by_station_like_weir_cells(self):
+        conn = self.read(self.hdf, "Watershed Bridge")
+        for cells in (conn.hw_cells, conn.tw_cells):
+            stations = [c.station for c in cells]
+            self.assertEqual(stations, sorted(stations))
+
+    def test_bridge_mode_wse_aligns_with_timestamps_and_cells(self):
+        conn = self.read(self.hdf, "Watershed Bridge")
+        for cell in conn.hw_cells + conn.tw_cells:
+            self.assertEqual(cell.wse.shape, (len(conn.timestamps),))
+        # Cell WS US is the headwater side, Cell WS DS the tailwater side, so
+        # the bridge loses head in the direction RAS says it does.
+        self.assertGreater(max(c.wse.max() for c in conn.hw_cells),
+                           max(c.wse.max() for c in conn.tw_cells))
+
+    def test_bridge_mode_wse_matches_the_summary_maximum_per_cell(self):
+        """Columns map positionally onto Headwater/Tailwater Cells.
+
+        The fixture writes only five output steps, so a summary maximum taken at
+        sub-step accuracy can sit above the time-series peak — hence the loose
+        bound.  The mapping itself was pinned exactly on a 145-step run
+        (LAX_River_2D p19, Brdg2_GRST: 20 of 20 columns to 6e-5 ft).
+        """
+        from hack_ras.results.reader import read_summary_max
+
+        conn = self.read(self.hdf, "Watershed Bridge")
+        cells = conn.hw_cells + conn.tw_cells
+        summary = read_summary_max(self.hdf, "Watershed",
+                                   [c.cell_idx for c in cells])
+        for cell in cells:
+            ts_max = float(cell.wse.max())
+            sum_max = summary[cell.cell_idx][0]
+            self.assertGreaterEqual(sum_max + 1e-3, ts_max)
+            self.assertLess(sum_max - ts_max, 2.0)
+
+    def test_missing_connection_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            self.read(self.hdf, "No Such Connection")
+
+
+@unittest.skipUnless(HAS_H5PY, "h5py required")
+class TestBridgeCells(unittest.TestCase):
+    """``read_bridge_cells`` filters the flat 2DBR tables to one structure."""
+
+    @classmethod
+    def setUpClass(cls):
+        from hack_ras.results.reader import read_bridge_cells
+
+        cls.read = staticmethod(read_bridge_cells)
+        cls.cells = read_bridge_cells(str(MODEL_P02_HDF), "Bridge")
+
+    def test_footprint_carries_per_cell_chords(self):
+        self.assertEqual(len(self.cells.footprint), 2)
+        self.assertEqual(sorted(self.cells.cells), [21, 22])
+        # High chord is the deck, above the low chord, on every cell.
+        for hi, lo in zip(self.cells.high_chord, self.cells.low_chord):
+            self.assertGreater(hi, lo)
+
+    def test_us_and_ds_cells_are_stationed(self):
+        for side in ("us", "ds"):
+            stations = self.cells.stations(side)
+            self.assertTrue(stations)
+            for lo, mid, hi in stations.values():
+                self.assertLessEqual(lo, mid)
+                self.assertLessEqual(mid, hi)
+                self.assertAlmostEqual(mid, (lo + hi) / 2.0, places=6)
+
+    def test_side_must_be_us_or_ds(self):
+        with self.assertRaises(ValueError):
+            self.cells.stations("upstream")
+
+    def test_weir_mode_connection_has_no_bridge_footprint(self):
+        with self.assertRaises(KeyError):
+            self.read(str(MODEL_P02_HDF), "Levee")
+
+    def test_missing_connection_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            self.read(str(MODEL_P02_HDF), "No Such Bridge")
+
+    def test_reads_a_geometry_hdf_too(self):
+        # 2DBR tables live under Geometry, so a .g##.hdf is enough.
+        geom_hdf = FIXTURE / "Model.g02.hdf"
+        if not geom_hdf.exists():
+            self.skipTest("no Model.g02.hdf fixture")
+        self.assertEqual(sorted(self.read(str(geom_hdf), "Bridge").cells),
+                         [21, 22])
+
+
+@unittest.skipUnless(HAS_H5PY, "h5py required")
+class TestStructureProfiles(unittest.TestCase):
+    """``Table Info`` has nine profile slots; all of them are readable."""
+
+    @classmethod
+    def setUpClass(cls):
+        from hack_ras.results.reader import read_structure_profiles
+
+        cls.read = staticmethod(read_structure_profiles)
+
+    def test_bridge_exposes_deck_profiles_the_centerline_reader_omits(self):
+        from hack_ras.results.reader import read_connection_centerline
+
+        profiles = self.read(str(MODEL_P02_HDF), "Bridge")
+        # The deck: BR Weir is the high chord, BR Lid the low chord.  Both are
+        # invisible to read_connection_centerline, which reads only Centerline.
+        for key in ("US BR", "US BR Weir", "US BR Lid",
+                    "DS BR", "DS BR Weir", "DS BR Lid"):
+            self.assertIn(key, profiles)
+            self.assertEqual(profiles[key].shape[1], 2)
+            self.assertGreater(profiles[key].shape[0], 0)
+
+        # Cross-check the deck against the per-cell chords in 2DBR Cells: each
+        # chord value must fall inside its profile's elevation range.
+        from hack_ras.results.reader import read_bridge_cells
+
+        cells = read_bridge_cells(str(MODEL_P02_HDF), "Bridge")
+        weir = profiles["US BR Weir"][:, 1]
+        lid = profiles["US BR Lid"][:, 1]
+        for hi in np.unique(cells.high_chord):
+            self.assertTrue(weir.min() <= hi <= weir.max(), hi)
+        for lo in np.unique(cells.low_chord):
+            self.assertTrue(lid.min() <= lo <= lid.max(), lo)
+
+        # And confirm the omission is real, not a fixture quirk.
+        centerline = read_connection_centerline(str(MODEL_P02_HDF), "Bridge")
+        self.assertLess(len(centerline.profile), profiles["US BR"].shape[0])
+
+    def test_weir_and_lid_need_not_share_a_station_range(self):
+        """Guards the trap: the weir's global min can sit below the lid's max.
+
+        In this fixture the lid covers only the opening while the weir covers
+        the approaches too, so they must be compared at a shared station.
+        """
+        profiles = self.read(str(MODEL_P02_HDF), "Bridge")
+        weir, lid = profiles["US BR Weir"], profiles["US BR Lid"]
+        self.assertLess(weir[:, 0].min(), lid[:, 0].min())
+        self.assertGreater(weir[:, 0].max(), lid[:, 0].max())
+        self.assertLess(weir[:, 1].min(), lid[:, 1].max())
+
+        # Within the lid's own extent, the deck really is above the low chord.
+        lo, hi = lid[:, 0].min(), lid[:, 0].max()
+        inside = weir[(weir[:, 0] >= lo) & (weir[:, 0] <= hi)]
+        self.assertTrue(len(inside))
+        self.assertGreater(inside[:, 1].min(), lid[:, 1].max() - 1e-9)
+
+    def test_weir_mode_connection_has_only_a_centerline(self):
+        profiles = self.read(str(MODEL_P02_HDF), "Levee")
+        self.assertEqual(list(profiles), ["Centerline"])
+        self.assertEqual(profiles["Centerline"].shape[1], 2)
+
+    def test_centerline_slot_agrees_with_the_centerline_reader(self):
+        from hack_ras.results.reader import read_connection_centerline
+
+        profiles = self.read(str(MODEL_P02_HDF), "Levee")
+        hdf = read_connection_centerline(str(MODEL_P02_HDF), "Levee")
+        self.assertEqual(profiles["Centerline"].shape, hdf.profile.shape)
+        self.assertTrue((profiles["Centerline"] == hdf.profile).all())
+
+    def test_empty_slots_are_omitted_not_zero_length(self):
+        for value in self.read(str(MODEL_P02_HDF), "Bridge").values():
+            self.assertGreater(value.shape[0], 0)
+
+    def test_missing_connection_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            self.read(str(MODEL_P02_HDF), "No Such Structure")
+
+
+@unittest.skipUnless(HAS_H5PY, "h5py required")
+class TestCulvertGroupResults(unittest.TestCase):
+    """Per-group culvert flow, which Structure Variables only reports summed."""
+
+    @classmethod
+    def setUpClass(cls):
+        from hack_ras.results.reader import read_culvert_group_results
+
+        cls.read = staticmethod(read_culvert_group_results)
+
+    def test_group_names_match_the_geometry_side(self):
+        import h5py
+
+        groups = self.read(str(MODEL_P02_HDF), "Watershed Culvert")
+        self.assertEqual(list(groups), ["Culvert #1"])
+        with h5py.File(str(MODEL_P02_HDF), "r") as hdf:
+            attrs = hdf["Geometry/Structures/Culvert Groups/Attributes"][()]
+        names = {r["Name"].decode().strip() for r in attrs}
+        self.assertTrue(set(groups) <= names, (set(groups), names))
+
+    def test_columns_come_from_the_dataset_metadata(self):
+        group = self.read(str(MODEL_P02_HDF), "Watershed Culvert")["Culvert #1"]
+        self.assertEqual(group.columns,
+                         ("Culvert Flow", "Stage HW", "Stage TW"))
+        for name in group.columns:
+            self.assertEqual(group.values[name].shape,
+                             (len(group.timestamps),))
+        # The convenience properties address the same arrays.
+        self.assertIs(group.flow, group.values["Culvert Flow"])
+        self.assertIs(group.stage_hw, group.values["Stage HW"])
+        self.assertIs(group.stage_tw, group.values["Stage TW"])
+
+    def test_group_flow_is_bounded_by_the_connection_total(self):
+        from hack_ras.results.reader import read_structure_timeseries
+
+        groups = self.read(str(MODEL_P02_HDF), "Watershed Culvert")
+        total = read_structure_timeseries(
+            str(MODEL_P02_HDF), "Watershed Culvert")["structure"]
+        summed = sum(g.flow for g in groups.values())
+        self.assertTrue(
+            np.allclose(summed, total["Total Culvert Flow"], atol=1e-3),
+            f"summed groups != Total Culvert Flow",
+        )
+
+    def test_a_connection_with_no_culverts_returns_empty_not_an_error(self):
+        self.assertEqual(self.read(str(MODEL_P02_HDF), "Watershed Bridge"), {})
+        self.assertEqual(self.read(str(MODEL_P02_HDF), "Levee"), {})
+
+    def test_missing_connection_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            self.read(str(MODEL_P02_HDF), "No Such Culvert")
+
+
+@unittest.skipUnless(HAS_H5PY, "h5py required")
+class TestStructureTimeseries(unittest.TestCase):
+    """One reader serves every connection; a breach is just one of the cases."""
+
+    def test_the_breach_named_function_is_gone(self):
+        import hack_ras.results.reader as reader
+
+        self.assertFalse(hasattr(reader, "read_breach_timeseries"))
+
+    def test_every_connection_in_the_fixture_reads(self):
+        from hack_ras.results.reader import read_structure_timeseries
+
+        for conn in ("Watershed Culvert", "Watershed Bridge", "Levee"):
+            out = read_structure_timeseries(str(MODEL_P02_HDF), conn)
+            self.assertEqual(sorted(out),
+                             ["breaching", "kind", "structure",
+                              "timestamps", "weir"], conn)
+            self.assertTrue(out["structure"], conn)
+
+    def test_works_without_any_breach(self):
+        from hack_ras.results.reader import read_structure_timeseries
+
+        out = read_structure_timeseries(str(MODEL_P02_HDF), "Watershed Culvert")
+        self.assertIsNone(out["breaching"])
+        self.assertIn("Total Culvert Flow", out["structure"])
+        self.assertIsNotNone(out["weir"])
+
+    def test_reads_a_bridge_which_has_no_weir(self):
+        from hack_ras.results.reader import read_structure_timeseries
+
+        out = read_structure_timeseries(str(MODEL_P02_HDF), "Watershed Bridge")
+        self.assertIsNone(out["weir"])
+        self.assertIsNone(out["breaching"])
+        self.assertEqual(
+            sorted(out["structure"]),
+            ["Drag Factor", "Error HW", "Flow", "Head loss",
+             "Stage HW", "Stage TW"],
+        )
+
+
+@unittest.skipUnless(HAS_H5PY, "h5py required")
+class TestSa2dAreaLookup(unittest.TestCase):
+    """``read_sa2d_areas`` resolves both modes, by two different routes.
+
+    Weir mode goes through the ``Node Pointer`` group attribute; a Bridge
+    Opening group has no such attribute, so it falls back to matching the
+    connection name against the ``Connection`` field.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        from hack_ras.results.reader import read_sa2d_areas
+
+        cls.areas = staticmethod(read_sa2d_areas)
+        cls.hdf = str(MODEL_P02_HDF)
+
+    def test_weir_mode_spans_two_different_meshes(self):
+        # The Levee route (Node Pointer) is the pre-existing behaviour.
+        self.assertEqual(self.areas(self.hdf, "Levee"),
+                         ("Watershed", "Interior"))
+
+    def test_weir_mode_interior_connection_is_area_prefixed(self):
+        self.assertEqual(self.areas(self.hdf, "Watershed Culvert"),
+                         ("Watershed", "Watershed"))
+
+    def test_bridge_mode_resolves_without_a_node_pointer(self):
+        import h5py
+
+        base = ("Results/Unsteady/Output/Output Blocks/Base Output"
+                "/Unsteady Time Series/SA 2D Area Conn/Watershed Bridge")
+        with h5py.File(self.hdf, "r") as hdf:
+            self.assertNotIn("Node Pointer", hdf[base].attrs)
+
+        self.assertEqual(self.areas(self.hdf, "Watershed Bridge"),
+                         ("Watershed", "Watershed"))
+
+    def test_missing_connection_raises_key_error(self):
+        with self.assertRaises(KeyError):
+            self.areas(self.hdf, "No Such Connection")
+
+    def test_truncated_name_collision_is_reported_not_guessed(self):
+        """The name fallback has no tiebreaker, so it must refuse to guess.
+
+        ``Connection`` is an S16 field, so two longer names collide once
+        truncated.  Synthetic because no real model in tests/data has a
+        collision, and the branch is unreachable without one.
+        """
+        import tempfile
+
+        import h5py
+        import numpy as np
+
+        dtype = np.dtype([("Connection", "S16"), ("SNN ID", "<i4"),
+                          ("US SA/2D", "S16"), ("DS SA/2D", "S16")])
+        rows = np.array([(b"Brdg_Overflow_Ea", 1, b"Mesh A", b"Mesh A"),
+                         (b"Brdg_Overflow_Ea", 2, b"Mesh B", b"Mesh B")],
+                        dtype=dtype)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "Collide.p01.hdf")
+            with h5py.File(path, "w") as hdf:
+                hdf.create_dataset("Geometry/Structures/Attributes", data=rows)
+                # A bridge-mode results group: no Node Pointer attribute.
+                hdf.create_group(
+                    "Results/Unsteady/Output/Output Blocks/Base Output"
+                    "/Unsteady Time Series/SA 2D Area Conn/Brdg_Overflow_Ea"
+                )
+            with self.assertRaises(ValueError) as ctx:
+                self.areas(path, "Brdg_Overflow_Ea")
+        self.assertIn("ambiguous", str(ctx.exception))
 
 
 if __name__ == "__main__":

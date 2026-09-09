@@ -321,10 +321,10 @@ class TestRealisedBreach(unittest.TestCase):
         self.assertEqual(list_breach_connections(str(P06_HDF)), ["Levee"])
 
     def test_piping_breach_carries_a_tenth_column(self):
-        from hack_ras.results.reader import read_breach_timeseries
+        from hack_ras.results.reader import read_structure_timeseries
 
-        piping = read_breach_timeseries(str(P06_HDF), "Levee")["breaching"]
-        overtopping = read_breach_timeseries(str(P02_HDF), "Levee")["breaching"]
+        piping = read_structure_timeseries(str(P06_HDF), "Levee")["breaching"]
+        overtopping = read_structure_timeseries(str(P02_HDF), "Levee")["breaching"]
         # column count is not fixed: reading Variable_Unit is what makes this
         # work, and a hardcoded 9 would mislabel every piping column
         self.assertIn("Top-Elevation", piping)
@@ -377,16 +377,16 @@ class TestRealisedBreach(unittest.TestCase):
             self.read_breach_state(str(FIXTURE / "Model.p04.hdf"), "Levee")
 
     def test_unknown_connection_raises_key_error(self):
-        from hack_ras.results.reader import read_breach_timeseries
+        from hack_ras.results.reader import read_structure_timeseries
 
         with self.assertRaises(KeyError):
-            read_breach_timeseries(str(P06_HDF), "No Such Levee")
+            read_structure_timeseries(str(P06_HDF), "No Such Levee")
 
     def test_interior_connection_is_found_under_its_prefixed_group(self):
         """An interior connection's group is named '<area> <connection>'."""
-        from hack_ras.results.reader import read_breach_timeseries
+        from hack_ras.results.reader import read_structure_timeseries
 
-        ts = read_breach_timeseries(str(P06_HDF), "Watershed Culvert")
+        ts = read_structure_timeseries(str(P06_HDF), "Watershed Culvert")
         self.assertTrue(ts["structure"])
         self.assertIn(ts["kind"], ("SA 2D Area Conn", "2D Hyd Conn"))
 

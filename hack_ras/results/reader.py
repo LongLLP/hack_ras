@@ -12,7 +12,9 @@ import numpy as np
 from ..version import RasVersion
 from .model import (
     AreaGeometry,
+    BridgeCells,
     CellVolumeTable,
+    CulvertGroupResults,
     FaceGeometry,
     ConduitPath,
     ConduitProfile,
@@ -647,6 +649,19 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
     SA 2D Area Conn features have no Summary Output in the HDF.  The time of
     maximum WSE must be derived from the returned time series via nanargmax.
 
+    The two connection modes write DIFFERENT layouts under the same group, and
+    both are read here (see **SA/2D Connection Result Layouts** in
+    ``docs/ai_context.md``):
+
+    - ``Weir/Gate/Culverts`` — ``HW TW Cells/Water Surface HW Cells`` plus
+      ``HW TW Segments/`` weir stationing, so every cell gets a station.
+    - ``Bridge Opening`` — ``Cell WS US`` / ``Cell WS DS`` and nothing else.
+      The results group has no stationing, so stations are taken from the
+      geometry's ``2DBR US Cells`` / ``2DBR DS Cells`` tables, which station the
+      same cells (``read_bridge_cells``).  Station center is the midpoint of the
+      cell's station range.  If the geometry is absent, stations stay ``nan``
+      and the cells stay in HDF order.
+
     Parameters
     ----------
     hdf_path : str
@@ -657,7 +672,8 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
     Returns
     -------
     Sa2dConnection
-        hw_cells and tw_cells are each sorted by station ascending.
+        hw_cells and tw_cells are each sorted by station ascending, except in
+        Bridge Opening mode, where there are no stations to sort by.
 
     Raises
     ------
@@ -665,19 +681,44 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
         If the connection group or required datasets are absent.
     """
     base = _SA2D_TS_BASE.format(connection=connection)
+    bridge = False
 
     with h5py.File(hdf_path, "r") as hdf:
         timestamps   = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
         hw_indices   = hdf[f"{base}/Headwater Cells"][()]
         tw_indices   = hdf[f"{base}/Tailwater Cells"][()]
-        hw_wse       = hdf[f"{base}/HW TW Cells/Water Surface HW Cells"][()].astype(np.float64)
-        tw_wse       = hdf[f"{base}/HW TW Cells/Water Surface TW Cells"][()].astype(np.float64)
-        seg_stations = hdf[f"{base}/HW TW Segments/HW TW Station"][()]
-        seg_hw       = hdf[f"{base}/HW TW Segments/Headwater Cells"][()]
-        seg_tw       = hdf[f"{base}/HW TW Segments/Tailwater Cells"][()]
+        if f"{base}/HW TW Cells" in hdf:
+            # Weir/Gate/Culverts mode: per-cell WSE plus weir-station segments.
+            hw_wse       = hdf[f"{base}/HW TW Cells/Water Surface HW Cells"][()].astype(np.float64)
+            tw_wse       = hdf[f"{base}/HW TW Cells/Water Surface TW Cells"][()].astype(np.float64)
+            seg_stations = hdf[f"{base}/HW TW Segments/HW TW Station"][()]
+            seg_hw       = hdf[f"{base}/HW TW Segments/Headwater Cells"][()]
+            seg_tw       = hdf[f"{base}/HW TW Segments/Tailwater Cells"][()]
+        else:
+            # Bridge Opening mode: flatter layout, no weir stationing at all.
+            # Empty segment arrays make _seg_station_map yield nan stations.
+            hw_wse       = hdf[f"{base}/Cell WS US"][()].astype(np.float64)
+            tw_wse       = hdf[f"{base}/Cell WS DS"][()].astype(np.float64)
+            seg_stations = seg_hw = seg_tw = np.empty(0)
+            bridge = True
+            areas = _area_names(hdf)
 
     hw_map = _seg_station_map(hw_indices, seg_hw, seg_stations)
     tw_map = _seg_station_map(tw_indices, seg_tw, seg_stations)
+
+    if bridge:
+        # The results group has no stationing, but the geometry does: the
+        # 2DBR US/DS Cells tables station the very same cells.  Fall back to
+        # nan (the map as built above) if the geometry is absent or the
+        # connection turns out to have no 2DBR rows.
+        try:
+            cells = read_bridge_cells(
+                hdf_path, _unprefix_connection(connection, areas))
+        except KeyError:
+            pass
+        else:
+            hw_map = {**hw_map, **cells.stations("us")}
+            tw_map = {**tw_map, **cells.stations("ds")}
 
     hw_cells = sorted(
         [Sa2dCell(
@@ -792,29 +833,195 @@ def read_connection_centerline(hdf_path: str,
         )
 
 
+def _structure_row(struct, connection: str, hdf_path: str = "") -> int:
+    """Index of *connection* in ``Structures/Attributes``.
+
+    Raises ``KeyError`` listing the available names, matching
+    ``read_connection_centerline``'s behaviour.
+    """
+    attrs = struct["Attributes"][()]
+    matches = [i for i, r in enumerate(attrs)
+               if _decode(r["Connection"]) == connection]
+    if not matches:
+        raise KeyError(
+            f"Connection {connection!r} not found in {hdf_path}; "
+            f"available: {[_decode(r['Connection']) for r in attrs]}"
+        )
+    return matches[0]
+
+
+_2DBR_TABLES = ("2DBR Cells", "2DBR US Cells", "2DBR DS Cells")
+
+
+def read_bridge_cells(hdf_path: str, connection: str) -> BridgeCells:
+    """Read one ``Bridge Opening`` connection's mesh footprint.
+
+    The ``Geometry/Structures/2DBR *`` tables are flat across every bridge in
+    the geometry, each row tagged with ``Structure ID``; this filters them to
+    one connection.  Works on a ``.g##.hdf`` as well as a plan HDF.
+
+    Useful for the two things a bridge-mode results group cannot tell you: the
+    per-cell deck ``High Chord`` / ``Low Chord``, and the HW/TW cell stationing
+    (see **SA/2D Connection Result Layouts** in ``docs/ai_context.md``).
+
+    Raises
+    ------
+    KeyError
+        If the file has no Structures group, no such connection, or the
+        connection has no 2DBR tables (i.e. it is not a bridge-mode connection).
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        if f"{_STRUCTURES}/Attributes" not in hdf:
+            raise KeyError(f"{hdf_path} has no {_STRUCTURES}/Attributes group.")
+        struct = hdf[_STRUCTURES]
+        sid = _structure_row(struct, connection, hdf_path)
+        missing = [t for t in _2DBR_TABLES if t not in struct]
+        if missing:
+            raise KeyError(
+                f"{hdf_path} has no {missing[0]!r} table, so connection "
+                f"{connection!r} has no 2D bridge footprint to read; only a "
+                f"'Bridge Opening' mode connection does."
+            )
+        tables = []
+        for name in _2DBR_TABLES:
+            rows = struct[name][()]
+            tables.append(rows[rows["Structure ID"] == sid])
+
+    if not len(tables[0]):
+        raise KeyError(
+            f"Connection {connection!r} has no rows in '2DBR Cells' in "
+            f"{hdf_path}; it is not a 'Bridge Opening' mode connection."
+        )
+    return BridgeCells(connection=connection, footprint=tables[0],
+                       us=tables[1], ds=tables[2])
+
+
+# Every station/elevation profile slot in Structures/Table Info.  Key is the
+# label used here; value is the field-name stem RAS uses in Table Info.
+_PROFILE_SLOTS = (
+    ("Centerline",  "Centerline Profile"),
+    ("US XS",       "US XS Profile"),
+    ("US BR",       "US BR Profile"),
+    ("US BR Weir",  "US BR Weir Profile"),
+    ("US BR Lid",   "US BR Lid Profile"),
+    ("DS XS",       "DS XS Profile"),
+    ("DS BR",       "DS BR Profile"),
+    ("DS BR Weir",  "DS BR Weir Profile"),
+    ("DS BR Lid",   "DS BR Lid Profile"),
+)
+
+
+def read_structure_profiles(hdf_path: str, connection: str) -> dict:
+    """Every station/elevation profile RAS stored for one structure.
+
+    ``Structures/Table Info`` carries nine profile ``(Index, Count)`` slots per
+    structure into the shared ``Profile Data`` array.
+    ``read_connection_centerline`` reads only the first; this reads all of them.
+
+    Returns
+    -------
+    dict[str, np.ndarray]
+        Label -> (N, 2) float64 station/elevation array, for the slots that
+        actually hold points.  Empty slots are omitted, so an ordinary
+        weir-mode connection returns just ``{'Centerline': …}`` while a bridge
+        adds its deck.
+
+    For a bridge, ``'US BR'`` / ``'DS BR'`` and ``'US XS'`` / ``'DS XS'`` are
+    ground profiles through the opening, while ``'US BR Weir'`` / ``'DS BR
+    Weir'`` is the deck/roadway **high chord** and ``'US BR Lid'`` / ``'DS BR
+    Lid'`` the **low chord**.  Cross-checked against ``2DBR Cells``: every
+    per-cell ``High Chord`` value falls inside the weir profile's elevation
+    range and every ``Low Chord`` inside the lid's, on both LAX_River_2D p19
+    `Brdg2_GRST` (weir steps 659.5 -> 682.0 over the abutments, lid flat at
+    652.3) and the `Bridge` fixture.
+
+    **The slots do not share a station range.**  The fixture's lid covers only
+    the opening (sta 195.0-245.5) while its weir covers the whole structure
+    including the approaches (sta 0.0-345.5), so the weir's global MINIMUM
+    (754.04, out on an approach) sits below the lid's global MAXIMUM (755.90,
+    inside the opening).  Compare the two at a shared station; a global
+    min-vs-max comparison is meaningless.
+
+    Raises
+    ------
+    KeyError
+        If the file has no Structures group, no such connection, or no
+        ``Table Info`` / ``Profile Data``.
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        if f"{_STRUCTURES}/Attributes" not in hdf:
+            raise KeyError(f"{hdf_path} has no {_STRUCTURES}/Attributes group.")
+        struct = hdf[_STRUCTURES]
+        sid = _structure_row(struct, connection, hdf_path)
+        for need in ("Table Info", "Profile Data"):
+            if need not in struct:
+                raise KeyError(
+                    f"{hdf_path} has no {_STRUCTURES}/{need}; no structure "
+                    f"profiles to read."
+                )
+        table = struct["Table Info"][()][sid]
+        data = struct["Profile Data"][()]
+
+    fields = set(table.dtype.names)
+    out: dict = {}
+    for label, stem in _PROFILE_SLOTS:
+        key_i, key_n = f"{stem} (Index)", f"{stem} (Count)"
+        if key_i not in fields or key_n not in fields:
+            continue
+        start, count = int(table[key_i]), int(table[key_n])
+        if count > 0:
+            out[label] = np.asarray(data[start:start + count], dtype=np.float64)
+    return out
+
+
 def read_sa2d_areas(hdf_path: str, connection: str) -> tuple[str, str]:
     """
     Return (hw_area, tw_area) for an SA 2D Area Conn by looking up
     US SA/2D and DS SA/2D in Geometry/Structures/Attributes.
 
-    Uses the Node Pointer attribute on the connection's results group
-    to match against the SNN ID field in Structures/Attributes.
+    Normally matches the Node Pointer attribute on the connection's results
+    group against the SNN ID field in Structures/Attributes.  A
+    ``Bridge Opening`` connection's results group carries **no** Node Pointer
+    (see **SA/2D Connection Result Layouts** in ``docs/ai_context.md``), so for
+    those the connection NAME is matched against the ``Connection`` field
+    instead, after stripping the ``'<area> '`` prefix an interior connection's
+    group name carries.
 
     Raises
     ------
     KeyError
         If the connection group or Structures/Attributes is absent.
     ValueError
-        If no structure row matches the connection's Node Pointer.
+        If no structure row matches, or if the name fallback is ambiguous.
     """
     conn_grp = _SA2D_TS_BASE.format(connection=connection)
     with h5py.File(hdf_path, "r") as hdf:
-        node_ptr = int(hdf[conn_grp].attrs["Node Pointer"])
+        node_ptr = hdf[conn_grp].attrs.get("Node Pointer")
         attrs    = hdf["Geometry/Structures/Attributes"][()]
-    matches = [r for r in attrs if int(r["SNN ID"]) == node_ptr]
+        areas    = _area_names(hdf)
+
+    if node_ptr is not None:
+        node_ptr = int(node_ptr)
+        matches = [r for r in attrs if int(r["SNN ID"]) == node_ptr]
+        looked_for = f"SNN ID={node_ptr}"
+    else:
+        name = _unprefix_connection(connection, areas)
+        matches = [r for r in attrs if _decode(r["Connection"]) == name]
+        looked_for = f"Connection='{name}'"
+        # `Connection` is an S16 field, so two long names can truncate to the
+        # same 16 characters.  Without a Node Pointer there is nothing left to
+        # disambiguate with, so say so rather than guessing.
+        if len(matches) > 1:
+            raise ValueError(
+                f"{len(matches)} structure rows match {looked_for} for "
+                f"connection '{connection}' in {hdf_path}; the name is "
+                f"ambiguous and the results group has no Node Pointer to "
+                f"resolve it"
+            )
+
     if not matches:
         raise ValueError(
-            f"No structure found with SNN ID={node_ptr} "
+            f"No structure found with {looked_for} "
             f"for connection '{connection}' in {hdf_path}"
         )
     row = matches[0]
@@ -828,6 +1035,7 @@ _SA2D_WEIR_COLS = (
     "Weir Flow", "Sta US", "Sta DS", "Top Width",
     "Max Depth", "Avg Depth", "Flow Area", "Coef", "Submergence",
 )
+_CULVERT_GROUP_COLS = ("Culvert Flow", "Stage HW", "Stage TW")
 _SA2D_BREACHING_COLS = (
     "Stage HW", "Stage TW", "Bottom-Width", "Bottom-Elevation",
     "Left Side Slope", "Right Side Slope",
@@ -924,10 +1132,19 @@ def _variable_columns(dataset, fallback: tuple) -> tuple:
     return names or fallback
 
 
-def read_breach_timeseries(hdf_path: str, connection: str) -> dict:
+def read_structure_timeseries(hdf_path: str, connection: str) -> dict:
     """
     Read Structure Variables, Breaching Variables, and Weir Variables time
     series for one SA/2D connection.
+
+    **No breach is required** — this is the route to ANY connection's flow and
+    stage series.  A plain culvert connection returns ``'structure'``
+    (``Total Flow``, ``Weir Flow``, ``Total Culvert Flow``, ``Stage HW``,
+    ``Stage TW``) plus nine ``'weir'`` columns with ``breaching=None``; a
+    ``Bridge Opening`` connection returns a six-column ``'structure'``
+    (``Flow``, ``Stage HW``, ``Stage TW``, ``Head loss``, ``Drag Factor``,
+    ``Error HW``) and no weir.  For a culvert connection's flow split PER GROUP
+    rather than summed, use :func:`read_culvert_group_results`.
 
     Handles both HDF layouts (see :func:`_find_connection_group`) and takes
     column names from each dataset's own ``Variable_Unit`` attribute rather
@@ -1016,6 +1233,58 @@ def read_breach_timeseries(hdf_path: str, connection: str) -> dict:
     }
 
 
+def read_culvert_group_results(hdf_path: str, connection: str) -> dict:
+    """Per-culvert-group flow and stage time series for one connection.
+
+    ``Structure Variables`` reports only the SUMMED ``Total Culvert Flow``.
+    RAS also writes each group separately under
+    ``<connection group>/Culvert Groups/<name>``, which is what this reads — so
+    on a multi-group crossing you can see which barrel group carried the flow.
+    On LAX_River_2D p19 `Culv2`'s three groups peak at 44.3 / 97.1 / 96.9 cfs,
+    detail the sum hides.
+
+    Group names are RAS's own keys (``'Culvert #1'``, …) — byte-identical to
+    ``Geometry/Structures/Culvert Groups/Attributes['Name']``, so the result
+    joins directly onto ``geometry.culverts.read_culverts()`` output.
+
+    Returns
+    -------
+    dict[str, CulvertGroupResults]
+        Keyed by group name, in RAS's order.  **Empty** when the connection has
+        no culvert groups (a levee, or a bridge) — that is not an error.
+
+    Raises
+    ------
+    KeyError
+        If the connection has no results group at all.
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        group, _ = _find_connection_group(hdf, connection)
+        if group is None:
+            raise KeyError(
+                f"No SA 2D Area Conn or 2D Hyd Conn results for connection "
+                f"{connection!r} in {hdf_path}"
+            )
+        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        out: dict = {}
+        if "Culvert Groups" not in group:
+            return out
+        cg = group["Culvert Groups"]
+        for name in cg:
+            ds = cg[name]
+            if not isinstance(ds, h5py.Dataset):
+                continue
+            arr = ds[()].astype(np.float64)
+            cols = _variable_columns(ds, _CULVERT_GROUP_COLS)
+            out[name] = CulvertGroupResults(
+                name=name,
+                timestamps=timestamps,
+                columns=tuple(cols),
+                values={c: arr[:, i] for i, c in enumerate(cols)},
+            )
+    return out
+
+
 def list_breach_connections(hdf_path: str) -> list:
     """Connection names that produced breach output in this plan.
 
@@ -1061,7 +1330,7 @@ def read_breach_state(hdf_path: str, connection: str,
     KeyError
         If the connection has no results group, or no Breaching Variables.
     """
-    ts = read_breach_timeseries(hdf_path, connection)
+    ts = read_structure_timeseries(hdf_path, connection)
     br = ts["breaching"]
     if br is None:
         raise KeyError(

@@ -31,6 +31,7 @@ try:
         _facepoint_polygons,
         list_areas,
         read_area_geometry,
+        read_cell_volume_table,
     )
     HAS_RESULTS = True
 except ImportError:
@@ -162,6 +163,54 @@ class TestCellGdfDropsPerimeterDummies(unittest.TestCase):
                 and not np.isnan(geom.min_elevations[i])
             }
             self.assertEqual(set(geom.cell_gdf["cell_idx"]), expected, area)
+
+
+@unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
+@unittest.skipUnless(HAS_HDF, "no .p##.hdf fixture at tests/data/")
+class TestCellVolumeTableTopElevations(unittest.TestCase):
+    """``top_elevations`` is the top of each cell's elevation-volume table.
+
+    Deliberately NOT asserted to equal a terrain maximum — it is not one on a
+    structure cell (see the property's docstring).  What is pinned here is the
+    contract: one value per cell, the last elevation of that cell's own slice,
+    never below the cell minimum, and nan where the table is empty.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.area = list_areas(HDF_FIXTURE)[0]
+        cls.geom = read_area_geometry(HDF_FIXTURE, cls.area)
+        cls.table = read_cell_volume_table(HDF_FIXTURE, cls.area)
+
+    def test_one_value_per_cell(self):
+        self.assertEqual(self.table.top_elevations.shape,
+                         (len(self.table.info),))
+
+    def test_matches_a_hand_walked_slice(self):
+        tops = self.table.top_elevations
+        for i in range(len(self.table.info)):
+            start, count = int(self.table.info[i][0]), int(self.table.info[i][1])
+            if count == 0:
+                self.assertTrue(np.isnan(tops[i]), i)
+            else:
+                self.assertAlmostEqual(
+                    tops[i], float(self.table.values[start + count - 1, 0]),
+                    places=6, msg=str(i))
+
+    def test_never_below_the_cell_minimum(self):
+        tops = self.table.top_elevations
+        mins = self.geom.min_elevations
+        ok = ~np.isnan(tops) & ~np.isnan(mins)
+        self.assertTrue(np.all(tops[ok] >= mins[ok]))
+
+    def test_is_the_first_elevation_when_a_cell_has_one_point(self):
+        counts = self.table.info[:, 1]
+        singles = np.where(counts == 1)[0]
+        tops = self.table.top_elevations
+        for i in singles:
+            start = int(self.table.info[i][0])
+            self.assertAlmostEqual(tops[i],
+                                   float(self.table.values[start, 0]), places=6)
 
 
 if __name__ == "__main__":

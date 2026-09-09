@@ -22,7 +22,12 @@ class AreaGeometry:
     cell_centers : np.ndarray, shape (N, 2)
         XY coordinates of each cell centre.
     min_elevations : np.ndarray, shape (N,)
-        Minimum terrain elevation per cell. NaN for perimeter dummy cells.
+        Minimum EFFECTIVE ground elevation per cell — the terrain the model
+        computes with, including the terrain layer's modifications (a burned
+        channel or a culvert inlet/outlet invert lowers it, and that lowered
+        value is the real one). NaN for perimeter dummy cells. See
+        `CellVolumeTable.top_elevations` for the high-side counterpart and for
+        why these cannot be reproduced by sampling the parent DEM.
     polygons : list[shapely.Polygon | None], length N
         Cell polygon for each cell; None if the cell has fewer than 3 faces.
         Follows the 2D flow area perimeter exactly where the plan HDF carries the
@@ -111,6 +116,152 @@ class CellVolumeTable:
     """
     info:   np.ndarray
     values: np.ndarray
+
+    @property
+    def top_elevations(self) -> np.ndarray:
+        """Highest EFFECTIVE ground elevation in each cell, shape (N_cells,).
+
+        The counterpart to ``AreaGeometry.min_elevations`` (the lowest).  A cell
+        with an empty table reads `nan`.
+
+        "Effective" means the terrain the model actually computes with: the
+        RAS Mapper terrain layer the geometry names, **with its modifications
+        applied** — burned-in piers, channels, culvert inlet/outlet inverts.
+        That is the intended reading, not a defect.  Terrain modifications are
+        how HEC-RAS lets a modeller override the underlying raster where a
+        hydraulically significant feature is known not to be in it, so the
+        modified surface is the design surface; the source DEM is a means to an
+        end.  The same applies to ``min_elevations`` — a burned channel or
+        culvert invert moves it, and that lowered value is the real one.
+
+        Confirmed against the RAS Mapper GUI: LAX_River_2D p19 cell 12432
+        reports a maximum elevation of 649.658 in RAS Mapper's own
+        volume-elevation table, which this property reproduces exactly
+        (649.6576).  That cell sits under `RR6_CPKC_Overflo`, where `Pier 31` /
+        `Pier 32` are burned in at 649.70.
+
+        The practical consequence is that **you cannot reproduce these values by
+        sampling the parent .tif**.  Over 376 cells of that model clear of every
+        modification the two agree (mean +0.01 ft from the DEM maximum inside
+        the cell polygon, p99 of \\|error\\| 0.88 ft); over 24 cells carrying a
+        modification or a structure the table runs higher, and only ever higher
+        — mean +4.40 ft, worst +26.73 ft at a Gillette St pier burned near
+        669 ft where the bare DEM tops out around 642 ft.  Sample the terrain
+        clone, or use these values, but do not cross-check one against the
+        other's source.
+
+        This is terrain, not structure geometry: the table follows the burned
+        ground, not a bridge's chords.  `Brdg2_GRST`'s footprint cell 12660 tops
+        out at 655.50 while its ``2DBR Cells`` `High Chord` is 682.0.
+        """
+        start = self.info[:, 0].astype(np.int64)
+        count = self.info[:, 1].astype(np.int64)
+        out = np.full(len(self.info), np.nan, dtype=np.float64)
+        ok = count > 0
+        out[ok] = self.values[start[ok] + count[ok] - 1, 0]
+        return out
+
+
+@dataclass
+class BridgeCells:
+    """The mesh footprint of one ``Bridge Opening`` connection.
+
+    Read from the flat ``Geometry/Structures/2DBR *`` tables, filtered to a
+    single structure.  RAS's own structured dtypes are kept rather than renamed,
+    so ``footprint.dtype.names`` etc. stay self-describing.
+
+    Attributes
+    ----------
+    connection : str
+        Connection name, as it appears in ``Structures/Attributes``.
+    footprint : np.ndarray
+        Cells inside the bridge footprint — the deck band. Fields
+        ``Cell Index``, ``High Chord``, ``Low Chord``.
+    us, ds : np.ndarray
+        Headwater / tailwater cells. Fields ``Cell Index``, ``Station Start``,
+        ``Station End`` — the stationing a bridge-mode results group lacks.
+    """
+    connection: str
+    footprint: np.ndarray
+    us:         np.ndarray
+    ds:         np.ndarray
+
+    @property
+    def cells(self) -> np.ndarray:
+        """Footprint cell indices, shape (N,) int."""
+        return self.footprint["Cell Index"]
+
+    @property
+    def high_chord(self) -> np.ndarray:
+        """Per-cell deck high chord, shape (N,)."""
+        return self.footprint["High Chord"]
+
+    @property
+    def low_chord(self) -> np.ndarray:
+        """Per-cell deck low chord, shape (N,)."""
+        return self.footprint["Low Chord"]
+
+    def stations(self, side: str = "us") -> dict:
+        """Map cell index -> (station_start, station_center, station_end).
+
+        ``side`` is ``'us'`` or ``'ds'``.  Center is the midpoint of the cell's
+        station range, matching how ``Sa2dCell.station`` is defined for a
+        weir-mode connection (mean of its segment midpoints).  A cell listed
+        more than once is merged to its outer bounds.
+        """
+        if side not in ("us", "ds"):
+            raise ValueError(f"side must be 'us' or 'ds', got {side!r}")
+        rows = self.us if side == "us" else self.ds
+        bounds: dict = {}
+        for r in rows:
+            cid = int(r["Cell Index"])
+            lo, hi = float(r["Station Start"]), float(r["Station End"])
+            if cid in bounds:
+                lo = min(lo, bounds[cid][0])
+                hi = max(hi, bounds[cid][1])
+            bounds[cid] = (lo, hi)
+        return {c: (lo, (lo + hi) / 2.0, hi) for c, (lo, hi) in bounds.items()}
+
+
+@dataclass
+class CulvertGroupResults:
+    """Time series for ONE culvert group of a connection.
+
+    RAS reports a culvert connection's flow twice: summed as
+    ``Total Culvert Flow`` in ``Structure Variables``, and split per group under
+    ``Culvert Groups/<name>``.  This is the split.  ``name`` is RAS's group key
+    (``'Culvert #1'``, …), the same string the geometry side uses in
+    ``Geometry/Structures/Culvert Groups/Attributes['Name']``, so these join
+    straight onto ``geometry.culverts.read_culverts()`` output.
+
+    Attributes
+    ----------
+    name : str
+        Culvert group name.
+    timestamps : np.ndarray, shape (T,)
+        Output-interval time stamps.
+    columns : tuple[str, ...]
+        Column names as RAS labelled them, from the dataset's ``Variable_Unit``.
+    values : dict[str, np.ndarray]
+        Each column as a (T,) float64 array, keyed by its RAS name.
+    """
+    name:       str
+    timestamps: np.ndarray
+    columns:    tuple
+    values:     dict
+
+    @property
+    def flow(self) -> np.ndarray:
+        """Culvert flow, (T,) — the group's own share, not the connection total."""
+        return self.values["Culvert Flow"]
+
+    @property
+    def stage_hw(self) -> np.ndarray:
+        return self.values["Stage HW"]
+
+    @property
+    def stage_tw(self) -> np.ndarray:
+        return self.values["Stage TW"]
 
 
 @dataclass
@@ -801,7 +952,7 @@ class BreachState:
         Time stamp of the widest opening.
     columns : tuple[str, ...]
         Column names as the HDF itself declared them (see
-        :func:`hack_ras.results.reader.read_breach_timeseries`).
+        :func:`hack_ras.results.reader.read_structure_timeseries`).
     """
     connection: str
     fired: bool

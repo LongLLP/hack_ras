@@ -998,6 +998,34 @@ interpolated = np.interp(wse, elev, vol)
   round-off on a 7.0 HDF, but `plan_areas` needs no reconstruction and stays correct on
   the pre-7.0 fallback path. `Scripts/Results_Profile_Lines_Volume/extract_volume.py` uses it.
 
+#### Cell min/max are EFFECTIVE ground, not the source DEM
+`CellVolumeTable.top_elevations` vectorises the `elev[-1]` lookup for every cell (nan where a
+cell's table is empty) — the high-side counterpart to `AreaGeometry.min_elevations`.
+
+Both are the terrain **the model computes with**: the RAS Mapper terrain layer the geometry
+names, with its modifications applied. Terrain modifications are the designed mechanism for
+overriding the raster where a hydraulically significant feature is known to be missing from
+it — burned piers, channels, culvert inlet/outlet inverts — so the modified surface is the
+real one and the source `.tif` is a means to an end. This cuts both ways: a burned channel or
+culvert invert lowers `min_elevations`, and that lowered value is what RAS routes on.
+
+GUI-confirmed: LAX_River_2D p19 cell 12432 shows a maximum elevation of **649.658** in RAS
+Mapper's own volume-elevation table, and `top_elevations[12432]` returns 649.6576. The cell is
+under `RR6_CPKC_Overflo`, where `Pier 31` / `Pier 32` are burned in at 649.70.
+
+**The practical consequence: you cannot reproduce these by sampling the parent `.tif`.** Over
+376 cells of that model clear of every modification the two agree (mean **+0.01 ft** from the
+DEM maximum inside the cell polygon, p99 of |error| 0.88 ft, worst 2.85 ft). Over 24 cells
+carrying a modification or a structure the table runs higher and only ever higher — mean
+**+4.40 ft**, worst **+26.73 ft** at a Gillette St pier burned near 669 ft where the bare DEM
+tops out near 642 ft. `min_elevations` shifts the same way (worst 2.92 ft). Sample the terrain
+clone, or use these values; do not cross-check one against the other's source.
+
+It is terrain, not structure geometry — the table follows burned ground, not a bridge's
+chords. `Brdg2_GRST`'s footprint cell 12660 tops out at 655.50 while its `2DBR Cells`
+`High Chord` is 682.0. Measured 2026-09-09; a 9-cell spot check had suggested the bare-DEM
+match held everywhere, which a 400-cell sample did not support.
+
 ### Output Blocks
 The `Results/Unsteady/Output/Output Blocks/` group contains three named output blocks:
 
@@ -1077,6 +1105,44 @@ To find which 2D area an SA 2D Conn's HW/TW cells belong to:
 
 Use `read_sa2d_areas(hdf_path, connection)` from `hack_ras.results.reader`.
 
+**Step 1 does not work for a `Bridge Opening` connection** — its results group carries no
+`Node Pointer` attribute. Match the connection NAME against the `Connection` field instead
+(strip the `'<area> '` group-name prefix first), and mind that `Connection` is S16 so long names
+truncate. `read_sa2d_areas()` does this automatically. See **SA/2D Connection Result Layouts**.
+
+The `Mode` field (`S18`) is what distinguishes the two: `b'Bridge Opening'` vs
+`b'Weir/Gate/Culverts'`. `read_connection_centerline()` exposes it as
+`ConnectionCenterline.mode`, and the ASCII side spells the same split as
+`Conn Routing Type= 32` vs `1`.
+
+### 2D Bridge Geometry (`2DBR *` tables)
+A `Bridge Opening` connection's mesh footprint lives in flat `Geometry/Structures/2DBR *`
+tables, every row tagged with `Structure ID` (the row index into
+`Geometry/Structures/Attributes`) and `Mesh ID`. Filter by `Structure ID` to get one bridge.
+
+| Dataset | Extra fields | Notes |
+|---------|--------------|-------|
+| `2DBR Cells` | `Cell Index`, `High Chord`, `Low Chord` | Cells inside the bridge footprint — the deck band. Chord elevations are per cell |
+| `2DBR US Cells` | `Cell Index`, `Station Start`, `Station End` | Cells on the headwater side, WITH stationing along the alignment |
+| `2DBR DS Cells` | `Cell Index`, `Station Start`, `Station End` | Same, tailwater side |
+| `2DBR Faces` | `Face Index` | Every face belonging to the structure |
+| `2DBR BU Faces` / `2DBR BD Faces` | `Face Index`, `FP Start Index`, `FP End Index` | Bridge-up / bridge-down faces |
+
+Use `read_bridge_cells(hdf_path, connection)` → `BridgeCells`, which filters all three
+cell tables to one structure and exposes `cells` / `high_chord` / `low_chord` plus
+`stations('us'|'ds')` → `{cell: (start, center, end)}`.
+
+These are the only place a bridge-mode connection carries per-cell stations; its results group
+does not (see **SA/2D Connection Result Layouts**). `2DBR US Cells` / `2DBR DS Cells` hold the
+same cell lists the results group's `Headwater Cells` / `Tailwater Cells` give, which is exactly
+how `read_sa2d_connection` stations a bridge-mode `Sa2dCell`.
+
+The profiles along the alignment live in `Profile Data`, indexed by the nine profile slots in
+`Table Info` — read them all with `read_structure_profiles()`. For a bridge, the
+`Centerline Profile` dips **through the opening**, so its minimum is the channel bed, not an
+embankment crest — a trap when computing overtopping elevations. Weir-mode connections have no
+such dip; their profile minimum is the road low point.
+
 ### Plan Metadata
 Path: `Plan Data/Plan Information` — HDF5 group with scalar **attributes** (not datasets).
 
@@ -1143,9 +1209,12 @@ between areas). Each has a `Node Pointer` attribute linking to `Geometry/Structu
 | `Geometric Info/Gates and Culverts/{Culvert #N}/Culvert CL Cell TW` | (N,) int32 | Cells at culvert centerline — TW side |
 
 ### Unsteady Time Series — 2D Bridges
-Base path: `Results/.../Unsteady Time Series/2D Bridges/{bridge_name}/`
+Base path: `Results/.../Unsteady Time Series/2D Bridges/{area} {bridge_name}/`
 
-2D Bridges are road bridges modelled inside a 2D flow area.
+2D Bridges are road bridges modelled inside a 2D flow area — a connection whose
+`Mode` is `Bridge Opening`. The group key is **area-prefixed**, exactly like an interior
+connection under `SA 2D Area Conn` (`b'Perimeter 1 Brdg2_GRST'`, `b'Watershed Bridge'`),
+NOT the bare bridge name.
 
 | Dataset | Shape | Notes |
 |---------|-------|-------|
@@ -1155,6 +1224,22 @@ Base path: `Results/.../Unsteady Time Series/2D Bridges/{bridge_name}/`
 | `Cell WS DS` | (T, N_tw) | WSE on the downstream side |
 | `Face Flow` | (T, N_faces) | Flow through each bridge face |
 | `Structure Variables` | (T, 6) | Flow (cfs), Stage HW, Stage TW, Head loss, Drag Factor, Error HW |
+
+`Cell WS US` / `Cell WS DS` map **positionally** onto `Headwater Cells` / `Tailwater Cells`:
+column *i* is the cell at index *i*. Verified against Summary Output per cell on
+LAX_River_2D p19 `Brdg2_GRST` — 20 of 20 columns agree to 6e-5 ft.
+
+**RAS writes these results three times, byte-identically** (checked dataset by dataset on
+Model.p02 `Bridge` and LAX_River_2D p19 `Brdg2_GRST`):
+
+| Path | Key |
+|------|-----|
+| `Unsteady Time Series/2D Bridges/{area} {name}` | area-prefixed |
+| `Unsteady Time Series/2D Flow Areas/{area}/Bridges/{name}` | bare name |
+| `Unsteady Time Series/SA 2D Area Conn/{area} {name}` | area-prefixed |
+
+So a bridge is reachable through `list_sa2d_connections()` / `read_sa2d_connection()` like
+any other connection — pick whichever path is convenient, there is no "primary" copy.
 
 ### SA 2D Area Conn Results
 Base path: `Results/Unsteady/Output/Output Blocks/Base Output/Unsteady Time Series/SA 2D Area Conn/{connection}/`
@@ -1206,6 +1291,49 @@ mean of midpoints across all segments where that cell appears. `Sa2dCell.station
 minimum face-point station bounding those segments; `Sa2dCell.station_end` = maximum.
 Use `list_sa2d_connections()` and `read_sa2d_connection()` from `hack_ras.results.reader`
 to get a typed `Sa2dConnection` object with `hw_cells` / `tw_cells` lists sorted by station.
+
+### SA/2D Connection Result Layouts — the two modes are NOT the same shape
+The table above is the `Weir/Gate/Culverts` layout. A `Bridge Opening` connection writes a
+different, flatter set of datasets under the **same** `SA 2D Area Conn/{name}/` parent, and
+sharing a parent is the whole trap — the group is there, `list_sa2d_connections()` lists it,
+and only the dataset read fails.
+
+| | `Weir/Gate/Culverts` | `Bridge Opening` |
+|---|---|---|
+| HW/TW cell indices | `Headwater Cells` / `Tailwater Cells` | same |
+| per-cell WSE | `HW TW Cells/Water Surface HW Cells` / `…TW Cells` | `Cell WS US` / `Cell WS DS` |
+| weir stationing | `HW TW Segments/HW TW Station` + per-segment cell labels | **absent** |
+| face points | `Geometric Info/…Face Points[ Stations]` | **absent** |
+| flow | `Weir Variables`, `HW TW Segments/Flow` | `Face Flow` |
+| `Structure Variables` | (T, 4) Total Flow, Weir Flow, Stage HW, Stage TW | (T, 6) Flow, Stage HW, Stage TW, Head loss, Drag Factor, Error HW |
+| `Node Pointer` group attr | present | **absent** |
+
+Consequences, all verified on LAX_River_2D p19 (24 weir-mode + 15 bridge-mode connections)
+and on the `2D culvert bridge levee precip pipes` fixture (`Watershed Bridge`):
+
+- `read_sa2d_connection()` reads **both**. The bridge results group has no stationing, so it
+  takes stations from the geometry's `2DBR US Cells` / `2DBR DS Cells`, which station the very
+  same cells (`station` = midpoint of the cell's station range), and the cells sort by station
+  as in weir mode. Stations fall back to `nan` only when the geometry is absent. Note this is
+  bridge-alignment stationing, not weir stationing — a bridge opening profile does not span
+  its centerline (see **Stationing — arc length**), so `geometry/conn_interp.py`'s weir-crest
+  helpers still do not apply to a bridge.
+- `read_sa2d_areas()` reads **both**, by two different routes. Weir mode matches the
+  `Node Pointer` group attribute against `SNN ID`; a bridge group has no `Node Pointer`, so it
+  falls back to matching the connection NAME against the `Connection` field, after stripping the
+  `'<area> '` prefix. Because `Connection` is an S16 field, two longer names can truncate to the
+  same 16 characters — with no `Node Pointer` left to disambiguate, the fallback raises
+  `ValueError` rather than guessing. Checked on all 42 connection groups across LAX_River_2D p19
+  and the fixture: every group name unprefixes to an exact `Connection` match, including the two
+  that are exactly 16 chars (`Brdg7_GRST_Overf`, `RR6_CPKC_Overflo`).
+- Per-cell deck elevations and the raw station tables are in `Geometry/Structures/2DBR *` —
+  see **2D Bridge Geometry** and `read_bridge_cells()`.
+- **Flow and stage for either mode come from `read_structure_timeseries()`** (no breach is
+  required; it was called `read_breach_timeseries` until 2026-09-09). Weir mode returns
+  `Total Flow` / `Weir Flow` / `Total Culvert Flow` / `Stage HW` / `Stage TW` plus nine weir
+  columns; bridge mode returns `Flow` / `Stage HW` / `Stage TW` / `Head loss` / `Drag Factor` /
+  `Error HW` and no weir. For a culvert connection's flow split PER GROUP instead of summed,
+  use `read_culvert_group_results()`.
 
 ### Pipe Network Geometry & Results
 ```
@@ -1471,8 +1599,10 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 |-------|--------|-------|
 | `PlanMetadata` | `geom_id: str`, `plan_title: str` | Parsed from `.p##` text sidecar |
 | `AreaGeometry` | `cell_centers (N,2)`, `min_elevations (N,)`, `polygons list`, `plan_areas (N,)`, `boundary Polygon`, `cell_gdf GeoDataFrame` | Non-dummy cells only in `cell_gdf`; `polygons[i]` is `None` if the cell has fewer than 3 faces. `polygons` follows the 2DFA perimeter (see 2D Flow Area Geometry). `plan_areas` = `Cells Surface Area` — use it for `interpolate_cell_volume`, not `polygons[i].area` |
-| `CellVolumeTable` | `info (N_cells,2) int32`, `values (total_pairs,2) float32` | `info[i] = [start, count]`; `values[:,0]` = elevation, `values[:,1]` = volume |
-| `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64`, `station_start: float`, `station_end: float` | `station` = mean of segment midpoint stations (center); `station_start`/`station_end` = min/max face-point stations bounding the cell's segments; default `nan` |
+| `CellVolumeTable` | `info (N_cells,2) int32`, `values (total_pairs,2) float32`; property `top_elevations (N_cells,)` | `info[i] = [start, count]`; `values[:,0]` = elevation, `values[:,1]` = volume. `top_elevations` = each cell's `elev[-1]`, nan for an empty table — the highest EFFECTIVE ground elevation (terrain modifications included), GUI-confirmed; see **Cell min/max are EFFECTIVE ground** |
+| `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64`, `station_start: float`, `station_end: float` | `station` = mean of segment midpoint stations (center); `station_start`/`station_end` = min/max face-point stations bounding the cell's segments; default `nan`. In BRIDGE mode these come from `2DBR US/DS Cells` instead — midpoint of the cell's station range |
+| `BridgeCells` | `connection`, `footprint`, `us`, `ds` (RAS structured arrays); properties `cells`, `high_chord`, `low_chord`; method `stations('us'\|'ds')` | One `Bridge Opening` connection's slice of the flat `2DBR *` tables. `stations()` → `{cell: (start, center, end)}` |
+| `CulvertGroupResults` | `name`, `timestamps (T,)`, `columns`, `values dict[str,(T,)]`; properties `flow`, `stage_hw`, `stage_tw` | ONE culvert group's time series. `name` is RAS's key (`'Culvert #1'`), byte-identical to the geometry side's `Name`, so it joins onto `read_culverts()` |
 | `Sa2dConnection` | `name: str`, `timestamps (T,) str`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
 | `BreachState` | `connection`, `fired: bool`, `hdf_path_kind`, `center_station`, `breach_at`, `breach_at_days`, `bottom_width`, `bottom_elev`, `left_slope`, `right_slope`, `top_width`, `max_flow`, `max_velocity`, `max_flow_area`, `time_of_max_top_width`, `columns` | The widest state REACHED, not the plan's terminal geometry. `fired=False` = defined but never triggered. `top_width` is None unless a crest elevation was supplied |
 | `ConnectionCenterline` | `name`, `points (N,2)`, `profile (M,2)`, `us_area`, `ds_area`, `mode`, `snn_id`, `parts` | HDF twin of the ASCII `Connection Line=` / `Conn Weir SE=` blocks |
@@ -1509,7 +1639,7 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `read_plan_metadata(hdf_path)` | `PlanMetadata` | Parses `.p##` text sidecar; raises `FileNotFoundError` if missing |
 | `read_area_geometry(hdf_path, area)` | `AreaGeometry` | Reads cell centres, perimeter-accurate cell polygons, `Cells Surface Area`, boundary, min elevation; excludes perimeter dummy cells from `cell_gdf`. Falls back to face-point-only polygons (with a warning) if the plan HDF lacks any of `_PERIM_POLY_KEYS` |
 | `read_face_geometry(hdf_path, area)` | `FaceGeometry` | Per-face Manning's n (the value RAS conveys with), cell/face-point indices, unit normals, lengths, and the dual "diamond" polygons. Accepts a `.p##.hdf` or a `.g##.hdf`; raises `KeyError` on a pre-7.0 HDF with no face property datasets. There is deliberately **no** cell-centre Manning's n reader — see the mesh export section |
-| `read_cell_volume_table(hdf_path, area)` | `CellVolumeTable` | Raw info + values arrays; use `interpolate_cell_volume` to query |
+| `read_cell_volume_table(hdf_path, area)` | `CellVolumeTable` | Raw info + values arrays; use `interpolate_cell_volume` to query, or `.top_elevations` for each cell's highest effective ground elevation |
 | `interpolate_cell_volume(table, cell_idx, wse, cell_plan_area)` | `float` | Returns 0.0 if dry; linearly extrapolates above table max using `cell_plan_area` |
 
 #### WSE results
@@ -1523,12 +1653,15 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 #### SA 2D Area Conn
 | Function | Returns | Notes |
 |----------|---------|-------|
-| `read_sa2d_connection(hdf_path, connection)` | `Sa2dConnection` | HW and TW cell WSE time series + stations; cells sorted by station |
-| `read_breach_timeseries(hdf_path, connection)` | `dict` | `timestamps`, `kind`, `structure`, `breaching`, `weir`. Finds both HDF layouts; column names come from `Variable_Unit`. See **Breach Results** for the two traps |
+| `read_sa2d_connection(hdf_path, connection)` | `Sa2dConnection` | HW and TW cell WSE time series + stations; cells sorted by station. Reads BOTH mode layouts — a `Bridge Opening` connection has no stationing, so its cells carry `nan` stations and stay in HDF order (see **SA/2D Connection Result Layouts**) |
+| `read_structure_timeseries(hdf_path, connection)` | `dict` | `timestamps`, `kind`, `structure`, `breaching`, `weir`. Finds both HDF layouts; column names come from `Variable_Unit`. See **Breach Results** for the two traps. **No breach required** — this is the route to ANY connection's flow/stage series. Renamed from `read_breach_timeseries` 2026-09-09; that name is gone |
+| `read_culvert_group_results(hdf_path, connection)` | `dict[str, CulvertGroupResults]` | Per-culvert-group flow and stage, which `Structure Variables` reports only summed as `Total Culvert Flow`. Empty dict (not an error) for a levee or bridge |
 | `read_breach_state(hdf_path, connection, crest_elev=None)` | `BreachState` | The breach the run actually opened; raises `KeyError` if the plan wrote no breach output |
 | `read_plan_breach_data(hdf_path)` | `list[dict]` | `Plan Data/Breach Data`: `name`, `kind`, `bottom_width`, `side_slopes`. Mirrors `Breach Geom` fields 2/4/5 |
-| `read_connection_centerline(hdf_path, connection)` | `ConnectionCenterline` | Centerline + profile from `Geometry/Structures`; use to cross-check an ASCII parse |
-| `read_sa2d_areas(hdf_path, connection)` | `tuple[str, str]` | `(hw_area, tw_area)` — looks up `US SA/2D` / `DS SA/2D` via `SNN ID == Node Pointer` |
+| `read_connection_centerline(hdf_path, connection)` | `ConnectionCenterline` | Centerline + profile from `Geometry/Structures`; use to cross-check an ASCII parse. Reads only the `Centerline Profile` slot — use `read_structure_profiles` for the other eight |
+| `read_structure_profiles(hdf_path, connection)` | `dict[str, (N,2)]` | ALL nine `Table Info` profile slots, empty ones omitted: `Centerline`, `US/DS XS`, `US/DS BR`, `US/DS BR Weir` (deck high chord), `US/DS BR Lid` (low chord). Slots need not share a station range |
+| `read_bridge_cells(hdf_path, connection)` | `BridgeCells` | A bridge's mesh footprint + per-cell chords + HW/TW stationing, from `2DBR *`. Works on a `.g##.hdf`. `KeyError` on a weir-mode connection |
+| `read_sa2d_areas(hdf_path, connection)` | `tuple[str, str]` | `(hw_area, tw_area)` — looks up `US SA/2D` / `DS SA/2D` via `SNN ID == Node Pointer`, falling back to a `Connection`-name match for a `Bridge Opening` group, which has no `Node Pointer`. Raises `ValueError` if that name is ambiguous under S16 truncation |
 
 #### 1D steady-flow cross-section results
 | Function | Returns | Notes |
@@ -1908,6 +2041,22 @@ sections, so this is a self-contained linear pass over the raw lines. That keeps
 the lossless roundtrip and `CrossSection` untouched, at the cost of a second
 read of the file.
 
+### Per-group culvert RESULTS — `read_culvert_group_results`
+
+The geometry reader above is read-only and has no writer; for what a culvert
+group actually *did*, `results.reader.read_culvert_group_results(hdf, conn)`
+returns `{group_name: CulvertGroupResults}` from
+`<connection group>/Culvert Groups/<name>` (`(T, 3)`: `Culvert Flow`,
+`Stage HW`, `Stage TW`).
+
+`Structure Variables` carries only the summed `Total Culvert Flow`, so the split
+is the only way to see which barrel group carried the water — on LAX_River_2D
+p19 `Culv2` the three groups peak at 44.3 / 97.1 / 96.9 cfs. The group keys are
+**byte-identical** to the geometry side's
+`Culvert Groups/Attributes['Name']` (`'Culvert #1'`, …), so the two join with no
+name munging. Four LAX connections have more than one group (`Culv2` three;
+`Culv14` / `Culv17` / `Culv22` two).
+
 ## SA/2D Connections (`hack_ras/geometry/blocks/connection.py`, `geometry/conn_interp.py`)
 
 `GeometryParser` populates `GeometryFile.connections`, a `{name: Connection}` dict, from
@@ -2030,7 +2179,7 @@ all 221 connections across Model_Hillside, Model_PCA, Model_LAX and the fixtures
 
 For an interior connection RAS writes the data **twice**, and the two copies are
 byte-identical (same shape, values, and `Breach at` / `Centerline Breach` attributes), so
-either is authoritative. `read_breach_timeseries` tries all three spellings — a bare
+either is authoritative. `read_structure_timeseries` tries all three spellings — a bare
 lookup on the connection name silently misses every interior connection —
 and `list_breach_connections` strips the area prefix so the two spellings collapse to one
 entry.
