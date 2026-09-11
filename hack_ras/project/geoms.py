@@ -645,8 +645,6 @@ def delete_geoms(
          'prj_removed': [entries], 'referencing_plans': {gid: [pid, ...]},
          'warnings': [...], 'rasmap_removed': [gid, ...]}
     """
-    if isinstance(spec, str):
-        spec = spec.split(",")
     gids = expand_id_spec(spec, kind="g")
 
     listed = project.model.geom_file_ids

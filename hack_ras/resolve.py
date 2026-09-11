@@ -148,14 +148,17 @@ def expand_id_spec(spec, kind: str = "p") -> list[str]:
       * a prefixed id                      "p03", "P3"       -> p03, p03
       * an inclusive numeric range "A-B"   "01-9", "14-16"   -> p01..p09, p14..p16
         (a prefix letter is allowed on either endpoint, e.g. "p14-p16")
+      * several of the above separated by commas                "5,7,19-21"
+        (so a whole spec can be one string; entries inside a list may carry
+        commas too, and spaces around them are ignored)
 
     ``kind`` is the single-letter type prefix: 'p' (plan), 'g' (geometry),
     'u' (unsteady), 'f' (steady).  Returns a sorted list of unique two-digit
     ids such as ``['p01', 'p03', 'p14']``.
 
     This function is pure (no filesystem access): callers validate the returned
-    ids against the files that actually exist.  A ``str`` or ``int`` is accepted
-    directly as a one-element spec.
+    ids against the files that actually exist.  A bare ``str`` or ``int`` is
+    accepted directly as a one-element spec.
 
     Raises ValueError on a malformed token, an id outside 1-99, or a reversed
     range (A > B).
@@ -166,6 +169,11 @@ def expand_id_spec(spec, kind: str = "p") -> list[str]:
         return []
     if isinstance(spec, (str, int)):
         spec = [spec]
+    # A comma separates TOKENS, not specs: '16-17,21-26' and ['16-17', '21-26']
+    # mean the same thing.  Splitting here is why delete_plans / delete_geoms /
+    # set_plan_settings do not each need their own `spec.split(",")` prelude.
+    # Purely additive: a comma used to reach _parse_id_number and raise.
+    spec = [tok for entry in spec for tok in str(entry).split(",")]
 
     numbers: set[int] = set()
     for entry in spec:

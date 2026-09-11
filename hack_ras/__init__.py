@@ -15,7 +15,10 @@ says which file type is being operated on. Their canonical home is unchanged —
 `hack_ras.project.plans` and `hack_ras.plans` are the same module object.
 None of them import h5py/geopandas at module level, so this costs nothing.
 """
-from hack_ras.project import flows, geoms, health, plans, rasmap, sync
+from hack_ras.project import (
+    flows, geoms, health, plan_settings, plans, rasmap, sync,
+)
 from hack_ras.project.ras_project import RasProject
 
-__all__ = ["RasProject", "flows", "geoms", "health", "plans", "rasmap", "sync"]
+__all__ = ["RasProject", "flows", "geoms", "health", "plan_settings",
+           "plans", "rasmap", "sync"]

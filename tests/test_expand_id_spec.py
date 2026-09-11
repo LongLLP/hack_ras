@@ -69,6 +69,37 @@ class TestExpandIdSpec(unittest.TestCase):
     def test_blank_tokens_skipped(self):
         self.assertEqual(expand_id_spec(["", "  ", "p04"], "p"), ["p04"])
 
+    # ── commas ───────────────────────────────────────────────────────────────
+    # A comma separates TOKENS, so a whole spec can be one string.  This used
+    # to live as a `spec.split(",")` prelude in delete_plans / delete_geoms /
+    # set_plan_settings; it moved here so every caller gets it.
+    def test_comma_string_is_several_tokens(self):
+        self.assertEqual(expand_id_spec("5,7,19-21", "p"),
+                         ["p05", "p07", "p19", "p20", "p21"])
+
+    def test_comma_string_equals_the_list_it_spells(self):
+        self.assertEqual(expand_id_spec("16-17,21-23", "p"),
+                         expand_id_spec(["16-17", "21-23"], "p"))
+
+    def test_spaces_around_commas_are_ignored(self):
+        self.assertEqual(expand_id_spec("5, 7 , p09", "p"),
+                         ["p05", "p07", "p09"])
+
+    def test_a_list_entry_may_itself_carry_commas(self):
+        self.assertEqual(expand_id_spec(["5,7", 9, "11-12"], "p"),
+                         ["p05", "p07", "p09", "p11", "p12"])
+
+    def test_trailing_and_doubled_commas_are_skipped(self):
+        self.assertEqual(expand_id_spec("5,,7,", "p"), ["p05", "p07"])
+
+    def test_commas_still_dedupe_and_sort(self):
+        self.assertEqual(expand_id_spec("7,5,5-6", "p"),
+                         ["p05", "p06", "p07"])
+
+    def test_a_bad_token_among_commas_still_raises(self):
+        with self.assertRaises(ValueError):
+            expand_id_spec("5,abc,7", "p")
+
     # ── errors ────────────────────────────────────────────────────────────────
     def test_reversed_range_raises(self):
         with self.assertRaises(ValueError):

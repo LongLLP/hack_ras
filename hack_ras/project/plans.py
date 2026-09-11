@@ -734,8 +734,6 @@ def delete_plans(
          'rasmap_removed': {'plans': [...], 'results': [...],
                             'event_conditions': [...], 'geometries': [...]}}
     """
-    if isinstance(spec, str):
-        spec = spec.split(",")
     pids = expand_id_spec(spec, kind="p")
 
     listed = project.model.plan_file_ids

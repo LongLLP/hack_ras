@@ -46,6 +46,12 @@ required config key and exits with an error if it is missing.
   BOM: `read_lines` strips one so line-1 key matches work, and `write_lines`
   re-attaches it when the destination already had one. Files created fresh get no BOM.
   See the `utils/lines.py` docstring for why, and `tests/test_bom_handling.py`.
+  A plan's BOM is NOT stable across HEC-RAS itself: `Model_Hillside/Current_Model`
+  p05 carried one, and a GUI edit of its Computation Settings rewrote the file
+  WITHOUT it while its untouched siblings p06-p24 kept theirs (observed
+  2026-09-11). So a BOM is a property of the last writer, not of the project —
+  never treat its presence or absence as a fingerprint of who wrote a file, and
+  never hard-code an expectation of one; read via `read_lines`.
   `GeometryParser` reads with `utf-8-sig` instead, so a BOM never reaches
   `raw_lines` (where it used to hide `Geom Title=` and make `GeometryWriter` raise
   `UnicodeEncodeError`); nothing re-attaches it, because every `GeometryWriter` call
@@ -203,8 +209,19 @@ Scalar fields (`title`, `y_axis_title`, etc.) work as before.
 Config `plan_files` lists (and any future geom/unsteady/steady selection) go
 through `expand_id_spec`, which normalises a mixed list of tokens into sorted,
 unique two-digit ids. A token may be a bare number (`01`, `3`), a prefixed id
-(`p03`, `P7`), or an inclusive range (`01-9`, `14-16`, `p14-p16`). `kind` is the
-type-prefix letter (`'p'`/`'g'`/`'u'`/`'f'`). The function is **pure** (no disk
+(`p03`, `P7`), or an inclusive range (`01-9`, `14-16`, `p14-p16`). A comma
+separates TOKENS, not specs, so a whole selection can be one string
+(`'5,7,19-21'`), a list entry may itself carry commas, and spaces around them
+are ignored — `'16-17,21-23'` and `['16-17', '21-23']` are the same spec. That
+splitting used to be a `spec.split(",")` prelude repeated in `delete_plans`,
+`delete_geoms` and `set_plan_settings`; it moved in here (2026-09-11) so every
+caller gets it, including the YAML-driven `Scripts/` tools, where
+`plan_files: "5-24,30"` previously raised. Purely additive — a comma used to be
+a hard error, so no working spec changed meaning.
+`flows._expand_flow_spec` still splits commas itself, and must: it reads each
+token's kind prefix and groups by kind BEFORE delegating, because one flow spec
+may mix `u` and `f` (`'u09,f02'`).
+`kind` is the type-prefix letter (`'p'`/`'g'`/`'u'`/`'f'`). The function is **pure** (no disk
 access) — callers validate the returned ids against real files. Selection is
 **strict**: `RasProject.plan_hdfs` requires every expanded id (including every
 number inside a range) to exist, raising `PlanHdfNotFound` otherwise — ranges are
@@ -363,6 +380,136 @@ alone.
   results map and a source layer (a plan whose Short ID collides with, say, the
   terrain folder) stays protected. Consumed by
   `Scripts/DataMgmt_Results_Collection/copy_results_gis.py`.
+
+## Plan Settings — Intervals / Time Window / Title (`hack_ras/project/plan_settings.py`)
+
+The keyword editor for an unsteady plan's *Simulation Time Window* and
+*Computation Settings* panels. `plans.py` owns a plan's IDENTITY and NUMBER
+(renumber/clone/delete/retitle); this owns its SETTINGS. Same conventions:
+takes a `RasProject`, edits the `.p##` as raw lines (untouched lines stay
+byte-identical, BOM and CRLF included), `.prj`-listed plans only, refuses a
+plan mid-run.
+
+```python
+from hack_ras import RasProject, plan_settings          # module re-export
+from hack_ras.project.plan_settings import read_plan_settings, set_plan_settings
+
+s = read_plan_settings(project, "p05")   # -> PlanSettings dataclass
+s.computation_interval, s.mapping_interval               # '3SEC', '1HOUR'
+s.hydrograph_interval, s.detailed_interval               # '10MIN', '30SEC'
+s.start, s.end            # datetime | None (None when Simulation Date= is blank)
+s.window_raw              # '02JAN2025,0101,03JAN2025,2399' — as stored
+s.title, s.short_id, s.missing_keys
+
+# the common request: all three output intervals, many plans, one call
+set_plan_settings(project, "5-24", output_intervals="5MIN")
+
+set_plan_settings(project, "5-24,30", computation_interval="3SEC",
+                  mapping_interval="1HOUR", hydrograph_interval="10MIN",
+                  detailed_interval="30SEC")
+set_plan_settings(project, "p05", start=datetime(2025, 1, 2, 1, 1),
+                  end="03JAN2025,2400")        # datetime or RAS string
+set_plan_settings(project, "p05", title="002year 5min", short_id="002yr5")
+```
+
+GUI label -> plan-file key. The mapping is NOT guessable and two entries are
+actively misleading, so never key off a label:
+
+| GUI (Unsteady Flow Analysis)  | plan-file key              | keyword                |
+|-------------------------------|----------------------------|------------------------|
+| Computation Interval          | `Computation Interval=`     | `computation_interval` |
+| Mapping Output Interval       | `Mapping Interval=`         | `mapping_interval`     |
+| Hydrograph Output Interval    | `Output Interval=`          | `hydrograph_interval`  |
+| Detailed Output Interval      | `Instantaneous Interval=`   | `detailed_interval`    |
+| Simulation Time Window        | `Simulation Date=d,t,d,t`   | `start` / `end`        |
+
+`Output Interval=` is the HYDROGRAPH interval, not the mapping one, and the
+DETAILED interval hides under `Instantaneous Interval=`. A plan also carries an
+unrelated `WQ Output Interval=` (water quality); keys are matched on the whole
+text left of the `=`, so that one is never caught by the `Output Interval`
+match — a `startswith('Output Interval')` scan in a hand-rolled script would be
+fine, but `'Output Interval' in line` would not.
+
+- `spec` is the flexible plan id-spec (`'5-24'`, `'5,7,19-21'`, `['p05', 6]`,
+  `5`) — `resolve.expand_id_spec`, which splits the commas.
+- `output_intervals=` sets mapping + hydrograph + detailed to one value in one
+  argument (the common "all output at N minutes" request). It cannot be
+  combined with the three individual keywords — `ValueError`.
+- Interval values are checked against `_ALLOWED[field]`, not just the
+  `<number><unit>` shape — an off-list value produces a plan the GUI silently
+  rewrites. Case and internal spaces are ignored (`' 5 min '` -> `'5MIN'`,
+  `'max profile'` -> `'Max Profile'`).
+- **The four dropdowns do NOT offer the same values** (RAS 7.0 GUI,
+  user-confirmed 2026-09-11), which is why validation is per field:
+
+  | field | offers |
+  |-------|--------|
+  | computation | `0.1`..`0.5SEC`, `1..6/10/12/15/20/30SEC`, `1..6/10/12/15/20/30MIN`, `1/2/3/4/6/8/12HOUR`, `1DAY` |
+  | mapping | `Max Profile` + all of the above + `1WEEK`, `1MON`, `1YEAR` |
+  | hydrograph | as mapping, but NO `Max Profile` and NO sub-second |
+  | detailed | `Max Profile` + as hydrograph |
+
+  Only the computation interval goes sub-second and only it stops at `1DAY`;
+  only mapping and detailed offer `Max Profile`. A value offered somewhere but
+  not on the field being set gets an error naming the fields that do take it.
+- **Two tokens do not spell out.** The values are HEC-DSS interval names, so
+  `1 Month` is stored `1MON`, NOT `1MONTH` — and `Max Profile` is a literal
+  string with a space and mixed case ("write the maximum profile only"), not an
+  interval token, so it does not survive the uppercase-and-strip normalization
+  that every other value does. Every token in `_ALLOWED` was read back out of a
+  GUI save of `Model_Hillside/Current_Model` p05 (2026-09-11) — the user
+  re-saved it three times to fingerprint the ends of each list (`0.1SEC`,
+  `Max Profile`, `1MON`, `1YEAR`, `1WEEK`), so none of them is inferred.
+- `start` / `end` take a `datetime` or the file's own `'DDMMMYYYY,HHMM'` string
+  (a space instead of the comma and a lowercase month are accepted), and are
+  INDEPENDENT: passing only `end` rewrites the second half of
+  `Simulation Date=` and leaves the first half's stored text alone. A string is
+  written back as typed, which is the only way to express RAS's end-of-day
+  `2400` — a `datetime` cannot, since it normalizes to the next day's `0000`.
+  The resulting window must run forwards (`ValueError` otherwise); a half left
+  blank is not checkable and is not checked.
+- `title` / `short_id` delegate to `plans.retitle_plan`, so they also fix the
+  `.rasmap` display names and the `.p##.hdf` title attributes (an ASCII-only
+  retitle silently reverts — RAS Mapper regenerates its Results layer name from
+  the HDF). Because plan titles must be unique and a short ID names the plan's
+  RAS Mapper results folder, they require `spec` to select exactly ONE plan.
+  Passing one of the pair preserves the other rather than re-deriving it, so
+  `title=` alone does NOT reset a short ID that deliberately differs.
+- Everything is validated before anything is written — off-list intervals,
+  unparsable dates, a backwards window, missing / orphan / mid-run plans, and
+  any requested key the plan file does not contain (it is never invented). A
+  bad argument therefore changes NOTHING, on any plan.
+- Report: `{'plans': [...], 'changed': {pid: {key: (old, new)}},
+  'unchanged': [...], 'retitled': {pid: <retitle_plan report>}}`. A plan already
+  holding the requested values lands in `unchanged` and its file is not
+  rewritten at all.
+- **The `.p##.hdf` is deliberately NOT touched** (unlike `retitle_plan`, which
+  must). Intervals and the time window are run INPUTS that HEC-RAS writes into
+  the HDF on the next compute, so editing them there would only desynchronize it
+  from the results it actually holds — and a plan whose intervals or window
+  changed has to be re-run regardless. Corollary for results code: after a
+  settings change the `.p##.hdf` still reports the OLD `Base Output Interval`
+  and time stamps until the plan is re-run.
+- `read_plan_settings` is deliberately lenient where `set_plan_settings` is
+  strict: an unparsable stored time reads back as `start=None`/`end=None` with
+  `window_raw` keeping the truth, rather than raising and making the plan
+  impossible to inspect. This is not hypothetical — HEC-RAS stores what was
+  typed into the time box without validating it as a clock time
+  (`Model_Hillside/Current_Model` p05 held `Simulation Date=...,2399` after a
+  GUI edit, 2026-09-11; minute 99 is not a time, and `strptime` rejects it).
+  `set_plan_settings` refuses to WRITE such a value, which is right: HEC-RAS
+  itself will not RUN a plan whose end time is `2399` (user-confirmed
+  2026-09-11), so the GUI stores it but the solver rejects it. `2400` IS legal
+  and is RAS's own end-of-day idiom — the write path accepts it.
+- Steady plans carry all four interval lines too — RAS writes them whatever the
+  solver — but only the unsteady solver reads them, and a steady plan's window
+  is typically `Simulation Date=,,,` (reads back as `start=None`/`end=None`,
+  and `missing_keys == []` because the LINE is present). Verified on
+  `tests/data/Wisconsin Floodway/SterpCreek.p01`.
+- Scope: these four groups only. Other plan settings (the rest of Computation
+  Settings, the 2D solver tolerances, output options) are not implemented —
+  extend `_INTERVAL_KEYS` / add a keyword here rather than starting a new
+  module.
 
 ## Geometry File Operations (`hack_ras/project/geoms.py`)
 
@@ -2511,7 +2658,7 @@ is truly vacant before any renumber can adopt a zombie.
 - Ergonomics for the "user asks Claude to run these conversationally" workflow:
   `compact_plans` (plan-side twin of `compact_geoms` — was missing), and bulk
   `delete_plans` / `delete_geoms` taking a flexible id-spec ('16-17,21-26,30-35'
-  string or list, via `resolve.expand_id_spec`, comma-split first). Both bulk
+  string or list, via `resolve.expand_id_spec`, which splits commas). Both bulk
   deletes validate every id up front (fail-fast: a bad spec deletes nothing;
   delete_geoms additionally refuses the whole call if any target is referenced,
   unless force) and return one consolidated report. +10 tests. Baseline 284 ->

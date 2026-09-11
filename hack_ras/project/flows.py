@@ -182,6 +182,10 @@ def _expand_flow_spec(spec) -> list[str]:
     mix kinds across tokens. Returns a sorted list of unique prefixed IDs
     (steady first, then unsteady).
     """
+    # Kept even though expand_id_spec now splits commas itself: this function
+    # has to read each token's kind prefix and group tokens by kind BEFORE it
+    # can delegate, because one flow spec may mix 'u' and 'f'.  Removing this
+    # would send 'u09,f02' through as a single token.
     if isinstance(spec, str):
         spec = spec.split(",")
     elif isinstance(spec, int):
