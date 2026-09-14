@@ -2036,6 +2036,400 @@ layer could not see.
 
 `Scripts/Geometry_Mesh_nvals/` drives it.
 
+## Mapping 2D Results Without a Render Mode (`hack_ras/gis/wse_surface.py`)
+
+RAS Mapper draws and writes results through a user-selected render mode
+(horizontal / sloping / hybrid) and never says which rule produced which artefact.
+This module builds the water surface explicitly instead, so every interpolation rule
+is stated and testable. Read the module docstring for the full rationale and the
+measurements; this section is the API and the traps.
+
+```python
+from hack_ras.gis.wse_surface import (
+    area_bounds, build_wse_surface, export_wse_depth,
+    difference_rasters, check_cell_volumes, same_mesh,
+)
+
+# Pass EVERY plan being compared — the union, so a bigger mesh is never clipped.
+bounds = area_bounds([plan_a, plan_b])              # mesh perimeter, geometry-stable
+same_mesh(plan_a, plan_b)                           # cell for cell? see below
+res = export_wse_depth(plan_hdf, terrain_vrt, out_dir,
+                       wse_type="Maximum", bounds=bounds)
+df  = check_cell_volumes(plan_hdf, "RockCr",
+                         res["wse"]["RockCr"], res["mapped_volumes"]["RockCr"])
+difference_rasters(a_depth, b_depth, out, treat_dry_as_zero=True)   # depth change
+difference_rasters(a_wse,   b_wse,   out, treat_dry_as_zero=False)  # WSE change
+```
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `build_wse_surface(hdf, area, wse, dry_tol=0.01)` | `WseSurface` | Fans each wet cell from its centre to its own outline. `KeyError` on a pre-7.0 HDF — there is no approximate fallback, because an outline that does not follow the mesh boundary throws triangles outside the mesh |
+| `barrier_faces(hdf, area)` | `set[int]` | Faces carrying a structure, from `Structures/Default Weir Connectivity` |
+| `rasterize_surface(surface, transform, row_off, col_off, h, w, out=, cells_out=)` | `(values, cells)` | Barycentric scan-conversion, one triangle at a time. `transform` is the **output grid's**, so the offsets are output-grid pixels — not the terrain's |
+| `export_wse_depth(...)` | dict | WSE + depth GeoTIFFs, tiled; `wse_path`, `depth_path`, `surfaces`, `wse`, `mapped_volumes`, `bounds`, `shape`. Refuses a terrain whose CRS differs from the model's — `allow_crs_mismatch=True` overrides |
+| `area_bounds(hdf_paths, areas=None)` | `(x0,y0,x1,y1)` | Union of the mesh perimeter boxes. Takes one path or several — **pass every plan being compared**, or a differing mesh is silently clipped |
+| `same_mesh(hdf_a, hdf_b, areas=None, atol=1e-6)` | `bool` | Do two plans compute on the same mesh, cell for cell? Compares area names, cell counts and five arrays within a tolerance |
+| `difference_rasters(a, b, out, treat_dry_as_zero=True)` | path | `b - a`. Raises unless both are on the identical grid |
+| `check_cell_volumes(hdf, area, wse, mapped)` | `DataFrame` | Mapped volume per cell vs `interpolate_cell_volume` |
+
+### The interpolation rules
+
+Triangles are fanned **per cell**, centre to outline, so no edge ever crosses a mesh
+face. Cell centres carry `read_wse` unaltered. A face point takes the mean of the
+WSE of the cells around it that are *communicating* with the cell being drawn; two
+cells sharing a face are **not** communicating when the face carries a structure,
+when either cell is dry, or when the face is not submerged from **both** sides.
+
+**Test the lower WSE against the face minimum, not the higher.** Asking whether water
+crosses the face at all is far too permissive on a steep coarse mesh. `NKC_Hillside_Levee`
+p15 `RockCr` cell 933: WSE 836.39, cell min elevation 830.66, a downslope neighbour so
+much lower that averaging put **813.65** at a shared face point — 22.7 ft below the cell's
+own water level. The plane then sat below ground over all 206,255 pixels and a cell holding
+131,000 ft³ mapped as bone dry. **476 of 1071 `RockCr` cells failed that way.** Water does
+spill across such a face; the two pools still have separate surfaces. Switching to the
+lower WSE moved `RockCr`'s per-cell median volume error from **−97.6% to −12.3%** and
+tripled the split face point count.
+
+A cell with no both-side-drowned face is isolated, every vertex takes its own WSE, and it
+renders flat — horizontal mode, which is the volume-faithful answer. The interpolation
+switches itself on only where a continuous water surface exists.
+
+### Structure chains are area-local — scope them
+
+`Default Weir Connectivity` stores face point indices in `RS/FP` as decimal strings, one
+chain per structure and side, and **the indices are local to the 2D area named by the
+structure's `US SA/2D` (HW) or `DS SA/2D` (TW)**. `SID` indexes `Structures/Attributes`
+directly (verified: g03 SID 0–15, 16 rows). Matching every chain against every area
+produced real false positives on Hillside — `Interior` 85 barrier faces instead of 56,
+`RockCr` 83 instead of 68. The scoped counts are exactly right: `Interior` = 63 L1–L7 TW
+chain points − 7 chains = 56; `RockCr` = the same 56 from the HW side plus 12 from the nine
+internal C1–C9 chains = 68.
+
+**Internal connections are the reason this module exists.** On `NKC_Hillside_Levee`,
+`C1 Walker Road` … `C9 Clay Edwards` have `US SA/2D == DS SA/2D == RockCr` — road
+embankments crossing the interior of a single mesh. Any interpolation that does not know
+about them smears their head drop across cells whose equivalent side is 400–690 ft
+(`RockCr` median cell 160,000 ft², max 471,000 ft²; `Interior` median 40,000 ft²).
+`L1`–`L7` are `RockCr`↔`Interior` and need no handling — the areas are triangulated
+separately and mosaicked.
+
+### Accuracy — and why `check_cell_volumes` reads low
+
+Measured on p15 at the maximum envelope, 2026-09-14, against terrain integrated directly
+at 1 ft under a flat water surface at each cell's own WSE (150 cells per area):
+
+| reference: terrain integrated | `Interior` | `RockCr` |
+|---|---|---|
+| this map, total | **+0.06%** | **−0.35%** |
+| this map, per-cell median | −0.00% | −0.00% |
+| RAS volume-elevation table, total | +2.39% | **+9.19%** |
+| RAS table, per-cell median | +3.84% | +11.39% |
+
+The map is right to a fraction of a percent. The 2–6% shortfall `check_cell_volumes`
+reports is the **reference** being high: RAS's volume-elevation curve is piecewise linear
+over ~47 tabulated points per cell, and linear interpolation of a convex V(Z) overestimates
+between them. Not a defect — the solver routes on that table, so the table *is* the model's
+storage — but a map drawn on terrain can never quite hold the volume the solver conserved.
+Per-cell tails are wide (p1 −66%/−93%, p99 +62%) and are the interpolation working: where
+the surface genuinely slopes, volume moves between neighbours and nets out.
+
+### Measured against RAS Mapper's own render modes
+
+RAS 7.0 offers four renderings, not three — `Sloping (Cell Corners)`,
+`Sloping (Cell Corners + Face Centers)` with two independent sub-options
+(`Use Depth-Weighted Faces ("Precip Mode")` and `Shallow Water reduces to
+Horizontal`), and `Horizontal`. **RAS Mapper crashes computing a WSE raster with
+Precip Mode on** (observed 2026-09-14, NKC_Hillside_Levee `FC 100year`); that mode
+is therefore untested here.
+
+The user exported `WSE (Max)` for the other three from p15 into
+`Current_Model\FC 100year\`. They land on the **full terrain grid** (23212 x 35722,
+1 ft, origin 2756852.5518 / 1106680.3564) and ours is an integer-pixel window of the
+same grid, so every comparison below is pixel for pixel with no resampling.
+
+Difference over pixels wet in both, `ours - RAS`, in ft:
+
+| RAS Mapper mode | wet px | RAS only | ours only | mean | rms | min | max | \|d\|>1 ft |
+|---|---|---|---|---|---|---|---|---|
+| Sloping (Cell Corners) | 77.0M | 15.8M | 8.7M | −0.544 | 1.880 | −32.13 | +10.26 | 13.9% |
+| Sloping (Corners + Face Centers) | 72.2M | 10.1M | 7.8M | −0.188 | 1.038 | −25.35 | +10.34 | 8.9% |
+| … + Shallow reduces to Horizontal | 73.7M | 8.0M | 4.2M | −0.166 | 0.903 | −25.35 | +10.34 | 7.2% |
+| Horizontal | 70.1M | 2.3M | 2.1M | **+0.016** | **0.301** | −9.58 | +7.39 | 2.1% |
+
+Ours is 69.9M wet px. It tracks `Horizontal` closely and departs from the sloping
+modes by tens of feet over millions of pixels — by design: the surface reduces to
+horizontal wherever no face is drowned from both sides, which on a rain-on-grid
+model is most cells.
+
+#### Volume against the solver's own storage
+
+Integrating `max(WSE − terrain, 0)` per cell and comparing to
+`interpolate_cell_volume` — the solver's conserved storage, independent of any
+rendering choice, so it favours nobody:
+
+| | `Interior` total | `RockCr` total |
+|---|---|---|
+| RAS volume-elevation table | 60,983,399 ft³ | 47,838,238 ft³ |
+| Sloping (Cell Corners) | +4.90% | **+117.22%** |
+| Sloping (Corners + Face Centers) | +0.69% | +27.17% |
+| … + Shallow reduces to Horizontal | +1.18% | +24.92% |
+| Horizontal | −2.19% | −7.91% |
+| **this module** | **−2.19%** | **−5.43%** |
+
+`Sloping (Cell Corners)` maps **more than twice** the water RAS stored in `RockCr`,
+92% of its cells off by more than 25%. The negative figures for `Horizontal` and this
+module are the table's own high bias, measured above.
+
+#### The excess is a function of cell relief
+
+Not of the structures — the head drops across `C1`-`C9` are only 0.5-0.8 ft. It is
+steep, coarse cells, where a tilted plane intersects the valley walls far above the
+pond the cell actually holds. `RockCr` cells binned by relief
+(`top_elevations − min_elevations`):
+
+| `RockCr` cells | n | Sloping (Cell Corners) | this module |
+|---|---|---|---|
+| relief < 10 ft | 10 | −16.7% | −3.2% |
+| relief 10-30 ft | 212 | **+55.2%** | −1.8% |
+| relief > 30 ft | 849 | **+138.8%** | −6.6% |
+
+Median `RockCr` cell relief is **40.4 ft** across cells 400-690 ft wide, so the
+high-relief bin is the mesh. Worst single cell, 777: 77.8 ft of relief, 7.82 ft of
+water at the deepest point, RAS table 18,698 ft³, `Sloping (Cell Corners)`
+**1,520,698 ft³** — 81x over; this module 15,620 ft³. Over a 2800 ft window around it
+the sloping mode maps 7.33M ft³ against our 1.59M and horizontal's 1.51M, filling the
+ravine walls (see `Mapped_Results\steep_cell_zoom.png`).
+
+This is the same face-averaging failure documented above for cell 933, seen from the
+other side: averaging WSE across a face that is not drowned from both sides pushes the
+plane too low on one side (drying a wet cell) and too high on the other (flooding a
+hillside). The both-side-submergence test removes both.
+
+`Mapped_Results\embankment_transects.png` shows the local structure behaviour: across
+`C6 N Holmes`, `Sloping (Cell Corners)` rides about 1.5 ft above every other rendering
+and above the HDF's own headwater cell WSE.
+
+### Traps
+
+- **Terrain modifications are not in the `.tif` or `.vrt`.** They live in the terrain HDF's
+  `Modifications` group and RAS applies them on the fly. `02_Surveyed_Channel.hdf` carries
+  exactly one, `Ditch_fix_RS_9580` — a `SetIfLower` channel, 3.5 ft top width, 1:1 slopes,
+  along a **14.1 ft** polyline at (2766081, 1088562), profile 760.78→760.75, max reach 10 ft.
+  About 100 ft², so the bare `.vrt` is fine *for this model*. Elsewhere, export the terrain
+  from RAS Mapper with modifications applied. See **Cell min/max are EFFECTIVE ground**.
+- **A live modification can be invisible in the RAS Mapper GUI.** The user could not find
+  `Ditch_fix_RS_9580` anywhere in the layer tree, but RAS is computing with it: `RockCr`
+  cell 1035 has `Cells Minimum Elevation` 760.746 against a bare `.vrt` minimum of 761.797
+  in the same cell, landing within 0.006 ft of the modification's own profile bottom of
+  760.752 (measured 2026-09-14, p15). So **the GUI is not a reliable way to rule terrain
+  modifications out** — read the terrain HDF's `Modifications` group. Treated as a RAS
+  Mapper display bug and left alone at the user's direction; the operational conclusion
+  stands regardless of the cause.
+- **Hillside is rain-on-grid, so the maximum envelope wets every cell** — minimum depth at a
+  cell centre is 0.30 ft (`Interior`) / 0.72 ft (`RockCr`). A max-WSE map covering the whole
+  mesh is correct, not a bug. Threshold for display in GIS; map a timestamp for a real wet edge.
+- **`rasterize_surface`'s offsets are output-grid, not terrain-grid.** `export_wse_depth`
+  passes the window transform, which already carries the terrain offset; adding it again
+  silently writes zero pixels.
+- **Concave cells spill a little.** Fanning assumes the centre sees the whole outline. The
+  centre is inside its polygon on every mesh checked, which bounds it: summed fan area
+  exceeds `Cells Surface Area` by +0.0015% (`Interior`) / +0.013% (`RockCr`), per-cell median
+  0.0000%, 10 of 3686 cells over 0.1%, worst 3.2%. Hillside has 65 + 104 concave cells, so
+  concavity is common and harmless. Not worth clipping triangles for.
+
+### g01 and g03 are the same mesh
+
+Cell centres, face points, cell and face minimum elevations and surface areas all agree
+element for element to float round-off (max 4e-9 ft) between `EC gravity flow` (g01) and
+`FC gravity flow` (g03) — same 2844 `Interior` + 1263 `RockCr` cells, same 16 structures.
+They differ in infiltration (`InfiltrationSCS` vs `InfiltrationSCS_FutureConditions`), land
+cover and flow. So an EC vs FC comparison needs no resampling and cell *i* is the same cell
+in both.
+
+### Writing rasters RAS Mapper can read
+
+**Observed 2026-09-14, and only partly explained.** The fixture terrain was shrunk from
+26.9 MB to 2.6 MB by clipping it with rasterio — a lossless sub-window, pixels verified
+bit-identical against the original — and the result "turned into a mess in RAS Mapper".
+The model was rebuilt with a RAS-Mapper-authored terrain instead, which is what the fixture
+now carries.
+
+Three things differed between the clipped raster and one RAS Mapper writes, and **which of
+them mattered is not established**:
+
+| | rasterio clip | RAS Mapper's own |
+|---|---|---|
+| compression | DEFLATE, **PREDICTOR=3**, zlevel 9 | DEFLATE, **no predictor** |
+| overviews | none | **[2, 4, 8, 16]** |
+| companion `Terrain.hdf` | **stale** — still indexed the pre-clip 6928x2632 extent | regenerated to match |
+
+The stale `Terrain.hdf` is on its own sufficient to explain it: that file holds RAS's
+per-tile `Mask` / `Min-Max` / `Perimeter` pyramids (308 tiles at level 0 for the old
+extent), and RAS Mapper reads it rather than the `.tif` directly. Missing overviews would
+also degrade the zoomed-out display. The floating-point predictor is standard GeoTIFF and
+GDAL round-trips it exactly, but RAS Mapper does not use GDAL.
+
+**The rule that follows regardless of the cause: do not hand RAS Mapper a terrain built by
+anything other than RAS Mapper.** A `.tif` is only half of a RAS terrain; the `.hdf`
+alongside it is an index that must be regenerated with it. Rewriting the raster and leaving
+the `.hdf` is the trap, and it is silent — every pixel reads back correct from GDAL.
+
+**SETTLED — `export_wse_depth`'s `predictor=3` output loads fine in RAS Mapper**
+(user-tested 2026-09-14 on `p15_Maximum_Depth.tif`). No change was made, and the default
+stays: dropping the predictor would have taken that raster from **50.3 MB to 100.0 MB**.
+RAS Mapper reads ordinary rasters and shapefiles as happily as ArcGIS Pro or QGIS. Terrain
+is the exception, because it is not an ordinary raster to RAS — it is imported through a
+dedicated process that writes RAS's own `.tif` + `.hdf` + `.vrt` triple. **Hot-swapping any
+part of that triple is what broke, not the compression.**
+
+**And shrinking the terrain further is a dead end** (measured 2026-09-14, so nobody retries
+it). RAS's 6.90 MB is not a deflate-level choice: the same values at `zlevel=1` with
+overviews come to 4.71 MB and at `zlevel=9` to 3.01 MB, so RAS carries ~2 MB of its own
+encoding overhead. And it re-encodes on import (a 26.9 MB source became 6.90 MB), so **no
+compression choice on the input survives** — a lossless 1.86 MB re-compression was imported
+through the GUI and came back essentially the same size. Below the terrain's own rounding
+there is no entropy left either (next section). The only remaining lever is a coarser
+rounding, and that is a modeling decision, not a storage one.
+
+#### Terrain rounding is a user setting, and it is a modeling parameter
+
+RAS Mapper's **New Terrain Layer** dialog has a `Rounding (Precision)` dropdown —
+1/100, 1/1000, 1/8, 1/16, 1/32, 1/64, 1/128, 1/1024 — applied when RAS writes its own
+raster. RAS **defaults to 1/32 ft**, but that is only a default and **not one of the
+terrains on disk uses it** — every one was set deliberately. Measure, never assume.
+
+Measured across the models on disk (2026-09-14), every value exactly on the stated grid:
+
+| terrain | rounding | distinct values |
+|---|---|---|
+| test fixture `Terrain.Terrain` | **1/16 ft** | 1,636 |
+| Hillside `02_Surveyed_Channel` — *both* its input rasters | **1/64 ft** | 1,788 / 19,618 |
+| Hillside `01_LiDAR_rounding` | 1/128 ft | 39,226 |
+
+One terrain rounds all of its inputs to the same grid, so the setting reads back consistently
+across a multi-raster terrain.
+
+**It is not just a storage choice — too coarse degrades the solution.** On the test fixture
+the user tried **1/8 ft and got WSE errors**, and settled on 1/16; Hillside runs at 1/64. So
+a terrain's precision is a parameter to record with the model, not an implementation detail,
+and coarsening it to save disk is not free.
+
+**RAS does not store the setting anywhere.** The terrain `.hdf` carries per-tile
+`Maximum Cell-Value` / `Minimum Cell-Value` and nothing about rounding, so the only way to
+recover it is to test the values against dyadic grids (`all(v / 2**-k) is integral`).
+
+**Measure it with a FULL read.** A decimated read (`rasterio.read(out_shape=...)` smaller
+than the raster) is served from the internal overviews, whose averaged pixels sit off-grid
+and report a far finer quantum than the data really has — that mistake made the Hillside
+LiDAR raster look like 1/2048 when it is 1/64.
+
+Terrain precision propagates straight into cell minimum elevations and volume tables — see
+**Cell min/max are EFFECTIVE ground** — which is why a re-import at a different rounding
+changes results and needs a re-run.
+
+### When to use this instead of RAS Mapper's Horizontal
+
+**On a flat, finely-meshed area, use RAS Mapper's `Horizontal` and do not use this module.**
+That is the conclusion from the Hillside `Interior` measurements, and it held against the
+module's own author-bias, so state it plainly to anyone who asks.
+
+Measured on p15, `Interior` (the leveed interior drainage area) against `RockCr`:
+
+| | `Interior` | `RockCr` |
+|---|---|---|
+| median cell relief | **4.1 ft** (p25 2.9, p75 6.9) | 40.4 ft |
+| median cell size | 200 ft | 400 ft |
+| WSE step between hydraulically joined neighbours | **median 0.028 ft** (p90 0.48, p99 1.27) | median 0.566 ft (p90 3.63) |
+
+The stair-step horizontal mode produces *is* that WSE step, so on `Interior` it is a third of
+an inch and invisible. Over the 53.6M pixels wet in both, this module and `Horizontal` differ
+by **mean +0.0010 ft, rms 0.095 ft**, with only 3.4% of pixels past 0.25 ft — below any
+threshold a decision turns on.
+
+And `Horizontal` is the **better** volume performer per cell there, which is not a surprise:
+horizontal is what the volume-elevation curve assumes, so any interpolation moves volume
+between cells and buys nothing where the surface is already flat.
+
+| `Interior`, vs RAS's own storage | total | per-cell median | p5 / p95 | cells off >25% |
+|---|---|---|---|---|
+| `Horizontal` | −2.19% | −3.01% | −17.9% / −0.4% | **3.3%** |
+| this module | −2.19% | −2.60% | −60.6% / +12.4% | 17.9% |
+
+One more argument, specific to a **maximum** map: it is a per-cell envelope, not a surface
+that ever existed. On `Interior`, **9.1%** of joined adjacent pairs peak more than 30 minutes
+apart, 5.6% more than 2 hours, 2.9% more than 6 hours (max 11.98 h), so interpolating between
+two cell maxima blends two different instants. `RockCr` is far more synchronous (0.4% past
+30 min), so this argument cuts specifically toward horizontal on the flat interior.
+
+**Where this module earns its place** is the opposite regime — steep, coarse cells, where
+`Sloping (Cell Corners)` maps +117% of the water RAS stored and `Horizontal` is visibly
+blocky. It delivers horizontal's accuracy without the cell-boundary steps.
+
+**Watch the fringe either way.** The two renderings disagree on wet/dry over about 3% of the
+`Interior` wet area (1.74M px wet in horizontal and dry here, 1.39M the other way). Irrelevant
+for area-wide mapping; it can matter if the grid feeds structure-level work such as
+first-floor estimation, where one building at the waterline could flip.
+
+**Scope: 2D flow areas only.** There is no 1D cross-section mapping here — for 1D use the
+steady XS readers and `geometry/xs_interp.py`.
+
+### Comparing two plans — same mesh, or not
+
+**Same mesh is the normal case and nothing special happens.** `same_mesh` compares area
+names, cell counts, and `Cells Center Coordinate` / `Cells Minimum Elevation` /
+`Cells Surface Area` / `FacePoints Coordinate` / `Faces Minimum Elevation` element for
+element. Within a **tolerance, not exactly**: two geometries written out separately differ
+in the last bits even when the mesh was never touched — Hillside g01 vs g03 disagree by at
+most **4e-9 ft** across all five arrays and 4107 cells.
+
+**Cross-mesh works because the grid comes from the terrain, not the mesh.** Two plans
+exported against the same terrain with the same `bounds` land on an identical grid whatever
+their meshes look like, so `difference_rasters` subtracts them exactly with nothing
+resampled. Two things to get right:
+
+- **Union the bounds across every plan** (`area_bounds([a, b])`). Taking one plan's bounds
+  clips wherever the other reaches further. This was a latent bug in the runner even on a
+  single mesh.
+- **A per-cell comparison between the plans stops being meaningful** — they are not the
+  same cells. `check_cell_volumes` is still valid per plan.
+
+**"No mesh" is treated as "dry"** — the user's decision, 2026-09-14. Where one plan's mesh
+covers ground the other's does not, `treat_dry_as_zero=True` reports the newly-wet depth as
+a real increase, on the reasoning that a mesh is typically extended *because* water was seen
+creeping into new ground. Near the water's edge part of any cross-mesh difference is the
+change in cell size rather than a change in water; that is a caveat to state, not something
+the code can separate. A companion raster flagging where the two footprints differ was
+considered and dropped — **RAS Mapper already offers that**.
+
+The differing-mesh test fixture is `Model.p07` (g05): `Interior` refined 59 to 196 cells over
+the same footprint, `Watershed` refined *and extended* 59 to 386 cells over an extra
+1,431,334 ft**2. One fixture, both cases.
+
+### The terrain CRS guard
+
+`export_wse_depth` refuses a terrain whose CRS differs from the model's. The reference is the
+plan HDF's own root `Projection` attribute — no `.prj` hunting, no `.rasmap` parse.
+
+The comparison must be **semantic** (`pyproj.CRS.equals`), never string equality: RAS writes
+the ESRI dialect (`NAD_1983_StatePlane_Missouri_West_FIPS_2403`) and GDAL the EPSG-style name
+(`NAD83 / Missouri West`) for the same system. Verified no false positive against Hillside's
+own terrain `.vrt` and a RAS Mapper result export.
+
+It exists because the failure is otherwise **silent**: a terrain in the wrong CRS usually
+still overlaps the mesh, so the "does not overlap" check never fires and every depth is wrong
+by the offset. The motivating case is real — NAD83(HARN) vs NAD83(2011) on the PCA model,
+about 3.5 ft apart. `allow_crs_mismatch=True` overrides; a missing CRS on either side warns
+and skips, since that is absent metadata rather than evidence of a mismatch.
+
+There is deliberately **no** guard comparing the terrain path against the geometry's own
+`Terrain Filename` attribute — pointing the tool at a different terrain (a RAS Mapper export
+with modifications baked in, a clipped subset) is a legitimate workflow.
+
+### Runner
+
+`Scripts/Results_WSE_Depth_Maps/map_results.py` + a YAML config. 485 Mpx at 1 ft over the
+full Hillside mesh takes ~22 s per plan; everything is tiled, nothing holds the full grid.
+
 ## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
 
 Translates cross-section GIS cut-line polylines along their own alignment while

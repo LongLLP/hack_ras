@@ -13,6 +13,12 @@ Four items are open. In rough priority:
 2. **Interior flood-volume peak (E2) and the analysis script (E4)** — §E below.
 3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
 
+**Closed 2026-09-14:** §F cross-mesh result comparison (built — see below). The
+`Ditch_fix_RS_9580` GUI-visibility question was closed the same day as a RAS
+Mapper display bug the user has chosen to leave alone; the measurement proving
+the modification is live is in `ai_context.md`, and the operational conclusion —
+never use the GUI to rule terrain modifications out — stands.
+
 **Built 2026-08-27:** `read_pump_curves` / `pump_station_capacity` (E1's data
 layer), `read_node_rims`, `read_node_max_wse`, `read_volume_accounting` /
 `list_volume_accounting`, and `PathProfile.surcharge_margin` (E3a complete). What
@@ -165,6 +171,65 @@ build in from the start:
 
 The existing `Scripts/Pipe_Profile_Comparison` workbook machinery (sheets, chart
 styling, delta blocks) carries over; only the comparison axis changes.
+
+---
+
+### F. Cross-mesh result comparison (`gis/wse_surface.py`) — DONE 2026-09-14
+
+Requested by the user: compare two plans whose geometries do not share a mesh.
+
+**Most of it already worked.** The output grid is snapped to the **terrain**, not
+to the mesh, so two plans exported against the same terrain with the same forced
+`bounds` land on an identical grid whatever their meshes look like, and
+`difference_rasters` accepts them. What was actually built:
+
+* **`same_mesh(hdf_a, hdf_b, areas=None, atol=1e-6)`** — do two plans compute on
+  the same mesh, cell for cell? Compares area names, cell counts, and five arrays
+  (`_MESH_IDENTITY_KEYS`) element for element. Within a tolerance, not exactly:
+  two geometries written out separately differ in the last bits even when the mesh
+  was never touched (Hillside g01 vs g03, worst 4e-9 ft over 4107 cells). Used to
+  report which regime a run is in, and to gate anything that assumes shared cell
+  indexing — a per-cell comparison between plans is meaningless when the cells are
+  not the same cells.
+* **`area_bounds` now takes several HDFs and unions them.** The runner was passing
+  only the FIRST plan's bounds, which silently clipped wherever another plan's mesh
+  reached further. That was a latent bug even on one mesh.
+* **`export_wse_depth(allow_crs_mismatch=False)`** — the CRS guard, below.
+
+**"No mesh" is treated as "dry", by the user's decision** (2026-09-14): when one
+plan's mesh covers ground the other's does not, the difference there is reported as
+a real change. The reasoning is that a mesh is typically extended *because* water
+was seen creeping into new ground, so the earlier run's absence there is a genuine
+"no water", not missing information. That decision removed the companion
+mesh-footprint mask this item originally scoped — RAS Mapper already offers a way to
+see where the footprints differ, so hack_ras does not duplicate it.
+
+Tests: `tests/test_wse_surface.py` gained `TestSameMesh`, `TestCrossMeshBounds`,
+`TestCrossMeshDifference` (19 with the CRS guard below). The differing-mesh fixture
+is `Model.p07` / `Model.g05` — see the fixture table in `dev_rules.md`.
+
+### G. Terrain CRS guard — DONE 2026-09-14
+
+`export_wse_depth` refuses a terrain raster whose CRS differs from the model's.
+The reference is the plan HDF's own root `Projection` attribute, so there is no
+`.prj` hunting and no `.rasmap` parse.
+
+The comparison is semantic (`pyproj.CRS.equals`), not string equality, because RAS
+writes the ESRI dialect (`NAD_1983_StatePlane_Missouri_West_FIPS_2403`) and GDAL the
+EPSG-style name (`NAD83 / Missouri West`) for the same system — verified no false
+positive against Hillside's own terrain `.vrt` and a RAS Mapper result export.
+
+It exists because this failure is silent: a terrain in the wrong CRS usually still
+overlaps the mesh, so the "does not overlap" check never fires and every depth is
+wrong by the offset between the two systems. The case that motivated it is real —
+NAD83(HARN) vs NAD83(2011) for one state plane zone, about 3.5 ft apart on the PCA
+model. Raises by default; `allow_crs_mismatch=True` overrides; a missing CRS on
+either side warns and skips rather than failing, since that is absent metadata, not
+evidence of a mismatch.
+
+A companion guard comparing the terrain path against the geometry's own
+`Terrain Filename` attribute was **considered and declined by the user** — pointing
+the tool at a deliberately different terrain is a legitimate workflow.
 
 ---
 

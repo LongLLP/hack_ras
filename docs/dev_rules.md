@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 786 passing tests (plus any added in the current
+All tests must pass. The baseline is 818 passing tests (plus any added in the current
 session), and 1 skipped by design — a 5.0.3 fixture HDF that has no culvert table.
 If a new test is added, the new count becomes the baseline.
 
@@ -243,6 +243,43 @@ tests/data/
                                            reports no unlisted results; the tests that
                                            need a flagged plan still make one by calling
                                            remove_plans_from_rasmap on a temp copy.
+    Model.p07 / .p07.hdf / .g05 / .g05.hdf  ← DIFFERING-MESH fixture, computed by the
+                                           user in the RAS 7.0 GUI (2026-09-14) so the
+                                           cross-mesh comparison has a real counterexample.
+                                           g05 REFINES Interior (59 -> 196 cells, 207 ft ->
+                                           100 ft) over the SAME footprint, and both refines
+                                           AND EXTENDS Watershed (59 -> 386 cells) over an
+                                           extra 1,431,334 ft2 that g02 never covered — so
+                                           one fixture carries both the refinement case and
+                                           the changed-extent case. Uses u02 (shared with
+                                           p02/p04/p06) and is the project's Current Plan.
+                                           test_wse_surface.py's TestSameMesh /
+                                           TestCrossMeshBounds / TestCrossMeshDifference
+                                           depend on g02-vs-g05 differing and on g05 reaching
+                                           further north; test_plan_ops_fixture and
+                                           test_flow_ops_fixture pin p07 in their inventories.
+    Terrain/Terrain.Terrain.tif / .vrt / .hdf  ← the model's terrain, 1 ft, 3196x1992,
+                                           NAD83 / Missouri West, 6.9 MB. Added 2026-09-14 —
+                                           previously omitted only to keep the fixture small,
+                                           which left export_wse_depth with nothing to
+                                           subtract. Covers every mesh in g02..g05 with a
+                                           uniform ~50 ft buffer. BUILT BY RAS MAPPER, and
+                                           that is the point: an earlier attempt to shrink it
+                                           by clipping the raster with rasterio produced a
+                                           terrain RAS Mapper could not display (see the
+                                           GeoTIFF note under "Writing rasters RAS Mapper can
+                                           read"). Imported at 1/16 ft ROUNDING — a user
+                                           choice in the New Terrain Layer dialog, picked
+                                           during that same size-reduction work; 1/8 was
+                                           tried first and produced WSE errors. Hillside
+                                           runs at 1/64 and RAS itself defaults to 1/32,
+                                           so 1/16 is a deliberate fixture setting, not any
+                                           kind of default. The model was re-run against
+                                           this terrain, so cell min elevations and volume
+                                           tables differ slightly from earlier revisions;
+                                           mesh SHAPE
+                                           is unchanged (59 cells per area in g02/g03/g04,
+                                           196 + 386 in g05).
     Terrain/_ESRI projection StatePlane.prj  ← CRS-resolution tests (find_crs_prj via rasmap;
                                            ESRI-prj-rejection test)
     Features/

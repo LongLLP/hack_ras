@@ -7,9 +7,9 @@ Project File:  C:\Users\2161jap\Desktop\hack_ras_local\Model_Hillside\2D culvert
 Project Name:  Small_Model
  
  
-Plan Name:     Test Model
+Plan Name:     Test Model new mesh
  
-Short ID:      Test Model
+Short ID:      Test Model new mesh
  
 
 Starting Time:   01Jan2025 1000
@@ -25,7 +25,7 @@ Ending Time:     01Jan2025 1400
                 #                                              #
                 #          HEC-RAS 7.0 April 2026              #
                 #                                              #
-                #             14SEP26 at 14:43:19              #
+                #             14SEP26 at 14:47:32              #
                 #                                              #
                 ################################################
                 
@@ -51,8 +51,8 @@ Ending Time:     01Jan2025 1400
            *******    ************      **********      **********     ***********           *****   *************   *************   *************
  
  
-          Interior          0.1530           189.0           321.9           132.4         -0.6502          0.2019           2.839          0.9778
-         Watershed           2.505           16.95           782.2           767.8        0.000398    0.0000507088           83.47           24.69
+          Interior    0.0000146281           351.9           559.7           207.7        -0.06465         0.01155           2.244          0.7730
+         Watershed          0.2521           83.32           863.8           780.9          0.1143         0.01322           147.5           24.11
  
  
  
@@ -65,25 +65,25 @@ Ending Time:     01Jan2025 1400
            *******    ************      **********      **********     ***********           *****   *************
  
  
-              Base         0.02112           46.86           132.4           86.69           1.110          0.8385
+              Base    0.0000084705           29.03           190.5           161.5         0.03775         0.01981
 
 
 
                  ***   Total Volume Accounting (for the entire model) in Acre Feet   ***
 
-Total Boundary Flux of Water In            785.1
-Total Boundary Flux of Water Out           465.6
+Total Boundary Flux of Water In            848.2
+Total Boundary Flux of Water Out           256.1
 
-Starting Volume                            2.679
-Ending Volume                              252.8
+Starting Volume                           0.2521
+Ending Volume                              464.3
 
-Precipitation Excess (Acre Feet)           86.31
-Precipitation Excess (inches)              13.73
+Precipitation Excess (Acre Feet)           149.8
+Precipitation Excess (inches)              16.60
 
 
                              Error   Percent Error
                              *****   *************
-                            0.5246         0.06659
+                            0.8355         0.09848
 
 
 

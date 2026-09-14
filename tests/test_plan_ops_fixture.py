@@ -73,13 +73,14 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
             {"p02": "Test Model",
              "p04": "Test higher IA and nvals",
              "p05": "Continue higher IA and nvals",
-             "p06": "Fingerprint"},
+             "p06": "Fingerprint",
+             "p07": "Test Model new mesh"},
         )
 
     def test_full_sequence_on_ras_authored_files(self):
-        # fixture sanity: prj lists 5 plans but p03/u03 files are gone
+        # fixture sanity: prj lists 6 plans but p03/u03 files are gone
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p02", "p03", "p04", "p05", "p06"])
+                         ["p02", "p03", "p04", "p05", "p06", "p07"])
         self.assertFalse(os.path.exists(self.path("Model.p03")))
         self.assertFalse(os.path.exists(self.path("Model.u03")))
         self.assertIn("Breach Start=True,756.8,,,False,,,0",
@@ -94,9 +95,9 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         report = sync_prj(self.project)
         self.assertEqual(report["plan"], ["p03"])
         self.assertEqual(report["unsteady"], ["u03"])
-        self.assertIsNone(report["current_plan"])  # p05 still exists
+        self.assertIsNone(report["current_plan"])  # p07 still exists
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p02", "p04", "p05", "p06"])
+                         ["p02", "p04", "p05", "p06", "p07"])
 
         # --- bulk renumber: chain p02->p01, p04->p02, p05->p03 ---
         # p06 is deliberately left out of the map: it must ride along untouched.
@@ -122,11 +123,14 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
                       self.read("Model.u04"))
         # prj followed (Current Plan was p05); p06 untouched by the renumber
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p01", "p02", "p03", "p06"])
+                         ["p01", "p02", "p03", "p06", "p07"])
         self.assertTrue(os.path.isfile(self.path("Model.p06")))
         self.assertTrue(os.path.isfile(
             self.path("Model.p06.01JAN2025 1400.rst")))
-        self.assertIn("Current Plan=p03", self.read("Model.prj"))
+        # Current Plan is p07, which this map does not touch, so the pointer
+        # stays put. That it FOLLOWS a renumbered plan is pinned by
+        # test_plan_ops.test_updates_current_plan_when_it_moves.
+        self.assertIn("Current Plan=p07", self.read("Model.prj"))
         # rasmap tokens remapped; old numbers gone
         self.assertGreater(report["rasmap_tokens"], 0)
         rasmap = self.read("Model.rasmap")
@@ -139,7 +143,7 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         # --- housekeeping passes are clean no-ops now ---
         self.assertEqual(sync_prj(self.project)["plan"], [])
         self.assertEqual(sort_prj_entries(self.project)["plan"],
-                         ["p01", "p02", "p03", "p06"])
+                         ["p01", "p02", "p03", "p06", "p07"])
 
         # --- clone the breach plan: WS Elev trigger -> no warning ---
         with self.assertNoLogs("hack_ras.project.plans", level="WARNING"):
@@ -171,7 +175,11 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         self.assertNotIn("Unsteady File=u04", text)
         self.assertIn("Geom File=g03", text)
         self.assertEqual(result["warnings"], [])
-        self.assertEqual(result["current_plan"], ("p03", "p01"))
+        # Current Plan is p07 and p03 is not it, so nothing is repointed.
+        # The repoint-on-delete path is pinned by
+        # test_plan_ops.TestDeletePlan.test_current_plan_repointed.
+        self.assertIsNone(result["current_plan"])
+        self.assertIn("Current Plan=p07", self.read("Model.prj"))
         # rasmap: the deleted plan's RASPlan/RASResults layers are removed, and
         # the unused flow's (u04) EventConditions layer with it
         self.assertEqual(result["rasmap_removed"]["plans"], ["p03"])
@@ -198,8 +206,8 @@ class TestPlanOpsOnRealModel(unittest.TestCase):
         self.assertEqual(len(result["warnings"]), 1)
         self.assertIn("u04", result["warnings"][0])
         self.assertFalse(os.path.exists(self.path(P04_RST)))
-        self.assertIsNone(result["current_plan"])  # p05 was current? no: p05
-        self.assertIn("Current Plan=p05", self.read("Model.prj"))
+        self.assertIsNone(result["current_plan"])  # p07 is current, untouched
+        self.assertIn("Current Plan=p07", self.read("Model.prj"))
 
 
 if __name__ == "__main__":

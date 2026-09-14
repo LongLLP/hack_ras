@@ -2,7 +2,7 @@
                                               HEC-RAS - River Analysis System
  
  
-Project File:  C:\Users\2161jap\Desktop\hack_ras_local\hack_ras\tests\data\2D culvert bridge levee precip pipes\Model.prj
+Project File:  C:\Users\2161jap\Desktop\hack_ras_local\Model_Hillside\2D culvert bridge levee precip pipes\Model.prj
  
 Project Name:  Small_Model
  
@@ -25,7 +25,7 @@ Ending Time:     01Jan2025 1600
                 #                                              #
                 #          HEC-RAS 7.0 April 2026              #
                 #                                              #
-                #             17JUL26 at 18:57:57              #
+                #             14SEP26 at 14:47:10              #
                 #                                              #
                 ################################################
                 
@@ -51,8 +51,8 @@ Ending Time:     01Jan2025 1600
            *******    ************      **********      **********     ***********           *****   *************   *************   *************
  
  
-          Interior          0.7567           1.453           9.741           9.055        0.009756         0.09293           5.866           2.021
-         Watershed           9.330           9.166           5.708           5.873        0.001096        0.007285           5.708           1.688
+          Interior          0.7553           1.419           9.732           9.079         0.01061          0.1011           5.866           2.021
+         Watershed           9.406           9.255           5.708           5.860        0.001150        0.007610           5.708           1.688
  
  
  
@@ -65,17 +65,17 @@ Ending Time:     01Jan2025 1600
            *******    ************      **********      **********     ***********           *****   *************
  
  
-              Base          0.1026          0.1100           9.059           9.052        0.000267        0.002944
+              Base          0.1038          0.1105           9.084           9.077        0.000499        0.005495
 
 
 
                  ***   Total Volume Accounting (for the entire model) in Acre Feet   ***
 
 Total Boundary Flux of Water In            11.57
-Total Boundary Flux of Water Out           5.873
+Total Boundary Flux of Water Out           5.860
 
-Starting Volume                            10.19
-Ending Volume                              10.73
+Starting Volume                            10.26
+Ending Volume                              10.78
 
 Precipitation Excess (Acre Feet)           11.57
 Precipitation Excess (inches)              1.842
@@ -83,7 +83,7 @@ Precipitation Excess (inches)              1.842
 
                              Error   Percent Error
                              *****   *************
-                           0.01187         0.05455
+                           0.01297         0.05940
 
 
 
