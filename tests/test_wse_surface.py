@@ -490,21 +490,32 @@ class TestCrossMeshDifference(unittest.TestCase):
         self.assertGreater(nz, ns,
                            "dry-as-zero must cover strictly more ground")
 
-    def test_mismatched_grids_are_refused(self):
-        """A differently-bounded export must not silently mis-difference."""
+    def test_differently_bounded_exports_difference_their_overlap(self):
+        """A differently-bounded export shares the lattice, not the extent."""
         other = export_wse_depth(
             P02, TERRAIN, self.tmp, wse_type="Maximum", prefix="shifted",
             bounds=area_bounds(P02), volume_check=False)
         import rasterio
         with rasterio.open(other["depth_path"]) as o, \
              rasterio.open(self.res["p07"]["depth_path"]) as b:
-            if (o.transform == b.transform
-                    and (o.width, o.height) == (b.width, b.height)):
+            if (o.width, o.height) == (b.width, b.height):
                 self.skipTest("the two bounds happen to produce one grid")
-        with self.assertRaises(ValueError):
-            difference_rasters(other["depth_path"],
-                               self.res["p07"]["depth_path"],
-                               os.path.join(self.tmp, "nope.tif"))
+            # The grid comes from the terrain, so a different `bounds` moves the
+            # window without moving the lattice: same pixel size, whole-pixel
+            # offset.  That is precisely what makes the overlap answerable.
+            self.assertEqual(o.transform.a, b.transform.a)
+            off = (b.transform.c - o.transform.c) / o.transform.a
+            self.assertAlmostEqual(off, round(off), places=6)
+            small = min(o.width, b.width), min(o.height, b.height)
+
+        out = difference_rasters(other["depth_path"],
+                                 self.res["p07"]["depth_path"],
+                                 os.path.join(self.tmp, "partial.tif"))
+        with rasterio.open(out) as src:
+            # Cropped to the shared ground, never larger than either input.
+            self.assertLessEqual(src.width, small[0])
+            self.assertLessEqual(src.height, small[1])
+            self.assertGreater(src.read(1, masked=True).count(), 0)
 
 
 @unittest.skipUnless(HAS_GIS, "requires h5py / shapely / rasterio extras")
@@ -925,6 +936,130 @@ class TestPerSourceExport(unittest.TestCase):
         vals = np.unique(wse[wse != nodata])
         self.assertLess(len(vals), 200,
                         "a flat-per-cell surface should take few distinct values")
+
+
+@unittest.skipUnless(HAS_GIS, "requires h5py / shapely / rasterio extras")
+class TestGridMatchTolerance(unittest.TestCase):
+    """Two producers of one grid disagree in the last ULP of the pixel size.
+
+    RAS Mapper writes the Hillside s04 LiDAR tile at 3.2808333333333586 ft and
+    `export_wse_depth_per_source` at 3.2808333333333555 — the same 1 m pixel,
+    reached by different arithmetic.  A bit-exact guard refuses to difference
+    the two, which is a false negative: the worst displacement that 3e-15 ft
+    causes is 3e-11 ft over the 10,888 rows, versus a 3.28 ft pixel.
+    """
+
+    PIX = 3.2808333333333586
+    ORIGIN = (2756852.551769557, 1106680.3564498627)
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _write(self, name, pixel, values):
+        import rasterio
+        path = os.path.join(self.tmp, name)
+        transform = Affine(pixel, 0, self.ORIGIN[0], 0, -pixel, self.ORIGIN[1])
+        with rasterio.open(path, "w", driver="GTiff", height=values.shape[0],
+                           width=values.shape[1], count=1, dtype="float32",
+                           nodata=-9999.0, crs="EPSG:3703",
+                           transform=transform) as dst:
+            dst.write(values.astype("float32"), 1)
+        return path
+
+    def test_last_ulp_difference_is_tolerated(self):
+        import rasterio
+        a = self._write("a.tif", self.PIX, np.full((8, 8), 1.0))
+        b = self._write("b.tif", np.nextafter(np.nextafter(self.PIX, 0), 0),
+                        np.full((8, 8), 3.0))
+        with rasterio.open(a) as sa, rasterio.open(b) as sb:
+            self.assertNotEqual(sa.transform, sb.transform,
+                                "fixture must actually differ bit for bit")
+        out = os.path.join(self.tmp, "d.tif")
+        difference_rasters(a, b, out)
+        with rasterio.open(out) as src:
+            np.testing.assert_allclose(src.read(1), 2.0)
+
+    def test_a_shift_of_a_hundredth_of_a_pixel_is_refused(self):
+        """The tolerance must not grow into accepting a real misalignment."""
+        a = self._write("a.tif", self.PIX, np.full((8, 8), 1.0))
+        b = self._write("b.tif", self.PIX * (1 + 1e-2 / 8), np.full((8, 8), 3.0))
+        with self.assertRaises(ValueError):
+            difference_rasters(a, b, os.path.join(self.tmp, "nope.tif"))
+
+    def test_a_different_shape_differences_the_overlap(self):
+        """Same lattice, different extent: crop to the ground both cover.
+
+        The pixels that overlap correspond one for one, so nothing is invented
+        by differencing them — and the column the wider raster alone covers has
+        no counterpart to difference against, so it is simply absent.
+        """
+        import rasterio
+        a = self._write("a.tif", self.PIX, np.full((8, 8), 1.0))
+        b = self._write("b.tif", self.PIX, np.full((8, 9), 3.0))
+        out = os.path.join(self.tmp, "d.tif")
+        difference_rasters(a, b, out)
+        with rasterio.open(out) as src, rasterio.open(a) as sa:
+            self.assertEqual((src.width, src.height), (8, 8))
+            self.assertEqual(src.transform, sa.transform)
+            np.testing.assert_allclose(src.read(1), 2.0)
+
+    def test_an_offset_extent_differences_the_overlap(self):
+        """The real case: two runs on one terrain, different mesh unions.
+
+        Origins a whole number of pixels apart, so the lattices interlock and
+        only the shared rectangle can be — and is — answered.
+        """
+        import rasterio
+        from affine import Affine
+        a = self._write("a.tif", self.PIX, np.full((8, 8), 1.0))
+        path = os.path.join(self.tmp, "b.tif")
+        # b starts 3 pixels east and 2 south of a, so they share a 5x6 box.
+        t = Affine(self.PIX, 0, self.ORIGIN[0] + 3 * self.PIX,
+                   0, -self.PIX, self.ORIGIN[1] - 2 * self.PIX)
+        with rasterio.open(path, "w", driver="GTiff", height=8, width=8, count=1,
+                           dtype="float32", nodata=-9999.0, crs="EPSG:3703",
+                           transform=t) as dst:
+            dst.write(np.full((8, 8), 3.0, dtype="float32"), 1)
+        out = os.path.join(self.tmp, "d2.tif")
+        difference_rasters(a, path, out)
+        with rasterio.open(out) as src:
+            self.assertEqual((src.width, src.height), (5, 6))
+            self.assertAlmostEqual(src.transform.c,
+                                   self.ORIGIN[0] + 3 * self.PIX, places=6)
+            np.testing.assert_allclose(src.read(1), 2.0)
+
+    def test_disjoint_rasters_are_refused(self):
+        """Same lattice but no shared ground — there is nothing to answer."""
+        import rasterio
+        from affine import Affine
+        a = self._write("a.tif", self.PIX, np.full((8, 8), 1.0))
+        path = os.path.join(self.tmp, "far.tif")
+        t = Affine(self.PIX, 0, self.ORIGIN[0] + 900 * self.PIX,
+                   0, -self.PIX, self.ORIGIN[1])
+        with rasterio.open(path, "w", driver="GTiff", height=8, width=8, count=1,
+                           dtype="float32", nodata=-9999.0, crs="EPSG:3703",
+                           transform=t) as dst:
+            dst.write(np.full((8, 8), 3.0, dtype="float32"), 1)
+        with self.assertRaises(ValueError):
+            difference_rasters(a, path, os.path.join(self.tmp, "nope.tif"))
+
+    def test_a_half_pixel_offset_is_refused(self):
+        """Interleaved lattices: every pixel straddles four of the other."""
+        import rasterio
+        from affine import Affine
+        a = self._write("a.tif", self.PIX, np.full((8, 8), 1.0))
+        path = os.path.join(self.tmp, "half.tif")
+        t = Affine(self.PIX, 0, self.ORIGIN[0] + 0.5 * self.PIX,
+                   0, -self.PIX, self.ORIGIN[1])
+        with rasterio.open(path, "w", driver="GTiff", height=8, width=8, count=1,
+                           dtype="float32", nodata=-9999.0, crs="EPSG:3703",
+                           transform=t) as dst:
+            dst.write(np.full((8, 8), 3.0, dtype="float32"), 1)
+        with self.assertRaises(ValueError):
+            difference_rasters(a, path, os.path.join(self.tmp, "nope.tif"))
 
 
 if __name__ == "__main__":

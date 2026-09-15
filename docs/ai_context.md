@@ -2088,7 +2088,8 @@ difference_rasters(a_wse,   b_wse,   out, treat_dry_as_zero=False)  # WSE change
 | `clone_source_vrt(terrain_vrt, out_vrt, {src: replacement})` | path | Clone a terrain `.vrt` with each source swapped for another raster on the same full grid. Keeps `SrcRect`/`DstRect` bit for bit; strips terrain stats and histograms |
 | `area_bounds(hdf_paths, areas=None)` | `(x0,y0,x1,y1)` | Union of the mesh perimeter boxes. Takes one path or several — **pass every plan being compared**, or a differing mesh is silently clipped |
 | `same_mesh(hdf_a, hdf_b, areas=None, atol=1e-6)` | `bool` | Do two plans compute on the same mesh, cell for cell? Compares area names, cell counts and five arrays within a tolerance |
-| `difference_rasters(a, b, out, treat_dry_as_zero=True)` | path | `b - a`. Raises unless both are on the identical grid |
+| `difference_rasters(a, b, out, treat_dry_as_zero=True)` | path | `b - a` over the ground both cover. Needs a shared pixel lattice (`grid_overlap`), **not** equal extents — the output is the intersection, cropped. Raises on different resolutions, sub-pixel offsets, or disjoint inputs |
+| `grid_overlap(open_a, open_b, tol_px=1e-6)` | `(Window, Window)` or `None` | The window of each raster covering the ground both describe. `None` when they cannot be compared without resampling. Takes **open datasets**, not paths |
 | `check_cell_volumes(hdf, area, wse, mapped)` | `DataFrame` | Mapped volume per cell vs `interpolate_cell_volume` |
 
 ### A terrain `.vrt` read as one raster returns the WRONG source
@@ -2147,9 +2148,10 @@ so does this. A WSE raster that runs past the water's edge is nobody's intent.
 
 Two things account for the pixels RAS writes and this does not (30–38k per plan, ~0.5%):
 
-* **`depth_tol`.** RAS writes any positive depth — its smallest on p09 is 0.000977 ft,
-  float32 granularity rather than a threshold. At `depth_tol=0.01` this drops 25,669 px
-  on p09, **100% of them 0.0099 ft deep or less**. `depth_tol=0` matches RAS's extent.
+* **`depth_tol`**, which **defaults to 0.0** and so matches RAS's extent. RAS writes any
+  positive depth — its smallest on p09 is 0.000977 ft, float32 granularity rather than a
+  threshold. Raising it to 0.01 drops 25,669 px on p09, **100% of them 0.0099 ft deep or
+  less**: a display threshold, better applied in GIS where it costs no re-map.
 * **The holing rule**, deliberately. A lower-priority source is holed wherever a
   higher-priority one has data; RAS leaves a partial fringe (4,826 px on p09) that its
   own `.vrt` then covers with the higher-priority tile anyway.
@@ -2158,6 +2160,40 @@ Do not build the hole by letting GDAL decimate the higher-priority mask into eac
 a boundless `out_shape` read of the 1 ft c02 source into 3.28 ft tiles over-masked
 30,891 px whose centres lie nowhere near c02, dropping 0.58% of the water. The mask is
 held in memory and indexed by computed row/column instead.
+
+### Matching grids: one lattice, not one extent
+
+`grid_overlap` decides whether two rasters can be differenced, and it asks only the two
+questions that matter: **same pixel size**, and **origins a whole number of pixels apart**.
+Given both, the overlapping pixels correspond one for one and subtracting them invents
+nothing. It returns a window into each — both rasters in full when they are the same grid,
+so it subsumes an equality test — and `difference_rasters` writes the intersection.
+
+Neither test is bit-exact, and that matters. RAS Mapper writes the Hillside s04 tile at
+pixel 3.2808333333333586 ft and `export_wse_depth_per_source` at 3.2808333333333555 — the
+same 1 m cell by different arithmetic. 3e-15 ft, accumulating to 3e-11 ft across the
+10,888 rows, in a 3.28 ft pixel. A bit-exact guard refused it, so a RAS-Mapper-vs-hack_ras
+difference could not be computed at all. `tol_px` sits five orders above that round-off
+and six below the one whole pixel a real misalignment moves a corner.
+
+**Extents need not match**, and requiring them was the second false negative. Two plans
+mapped in separate runs on one terrain land on the same lattice but cover the union of
+whatever meshes were in each run: on the test fixture, p02 (g02) and p07 (g05) come out
+3101x1559 and 3101x1897, origins exactly 338 pixels apart. The grid comes from the
+terrain, so a mesh difference moves the window, never the lattice.
+
+What still raises: different resolutions (1 ft vs 3.28 ft — different samples of the same
+ground, no window aligns them), a sub-pixel offset (every pixel straddles four of the
+other), and disjoint inputs. All three need resampling, which would put invented values
+into a depth map where nothing distinguishes them from real water.
+
+**Across layouts, difference WSE and not Depth.** NoData means *dry* in a single-grid
+export but *another tile covers this* in one tile of a per-source export, and
+`treat_dry_as_zero` cannot tell them apart. Same layout on both sides and it cancels;
+across layouts it does not. Measured 2026-09-15, the merged 1 ft export against the
+`.vrt` run's c02 tile: as Depth, min -16.85 ft, mean -1.975 ft, 11.28M px "changed", all
+of it the c02 tile declining to describe ground s04 describes; as WSE, **243,228 px,
+0 changed, max 0.00 ft** — the two terrains agree exactly.
 
 Going the other way, **RAS Mapper drops one pixel this module writes**, the same one in
 all 12 plans: c02 row 3381 col 6551 (2771850.4, 1085707.3), where the c02 terrain is valid
@@ -2536,19 +2572,76 @@ Each plan writes into `out_dir\<its Short Identifier>\` — the same folder name
 uses for its own exports, so `Mapped_Results\500year\` sits beside `Current_Model\500year\`
 and the two compare file for file. **Nothing is ever written into the RAS Mapper export
 folders themselves.** A plan with no Short Identifier, or one holding a character a folder
-name cannot, falls back to the plan id rather than failing the run. Differences go to
-`out_dir\<b>_minus_<a>_<wse_type>\`.
+name cannot, falls back to the plan id rather than failing the run.
+
+**`map_results.py` only maps.** It carried a `compare:` key until 2026-09-15; that was
+removed because it could only difference two plans mapped in the *same run*, which is
+the one case that rarely matters. Differencing now lives in `diff_results.py` beside it
+— see the next section.
 
 | config key | default | |
 |---|---|---|
 | `mode` | `horizontal` | `horizontal` or `interpolated` |
 | `per_source` | `true` | one raster per terrain source + a `.vrt`, vs one grid |
-| `depth_tol` | `0.01` | the one knob that changes the wet extent against RAS Mapper |
+| `depth_tol` | `0.0` | matches RAS's wet extent exactly; raising it trims a display fringe |
 
 Timing on the full Hillside mesh, 2026-09-14: **`per_source` 115 Mpx in ~5 s per plan**,
 against ~22 s for 485 Mpx on the single 1 ft grid. The 1 m LiDAR is 11x fewer pixels when it
 is not upsampled to sit beside the 1 ft channel survey, and none of that upsampling carried
 information.
+
+### Differencing (`Scripts/Results_WSE_Depth_Maps/diff_results.py`)
+
+Separate tool, separate config. It reads **finished rasters** — no project, plan HDF or
+terrain — so either side can be a RAS Mapper export or a `map_results.py` export, in any
+combination, and a run costs seconds. Each comparison is `[sim1, sim2]` and writes
+`sim2 - sim1`. Endpoints are `tag:folder` against named roots, or a path; a folder is
+globbed for its Depth/WSE raster, which absorbs `Depth (Max).vrt` vs
+`p09_Maximum_Depth.vrt` naming without configuration.
+
+Tiles are paired **by grid**, not by name, because the two producers agree on no filename
+and on all the geometry. Three things it will not do, each deliberate: resample, collapse
+sources, or read a `.vrt` for statistics.
+
+**Dry cells.** `treat_dry_as_zero=True` (depth) counts dry as zero depth, so a pixel wet in
+only one run carries the depth that appeared (+) or went away (−). WSE cannot do that — a
+dry pixel has no elevation — so WSE differences are written only where both are wet.
+
+**The summary line applies source priority; the per-source lines do not.** Reading the
+`.vrt` for statistics reported a ras-vs-mapped max of +0.00 ft while the c02 tile held a
++12.77 ft pixel (GDAL composites last-source-wins; RAS Mapper lists highest priority
+first). But the moment a summary collapses several tiles it must drop pixels a
+higher-priority source already covers, or ground is counted twice and partly from the
+worse source: that is the difference between reporting a minimum of −15.74 ft and of
+−0.94 ft. Its mean is area-weighted, since 1 ft and 3.28 ft tiles are not equal samples.
+
+### Incremental depth is terrain-independent
+
+Measured on Hillside 2026-09-15, mapping all 12 plans twice — once on
+`02_Surveyed_Channel.vrt` per source, once on a single ArcGIS-merged 1 ft surface (LiDAR
+bilinear-resampled to 1 ft, mosaicked under the c02 channel) — and differencing each way:
+
+| | channel (1 ft) | LiDAR area |
+|---|---|---|
+| terrain, merged − source | rms 0.0045 ft, max 0.008 | rms 0.1435 ft, max 11.67, unbiased |
+| **absolute** depth | rms 0.0045 ft | rms 0.0348 ft, p5/p95 ±0.03 |
+| **incremental** depth | rms 0.0000 ft | rms 0.0024–0.0031 ft, p5=p50=p95=0.000 |
+
+All nine incremental comparisons reported **identical** min/max/mean under both terrains,
+because the terrain cancels: `(WSE₂ − T) − (WSE₁ − T) = WSE₂ − WSE₁`. So a depth-change
+raster does not depend on which surface it was measured against, anywhere both scenarios
+are wet; only wet/dry edges retain any sensitivity. Absolute depth does depend on it, but
+modestly — and note the terrain differs by rms 0.14 ft while depth differs by 0.035 ft,
+because bilinear smoothing departs most at steep breaks, which are mostly dry.
+
+The `.vrt` was closer to RAS's volume in **24 of 24** plan/area checks, mean margin
+0.169 pp — small, but a perfectly consistent sign is the resample cost appearing exactly
+where theory predicts. Native resolution beats interpolated-up resolution, slightly.
+
+**Two terrains are usually not differenceable.** The merged surface landed on the c02
+lattice (integer 8447/17592 ft offset) but the `.vrt` composite sits 0.695/0.484 ft off
+it — the fractional `DstRect` RAS Mapper gives c02 inside the `.vrt`. Sub-pixel, so no
+resampling-free difference exists; compare two terrains by sampling, not by subtraction.
 
 ## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
 

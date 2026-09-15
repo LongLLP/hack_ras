@@ -228,10 +228,13 @@ throughout the channel, up to 2.5 ft above the surveyed bed** over the 249,405
 ft**2 the survey covers.  See `vrt_sources`.
 
 What is left between this module and a RAS Mapper export is one knob and one
-deliberate choice.  The knob is `depth_tol`: RAS writes any positive depth — its
-smallest on p09 is 0.000977 ft, which is float32 granularity, not a threshold —
-so at `depth_tol=0.01` this drops 25,669 px of p09's 7.4M s04 pixels, every one
-of them 0.0099 ft deep or less.  Set `depth_tol=0` to match the extent exactly.
+deliberate choice.  The knob is `depth_tol`, and it **defaults to 0.0**, which
+matches RAS exactly: RAS writes any positive depth — its smallest on p09 is
+0.000977 ft, which is float32 granularity, not a threshold.  Raising it to 0.01
+drops 25,669 px of p09's 7.4M s04 pixels, every one of them 0.0099 ft deep or
+less; that is a display threshold, and it belongs in GIS where changing it does
+not cost a re-map.  It also silently distorts any later comparison against a RAS
+Mapper export, which applies no threshold at all.
 The choice is that a lower-priority source is holed wherever a higher-priority
 one has data; RAS Mapper leaves a partial fringe there instead, 4,826 px on p09,
 which its own `.vrt` then covers with the higher-priority tile anyway.
@@ -294,6 +297,7 @@ __all__ = [
     "vrt_sources",
     "clone_source_vrt",
     "difference_rasters",
+    "grid_overlap",
     "area_bounds",
     "same_mesh",
     "check_cell_volumes",
@@ -893,7 +897,7 @@ def export_wse_depth(
     wse_type: str = "Maximum",
     prefix: str | None = None,
     tile: int = 2048,
-    depth_tol: float = 0.01,
+    depth_tol: float = 0.0,
     dry_tol: float = DRY_TOL,
     bounds: tuple[float, float, float, float] | None = None,
     allow_crs_mismatch: bool = False,
@@ -933,7 +937,10 @@ def export_wse_depth(
         Output block size in pixels.  The full grid is far too large to hold in
         memory at 1 ft, so everything is done a tile at a time.
     depth_tol : float
-        Pixels at or below this depth are left as NoData.
+        Pixels at or below this depth are left as NoData.  Default 0.0, which
+        writes any positive depth and so matches RAS Mapper's wet extent
+        exactly.  Raising it trims a fringe at the water's edge — symbology
+        rather than data, and better applied in GIS where it costs no re-map.
     dry_tol : float
         Passed to `build_wse_surface`.
     bounds : (x0, y0, x1, y1), optional
@@ -1331,7 +1338,7 @@ def export_wse_depth_per_source(
     wse_type: str = "Maximum",
     prefix: str | None = None,
     tile: int = 2048,
-    depth_tol: float = 0.01,
+    depth_tol: float = 0.0,
     dry_tol: float = DRY_TOL,
     allow_crs_mismatch: bool = False,
     volume_check: bool = True,
@@ -1543,14 +1550,83 @@ def check_cell_volumes(hdf_path: str, area: str, wse, mapped_volumes):
     return df
 
 
+def grid_overlap(sa, sb, tol_px: float = 1e-6):
+    """The ground two open rasters both describe, as a window into each.
+
+    Returns `(window_a, window_b)` — always the same size — or `None` when the
+    two cannot be compared without resampling.  When the rasters are the same
+    grid the windows are simply both rasters in full, so this subsumes an
+    equality test.
+
+    Two conditions, and only two.  **Same pixel size**, because a 1 ft raster
+    and a 3.28 ft raster describe the same ground with different samples and no
+    window makes them line up.  And **origins a whole number of pixels apart**,
+    so the two pixel lattices interlock: a sub-pixel offset means every pixel of
+    one straddles four of the other, which again is resampling.  Given both, the
+    overlapping pixels correspond exactly, one for one, and differencing them
+    invents nothing.
+
+    Neither test is bit-exact, for the same reason the pixel size is compared
+    loosely: two producers can derive one grid and disagree in the last ULP.
+    RAS Mapper writes the Hillside s04 tile at 3.2808333333333586 ft and
+    `export_wse_depth_per_source` at 3.2808333333333555 (measured 2026-09-15) —
+    3e-15 ft, accumulating to 3e-11 ft across the 10,888 rows, in a 3.28 ft
+    pixel.  Refusing over that is a false negative, and it blocked comparing the
+    two producers at all.  `tol_px` sits five orders above that round-off and
+    six below the one whole pixel a real misalignment moves a corner.
+
+    Extents need NOT match.  Two plans mapped in separate runs on one terrain
+    land on the same lattice but cover the union of whatever meshes were in each
+    run — measured on the test fixture: p02 (g02) and p07 (g05) come out
+    3101x1559 and 3101x1897, origins exactly 338 pixels apart.  Those overlap
+    perfectly over the ground they share, and the old shape-equality guard
+    refused them for no reason a caller could act on.
+    """
+    from rasterio.windows import Window
+
+    ta, tb = sa.transform, sb.transform
+    if ta.b or ta.d or tb.b or tb.d:
+        return None                       # rotated; no axis-aligned window fits
+    if (abs(ta.a - tb.a) > tol_px * abs(ta.a)
+            or abs(ta.e - tb.e) > tol_px * abs(ta.e)):
+        return None                       # different resolution
+
+    # Where b's origin sits in a's pixel index space.  Must be a whole pixel.
+    dx, dy = (tb.c - ta.c) / ta.a, (tb.f - ta.f) / ta.e
+    if abs(dx - round(dx)) > tol_px or abs(dy - round(dy)) > tol_px:
+        return None                       # lattices interleave, not interlock
+    dx, dy = round(dx), round(dy)
+
+    c0, r0 = max(0, dx), max(0, dy)
+    c1, r1 = min(sa.width, dx + sb.width), min(sa.height, dy + sb.height)
+    if c1 <= c0 or r1 <= r0:
+        return None                       # same lattice, but disjoint ground
+    w, h = c1 - c0, r1 - r0
+    return Window(c0, r0, w, h), Window(c0 - dx, r0 - dy, w, h)
+
+
 def difference_rasters(path_a, path_b, out_path, *, tile: int = 2048,
                        treat_dry_as_zero: bool = True):
-    """Write `b - a` for two rasters that share a grid.
+    """Write `b - a` over the ground two rasters both cover.
 
-    Both inputs must have identical transform and shape — which they will when
-    both were produced by `export_wse_depth` with the same `bounds` against the
-    same terrain.  Nothing is resampled and no tolerance is applied, so the
-    result is exact wherever both are wet.
+    The inputs must share a pixel lattice — same resolution, origins a whole
+    number of pixels apart — which `grid_overlap` decides and which is exactly
+    the condition under which the two can be subtracted without resampling.
+    They will when both came from `export_wse_depth` against one terrain, and
+    also when one is a RAS Mapper export of the same terrain source.  Nothing is
+    resampled and no tolerance is applied to the values, so the result is exact
+    wherever both are wet.
+
+    **The extents need not match.**  The output covers their intersection, and
+    its transform is that window's, so it is the same lattice cropped to the
+    ground where an answer exists.  Where one input has data and the other does
+    not reach at all, there is nothing to difference — that is absence of
+    evidence, not a change of zero, and writing it would be a lie a depth map
+    cannot be distinguished from real water.  A caller that needs to know it
+    happened should compare the returned raster's shape against its inputs'.
+
+    Disjoint inputs raise, as do inputs at different resolutions or on
+    interleaved lattices; none of those can be honoured without resampling.
 
     `treat_dry_as_zero` governs the only real decision here.  With it on (the
     default, and the right one for a *depth* difference) a pixel wet in one run
@@ -1566,26 +1642,37 @@ def difference_rasters(path_a, path_b, out_path, *, tile: int = 2048,
     """
     import rasterio
     from rasterio.windows import Window
+    from rasterio.windows import transform as window_transform
 
     with rasterio.open(path_a) as sa, rasterio.open(path_b) as sb:
-        if (sa.transform != sb.transform) or (sa.width, sa.height) != (sb.width, sb.height):
+        pair = grid_overlap(sa, sb)
+        if pair is None:
             raise ValueError(
-                f"{path_a} and {path_b} are not on the same grid; re-export both "
-                "with the same bounds before differencing"
+                f"{path_a} and {path_b} cannot be differenced without "
+                "resampling: they must share a pixel size and sit a whole "
+                "number of pixels apart, and must overlap"
             )
+        win_a, win_b = pair
+        height, width = int(win_a.height), int(win_a.width)
+
         nodata = -9999.0
         profile = sa.profile.copy()
         profile.update(dtype="float32", nodata=nodata, compress="deflate",
                        predictor=3, tiled=True, blockxsize=256, blockysize=256,
-                       BIGTIFF="YES")
+                       BIGTIFF="YES", width=width, height=height,
+                       transform=window_transform(win_a, sa.transform))
         with rasterio.open(out_path, "w", **profile) as dst:
-            for r0 in range(0, sa.height, tile):
-                h = min(tile, sa.height - r0)
-                for c0 in range(0, sa.width, tile):
-                    w = min(tile, sa.width - c0)
+            for r0 in range(0, height, tile):
+                h = min(tile, height - r0)
+                for c0 in range(0, width, tile):
+                    w = min(tile, width - c0)
                     win = Window(c0, r0, w, h)
-                    a = sa.read(1, window=win).astype(np.float64)
-                    b = sb.read(1, window=win).astype(np.float64)
+                    a = sa.read(1, window=Window(
+                        win_a.col_off + c0, win_a.row_off + r0, w, h)
+                    ).astype(np.float64)
+                    b = sb.read(1, window=Window(
+                        win_b.col_off + c0, win_b.row_off + r0, w, h)
+                    ).astype(np.float64)
                     wet_a = a != (sa.nodata if sa.nodata is not None else nodata)
                     wet_b = b != (sb.nodata if sb.nodata is not None else nodata)
                     if treat_dry_as_zero:
