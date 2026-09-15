@@ -33,6 +33,16 @@ so a test cannot drift with the code it checks:
   8. A terrain in the wrong coordinate system is refused. That failure is
      silent otherwise — a wrong-CRS terrain usually still overlaps the mesh, so
      the overlap check never fires and every depth is wrong by the offset.
+  9. `mode="horizontal"` really is flat per cell: every vertex of a cell's fan
+     carries that cell's own WSE, no face or structure is consulted, and the
+     raster is constant over the cell. That is RAS Mapper's Horizontal mode and
+     the volume-faithful one, so it has to be exactly flat rather than nearly.
+ 10. The per-source export keeps each terrain source on its own full grid — the
+     cloned `.vrt` reuses the terrain's `SrcRect`/`DstRect`, so a windowed
+     output would silently misregister — and a lower-priority source is holed
+     wherever a higher-priority one has data. Without the holing the coarse
+     source paints over the detailed one, which is the whole failure the
+     per-source layout exists to avoid.
 
 The connectivity rule itself — a face joins two water bodies only when the
 *lower* of the two WSEs clears the face's minimum elevation — was settled
@@ -54,10 +64,13 @@ try:
         area_bounds,
         barrier_faces,
         build_wse_surface,
+        clone_source_vrt,
         difference_rasters,
         export_wse_depth,
+        export_wse_depth_per_source,
         rasterize_surface,
         same_mesh,
+        vrt_sources,
     )
     from hack_ras.results.reader import list_areas, read_area_geometry, read_wse
     HAS_GIS = True
@@ -559,6 +572,359 @@ class TestTerrainCrsGuard(unittest.TestCase):
             res = export_wse_depth(P05, out, self.tmp, wse_type="Maximum",
                                    prefix="nocrs", volume_check=False)
         self.assertTrue(os.path.exists(res["depth_path"]))
+
+
+@unittest.skipUnless(HAS_GIS, "requires h5py / shapely / rasterio extras")
+@unittest.skipUnless(os.path.exists(FIXTURE), f"missing fixture {FIXTURE}")
+class TestHorizontalMode(unittest.TestCase):
+    """`mode="horizontal"` renders each cell flat at its own computed WSE.
+
+    This is RAS Mapper's Horizontal render mode, and it is the volume-faithful
+    one — HEC-RAS carries one WSE per cell and takes that cell's storage from its
+    subgrid volume-elevation curve, so a flat cell surface is exactly what the
+    solver assumed. Verified against a RAS Mapper export of NKC_Hillside_Levee
+    p09 on 2026-09-14: over the 7,393,413 px both write, ours minus RAS is
+    0.0000 ft mean, 0.0000 rms, 0.000 max. What is pinned here is the property
+    that makes that possible — flatness has to be exact, not approximate.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.areas = list_areas(FIXTURE)
+        cls.wse = {a: read_wse(FIXTURE, a, "Maximum") for a in cls.areas}
+        cls.flat = {a: build_wse_surface(FIXTURE, a, cls.wse[a],
+                                         mode="horizontal") for a in cls.areas}
+        cls.interp = {a: build_wse_surface(FIXTURE, a, cls.wse[a])
+                      for a in cls.areas}
+
+    def test_every_vertex_of_a_cell_carries_that_cell_s_wse(self):
+        """Exactly — a face point shared with a neighbour takes no mean here."""
+        for area in self.areas:
+            surf = self.flat[area]
+            with self.subTest(area=area):
+                want = self.wse[area][surf.cell_of_triangle]          # (T,)
+                got = surf.values[surf.triangles]                     # (T, 3)
+                self.assertTrue(
+                    np.array_equal(got, np.repeat(want[:, None], 3, axis=1)),
+                    "a vertex does not carry its own cell's WSE",
+                )
+
+    def test_no_face_or_structure_is_consulted(self):
+        """The cheap mode is cheap because it skips the face work entirely."""
+        for area in self.areas:
+            with self.subTest(area=area):
+                self.assertEqual(self.flat[area].n_barrier_faces, 0)
+
+    def test_the_interpolated_surface_really_does_consult_them(self):
+        """Guards the test above: 0 barriers must mean skipped, not absent."""
+        self.assertGreater(
+            sum(s.n_barrier_faces for s in self.interp.values()), 0,
+            "the fixture should have structure faces for this to be meaningful",
+        )
+
+    def test_the_two_modes_share_one_geometry(self):
+        """Only the values change, so every other comparison stays valid."""
+        for area in self.areas:
+            with self.subTest(area=area):
+                self.assertEqual(len(self.flat[area].triangles),
+                                 len(self.interp[area].triangles))
+                self.assertTrue(np.array_equal(
+                    self.flat[area].cell_of_triangle,
+                    self.interp[area].cell_of_triangle))
+
+    def test_the_raster_is_constant_over_a_cell(self):
+        """A plane that is flat in the triangulation must be flat in pixels."""
+        transform = Affine(1.0, 0.0, 0.0, 0.0, -1.0, 0.0)
+        for area in self.areas:
+            surf = self.flat[area]
+            x0, y0, x1, y1 = surf.bounds
+            col0, row0 = int(np.floor(x0)), int(np.floor(-y1))
+            w = int(np.ceil(x1 - x0)) + 2
+            h = int(np.ceil(y1 - y0)) + 2
+            arr, cells = rasterize_surface(
+                surf, transform, row0, col0, h, w,
+                cells_out=np.full((h, w), -1, dtype=np.int32))
+            wet = cells >= 0
+            self.assertTrue(wet.any(), f"{area} rasterised nothing")
+            with self.subTest(area=area):
+                self.assertTrue(
+                    np.allclose(arr[wet], self.wse[area][cells[wet]],
+                                rtol=0, atol=1e-4),
+                    "a pixel does not carry its cell's WSE",
+                )
+
+    def test_an_unknown_mode_is_refused(self):
+        area = self.areas[0]
+        with self.assertRaises(ValueError):
+            build_wse_surface(FIXTURE, area, self.wse[area], mode="sloping")
+
+    def test_the_mode_is_recorded_on_the_surface(self):
+        """So a raster can be traced back to the rule that drew it."""
+        self.assertEqual(self.flat[self.areas[0]].mode, "horizontal")
+        self.assertEqual(self.interp[self.areas[0]].mode, "interpolated")
+
+
+@unittest.skipUnless(HAS_GIS, "requires h5py / shapely / rasterio extras")
+@unittest.skipUnless(os.path.exists(TERRAIN), f"missing fixture {TERRAIN}")
+class TestVrtSources(unittest.TestCase):
+    """Reading and cloning a terrain `.vrt` as a list of sources."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def test_sources_come_back_as_resolved_absolute_paths(self):
+        srcs = vrt_sources(TERRAIN)
+        self.assertTrue(srcs)
+        for path in srcs:
+            self.assertTrue(os.path.isabs(path))
+            self.assertTrue(os.path.exists(path), path)
+
+    def test_a_file_with_no_sources_is_refused(self):
+        empty = os.path.join(self.tmp, "empty.vrt")
+        with open(empty, "w", encoding="utf-8") as f:
+            f.write('<VRTDataset rasterXSize="1" rasterYSize="1"></VRTDataset>')
+        with self.assertRaises(ValueError):
+            vrt_sources(empty)
+
+    def test_the_hdf_priority_attrs_win_over_the_vrt_order(self):
+        """Document order is the fallback, not the authority.
+
+        Surveyed across every terrain in the workspace 2026-09-14 the two agreed
+        36 times out of 36, so this is a convention rather than a rule, and a
+        model that broke it would otherwise be mapped against the wrong source
+        in silence. Here the `.vrt` is written in one order and the `.hdf` says
+        the opposite; the `.hdf` has to win, loudly.
+        """
+        import h5py
+
+        base = os.path.join(self.tmp, "Two")
+        tifs = []
+        for i in (0, 1):
+            tif = base + f".src{i}.tif"
+            shutil.copyfile(vrt_sources(TERRAIN)[0], tif)
+            tifs.append(tif)
+
+        vrt = base + ".vrt"
+        with open(vrt, "w", encoding="utf-8") as f:
+            f.write("<VRTDataset rasterXSize='1' rasterYSize='1'>\n"
+                    "  <VRTRasterBand dataType='Float32' band='1'>\n")
+            for tif in tifs:                       # src0 first, src1 second
+                f.write("    <ComplexSource><SourceFilename "
+                        f"relativeToVRT='0'>{tif}</SourceFilename>"
+                        "</ComplexSource>\n")
+            f.write("  </VRTRasterBand>\n</VRTDataset>\n")
+
+        self.assertEqual(vrt_sources(vrt), tifs, "no .hdf yet: .vrt order stands")
+
+        # Now say the opposite in the HDF: src1 is Priority 0.
+        with h5py.File(base + ".hdf", "w") as hdf:
+            grp = hdf.create_group("Terrain")
+            grp.create_group("Two.src0").attrs["Priority"] = 1
+            grp.create_group("Two.src1").attrs["Priority"] = 0
+        with self.assertLogs(level="WARNING"):
+            got = vrt_sources(vrt)
+        self.assertEqual(got, tifs[::-1], "the HDF Priority order must win")
+
+    def test_an_hdf_that_does_not_cover_every_source_is_ignored(self):
+        """Partial evidence is no evidence — fall back, do not half-reorder."""
+        import h5py
+
+        base = os.path.join(self.tmp, "Partial")
+        tifs = []
+        for i in (0, 1):
+            tif = base + f".src{i}.tif"
+            shutil.copyfile(vrt_sources(TERRAIN)[0], tif)
+            tifs.append(tif)
+        vrt = base + ".vrt"
+        with open(vrt, "w", encoding="utf-8") as f:
+            f.write("<VRTDataset rasterXSize='1' rasterYSize='1'>\n"
+                    "  <VRTRasterBand dataType='Float32' band='1'>\n")
+            for tif in tifs:
+                f.write("    <ComplexSource><SourceFilename "
+                        f"relativeToVRT='0'>{tif}</SourceFilename>"
+                        "</ComplexSource>\n")
+            f.write("  </VRTRasterBand>\n</VRTDataset>\n")
+        with h5py.File(base + ".hdf", "w") as hdf:
+            grp = hdf.create_group("Terrain")
+            grp.create_group("Partial.src1").attrs["Priority"] = 0
+        self.assertEqual(vrt_sources(vrt), tifs)
+
+    def test_a_clone_keeps_the_grid_and_swaps_the_filenames(self):
+        """The clone must reuse the terrain's rects, not recompute them."""
+        import rasterio
+
+        srcs = vrt_sources(TERRAIN)
+        stand_in = {}
+        for src in srcs:
+            copy = os.path.join(self.tmp, "copy_" + os.path.basename(src))
+            shutil.copyfile(src, copy)
+            stand_in[src] = copy
+        out = clone_source_vrt(TERRAIN, os.path.join(self.tmp, "clone.vrt"),
+                               stand_in)
+        with rasterio.open(TERRAIN) as a, rasterio.open(out) as b:
+            self.assertEqual((a.width, a.height), (b.width, b.height))
+            self.assertEqual(a.transform, b.transform)
+        text = open(out, encoding="utf-8").read()
+        self.assertNotIn("Histograms", text)
+        self.assertNotIn("STATISTICS_", text)
+        for src in srcs:
+            self.assertIn("copy_" + os.path.basename(src), text)
+
+
+@unittest.skipUnless(HAS_GIS, "requires h5py / shapely / rasterio extras")
+@unittest.skipUnless(os.path.exists(TERRAIN), f"missing fixture {TERRAIN}")
+class TestPerSourceExport(unittest.TestCase):
+    """One output per terrain source, on that source's own full grid.
+
+    The fixture terrain has a single source, so a second one is synthesised here
+    — a window of the same raster, listed FIRST, which is RAS Mapper's
+    highest-priority position. That is the case worth testing: GDAL composites a
+    VRT in document order and so returns the LAST source where they overlap,
+    the lowest RAS Mapper priority. Measured on NKC_Hillside_Levee 2026-09-14,
+    reading its terrain `.vrt` as one raster returns s04 LiDAR throughout the
+    c02 surveyed channel, up to 2.5 ft above the surveyed bed. Mapping each
+    source separately and holing the lower-priority one is what avoids that.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        import rasterio
+        from rasterio.windows import Window
+
+        cls.tmp = tempfile.mkdtemp()
+        cls.base = vrt_sources(TERRAIN)[0]
+
+        # A detail patch over the middle of the terrain, at the same resolution
+        # and on the same pixel grid, so the VRT rects stay integers.
+        with rasterio.open(cls.base) as src:
+            cls.off = (src.height // 4, src.width // 4)
+            cls.size = (src.height // 2, src.width // 2)
+            win = Window(cls.off[1], cls.off[0], cls.size[1], cls.size[0])
+            data = src.read(1, window=win)
+            profile = src.profile.copy()
+            profile.update(driver="GTiff", height=cls.size[0], width=cls.size[1],
+                           transform=src.window_transform(win))
+            full = (src.width, src.height)
+        cls.detail = os.path.join(cls.tmp, "Detail.tif")
+        with rasterio.open(cls.detail, "w", **profile) as dst:
+            dst.write(data, 1)
+
+        cls.vrt = os.path.join(cls.tmp, "TwoSource.vrt")
+        with open(TERRAIN, encoding="utf-8") as f:
+            head = f.read()
+        srs = head[head.index("<SRS"):head.index("</SRS>") + len("</SRS>")]
+        gt = head[head.index("<GeoTransform>"):
+                  head.index("</GeoTransform>") + len("</GeoTransform>")]
+
+        def source(path, xoff, yoff, w, h):
+            return (
+                "    <ComplexSource>\n"
+                f"      <SourceFilename relativeToVRT='0'>{path}"
+                "</SourceFilename>\n"
+                "      <SourceBand>1</SourceBand>\n"
+                f"      <SrcRect xOff='0' yOff='0' xSize='{w}' ySize='{h}' />\n"
+                f"      <DstRect xOff='{xoff}' yOff='{yoff}' xSize='{w}' "
+                f"ySize='{h}' />\n"
+                "      <NODATA>-9999</NODATA>\n"
+                "    </ComplexSource>\n"
+            )
+
+        with open(cls.vrt, "w", encoding="utf-8") as f:
+            f.write(
+                f"<VRTDataset rasterXSize='{full[0]}' rasterYSize='{full[1]}'>\n"
+                f"  {srs}\n  {gt}\n"
+                "  <VRTRasterBand dataType='Float32' band='1'>\n"
+                "    <NoDataValue>-9999</NoDataValue>\n"
+                # Highest priority FIRST, as RAS Mapper writes it.
+                + source(cls.detail, cls.off[1], cls.off[0],
+                         cls.size[1], cls.size[0])
+                + source(cls.base, 0, 0, full[0], full[1])
+                + "  </VRTRasterBand>\n</VRTDataset>\n"
+            )
+
+        cls.res = export_wse_depth_per_source(
+            P05, cls.vrt, cls.tmp, wse_type="Maximum", prefix="flat",
+            mode="horizontal", volume_check=False)
+
+    @classmethod
+    def tearDownClass(cls):
+        shutil.rmtree(cls.tmp, ignore_errors=True)
+
+    def test_one_output_per_source(self):
+        self.assertEqual(len(self.res["depth_paths"]), 2)
+        for path in self.res["depth_paths"].values():
+            self.assertTrue(os.path.exists(path))
+
+    def test_each_output_covers_its_source_s_full_grid(self):
+        """The cloned .vrt reuses the terrain's rects, so a window would shift."""
+        import rasterio
+
+        for src, out in self.res["depth_paths"].items():
+            with rasterio.open(src) as a, rasterio.open(out) as b:
+                with self.subTest(src=os.path.basename(src)):
+                    self.assertEqual((a.width, a.height), (b.width, b.height))
+                    self.assertTrue(np.allclose(np.array(a.transform),
+                                                np.array(b.transform),
+                                                atol=1e-9))
+
+    def test_the_vrt_lands_on_the_terrain_grid(self):
+        import rasterio
+
+        for key in ("depth_path", "wse_path"):
+            with rasterio.open(self.vrt) as a, rasterio.open(self.res[key]) as b:
+                with self.subTest(key=key):
+                    self.assertEqual((a.width, a.height), (b.width, b.height))
+                    self.assertEqual(a.transform, b.transform)
+
+    def test_the_lower_priority_source_is_holed_under_the_higher_one(self):
+        """Otherwise the coarse source paints over the detailed one."""
+        import rasterio
+        from rasterio.windows import Window
+
+        low = self.res["depth_paths"][self.base]
+        high = self.res["depth_paths"][self.detail]
+        win = Window(self.off[1], self.off[0], self.size[1], self.size[0])
+        with rasterio.open(low) as src:
+            under = src.read(1, window=win)
+            nodata = src.nodata
+        self.assertTrue(
+            np.all(under == nodata),
+            "the lower-priority output wrote pixels the higher one covers",
+        )
+        with rasterio.open(high) as src:
+            arr = src.read(1)
+            self.assertTrue((arr != src.nodata).any(),
+                            "the higher-priority output is empty")
+
+    def test_depth_is_the_surface_minus_that_source_s_own_terrain(self):
+        """No resampling: the subtraction is pixel for pixel on each grid."""
+        import rasterio
+
+        for src in self.res["depth_paths"]:
+            with rasterio.open(src) as t, \
+                 rasterio.open(self.res["depth_paths"][src]) as d, \
+                 rasterio.open(self.res["wse_paths"][src]) as w:
+                ground, dep, wse = t.read(1), d.read(1), w.read(1)
+            wet = dep != -9999.0
+            with self.subTest(src=os.path.basename(src)):
+                if not wet.any():
+                    continue
+                self.assertTrue(np.allclose(dep[wet],
+                                            wse[wet] - ground[wet], atol=1e-3))
+
+    def test_horizontal_depth_is_constant_where_the_terrain_is(self):
+        """The only variation inside a cell comes from the ground, not the map."""
+        import rasterio
+
+        with rasterio.open(self.res["wse_paths"][self.detail]) as w:
+            wse = w.read(1)
+            nodata = w.nodata
+        vals = np.unique(wse[wse != nodata])
+        self.assertLess(len(vals), 200,
+                        "a flat-per-cell surface should take few distinct values")
 
 
 if __name__ == "__main__":

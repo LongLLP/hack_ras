@@ -2036,25 +2036,41 @@ layer could not see.
 
 `Scripts/Geometry_Mesh_nvals/` drives it.
 
-## Mapping 2D Results Without a Render Mode (`hack_ras/gis/wse_surface.py`)
+## Mapping 2D Results (`hack_ras/gis/wse_surface.py`)
 
-RAS Mapper draws and writes results through a user-selected render mode
-(horizontal / sloping / hybrid) and never says which rule produced which artefact.
-This module builds the water surface explicitly instead, so every interpolation rule
-is stated and testable. Read the module docstring for the full rationale and the
-measurements; this section is the API and the traps.
+Two rules, chosen with `mode`:
+
+* **`horizontal`** — each cell flat at its own computed WSE. Reproduces RAS Mapper's
+  `Horizontal` render mode **exactly** (measurements below), is the volume-faithful
+  rule, and is the cheap one: no face, structure or neighbour is consulted.
+* **`interpolated`** (the default) — the surface ramps between cell centres wherever a
+  continuous water surface actually exists, never across a structure and never across a
+  face that is not drowned from both sides. For a steep, coarse mesh where flat cells
+  read as blocky.
+
+Both draw the same triangles from the same cell fans; only the vertex values differ.
+Read the module docstring for the full rationale; this section is the API and the traps.
 
 ```python
 from hack_ras.gis.wse_surface import (
     area_bounds, build_wse_surface, export_wse_depth,
+    export_wse_depth_per_source, vrt_sources, clone_source_vrt,
     difference_rasters, check_cell_volumes, same_mesh,
 )
 
-# Pass EVERY plan being compared — the union, so a bigger mesh is never clipped.
+# RAS Mapper's own layout and RAS Mapper's own rule — one raster per terrain
+# source at its native resolution, plus a .vrt. No `bounds`: each output covers
+# its source's FULL extent, so every plan shares a grid per source.
+res = export_wse_depth_per_source(plan_hdf, terrain_vrt, out_dir,
+                                  wse_type="Maximum", mode="horizontal")
+
+# One grid instead. Pass EVERY plan being compared — the union, so a bigger mesh
+# is never clipped.
 bounds = area_bounds([plan_a, plan_b])              # mesh perimeter, geometry-stable
 same_mesh(plan_a, plan_b)                           # cell for cell? see below
 res = export_wse_depth(plan_hdf, terrain_vrt, out_dir,
-                       wse_type="Maximum", bounds=bounds)
+                       wse_type="Maximum", bounds=bounds, mode="interpolated")
+
 df  = check_cell_volumes(plan_hdf, "RockCr",
                          res["wse"]["RockCr"], res["mapped_volumes"]["RockCr"])
 difference_rasters(a_depth, b_depth, out, treat_dry_as_zero=True)   # depth change
@@ -2063,16 +2079,94 @@ difference_rasters(a_wse,   b_wse,   out, treat_dry_as_zero=False)  # WSE change
 
 | Function | Returns | Notes |
 |----------|---------|-------|
-| `build_wse_surface(hdf, area, wse, dry_tol=0.01)` | `WseSurface` | Fans each wet cell from its centre to its own outline. `KeyError` on a pre-7.0 HDF — there is no approximate fallback, because an outline that does not follow the mesh boundary throws triangles outside the mesh |
+| `build_wse_surface(hdf, area, wse, dry_tol=0.01, mode="interpolated")` | `WseSurface` | Fans each wet cell from its centre to its own outline. `mode="horizontal"` gives every vertex the cell's own WSE and skips the face work entirely. `KeyError` on a pre-7.0 HDF — there is no approximate fallback, because an outline that does not follow the mesh boundary throws triangles outside the mesh |
 | `barrier_faces(hdf, area)` | `set[int]` | Faces carrying a structure, from `Structures/Default Weir Connectivity` |
 | `rasterize_surface(surface, transform, row_off, col_off, h, w, out=, cells_out=)` | `(values, cells)` | Barycentric scan-conversion, one triangle at a time. `transform` is the **output grid's**, so the offsets are output-grid pixels — not the terrain's |
-| `export_wse_depth(...)` | dict | WSE + depth GeoTIFFs, tiled; `wse_path`, `depth_path`, `surfaces`, `wse`, `mapped_volumes`, `bounds`, `shape`. Refuses a terrain whose CRS differs from the model's — `allow_crs_mismatch=True` overrides |
+| `export_wse_depth(...)` | dict | WSE + depth GeoTIFFs on **one** grid, tiled; `wse_path`, `depth_path`, `surfaces`, `wse`, `mapped_volumes`, `bounds`, `shape`, `mode`. Refuses a terrain whose CRS differs from the model's — `allow_crs_mismatch=True` overrides |
+| `export_wse_depth_per_source(...)` | dict | One WSE + depth raster **per terrain source** at its native resolution, plus a `.vrt`. `wse_path`/`depth_path` are the `.vrt`s; `wse_paths`/`depth_paths` are `{source: tif}`; also `shapes`, and the rest as above. No `bounds` — each output is its source's full extent. `mode` defaults to `"horizontal"` |
+| `vrt_sources(vrt)` | `list[str]` | A terrain `.vrt`'s sources, absolute, in RAS Mapper priority order (highest first) — from the sibling `.hdf`'s `Priority` attrs when present, else document order, warning if they disagree. **Read the priority trap below before using a `.vrt` as one raster** |
+| `clone_source_vrt(terrain_vrt, out_vrt, {src: replacement})` | path | Clone a terrain `.vrt` with each source swapped for another raster on the same full grid. Keeps `SrcRect`/`DstRect` bit for bit; strips terrain stats and histograms |
 | `area_bounds(hdf_paths, areas=None)` | `(x0,y0,x1,y1)` | Union of the mesh perimeter boxes. Takes one path or several — **pass every plan being compared**, or a differing mesh is silently clipped |
 | `same_mesh(hdf_a, hdf_b, areas=None, atol=1e-6)` | `bool` | Do two plans compute on the same mesh, cell for cell? Compares area names, cell counts and five arrays within a tolerance |
 | `difference_rasters(a, b, out, treat_dry_as_zero=True)` | path | `b - a`. Raises unless both are on the identical grid |
 | `check_cell_volumes(hdf, area, wse, mapped)` | `DataFrame` | Mapped volume per cell vs `interpolate_cell_volume` |
 
-### The interpolation rules
+### A terrain `.vrt` read as one raster returns the WRONG source
+
+GDAL composites a VRT in document order, so the **last** source wins where sources
+overlap. RAS Mapper lists sources **highest priority first** and stitches them
+internally (`Terrain/Stitch TIN *` in the terrain `.hdf`) rather than holing the lower
+tiles, so GDAL's answer is backwards.
+
+Measured on `NKC_Hillside_Levee` `Terrain/02_Surveyed_Channel` 2026-09-14. The `.hdf`
+gives `c02_RAS_clipped` `Priority` 0 and `s04_StatePlane_clipped` `Priority` 1, and the
+`.vrt` lists them in that order — so reading the `.vrt` hands back **s04 LiDAR
+throughout the surveyed channel**, up to **2.5 ft** above the c02 surveyed bed over the
+249,405 ft² the survey covers. `s04` is fully valid under the whole c02 footprint
+(3,527,884 of 3,527,884 px), so nothing about the file hints at the problem.
+
+RAS Mapper's own depth export does not have this flaw: it writes one depth tile per
+source computed against that source, and holes the lower-priority tile. Verified on the
+same model — over the 52,493 px where its c02 and s04 depth tiles overlap,
+`c02 + depth_c02` equals `s04 + depth_s04` exactly, and its s04 tile is NoData over 79%
+of the c02 footprint. **Use `export_wse_depth_per_source` on any multi-source terrain.**
+
+**Nothing has to be configured for this, and it is not per-model.** `vrt_sources` resolves
+priority itself: it reads the sibling terrain `.hdf`'s `Priority` attributes when they are
+there, uses the `.vrt`'s document order when they are not, and **logs a warning if the two
+disagree** rather than silently picking one. So a model that broke the convention would be
+mapped correctly *and* say so.
+
+Surveyed across every terrain `.vrt` in this workspace 2026-09-14 — **38 found, 36 with
+`Priority`** — document order and `Priority` order agreed **36 of 36**: single-source, the
+Hillside 2-source pair, Muncie's `TerrainWithChannel` (`ChannelOnly` then `muncie_clip`),
+and the Baxter example's 5 tiles. The two without `Priority` are old HEC example projects
+and one of them is genuinely multi-source (`BaldEagleCrkMulti2D/Terrain50`: `dtm_20ft`
+then `baldeagledem`), which is why document order has to stay a working fallback.
+
+### `horizontal` reproduces RAS Mapper exactly
+
+`Depth (Max)` **and** `WSE (Max)` exported from RAS Mapper into
+`Current_Model\<Short Identifier>\` for **all 12 plans that have exports**, against
+`export_wse_depth_per_source(..., mode="horizontal")`, 2026-09-14. Both terrain sources,
+every pixel, no tolerance and no resampling on either side:
+
+| | Depth (Max) | WSE (Max) |
+|---|---|---|
+| px compared | 82,968,192 | 82,968,192 |
+| mean `ours − RAS` | 0.00000 ft | 0.00000 ft |
+| rms | 0.000000 ft | 0.000000 ft |
+| **max abs** | **0.00000 ft** | **0.00000 ft** |
+
+Per plan the px-both count runs 6.21M (`050year`) to 7.78M (`FC 500year breach L4`) and
+every one of the 24 comparisons is 0.00000 ft max. **Identical, not merely close.**
+
+`WSE (Max)` and `Depth (Max)` come out of RAS Mapper on **the same mask** — the wet px
+count agrees exactly for all 12 plans — so RAS masks its WSE raster by depth as well, and
+so does this. A WSE raster that runs past the water's edge is nobody's intent.
+
+Two things account for the pixels RAS writes and this does not (30–38k per plan, ~0.5%):
+
+* **`depth_tol`.** RAS writes any positive depth — its smallest on p09 is 0.000977 ft,
+  float32 granularity rather than a threshold. At `depth_tol=0.01` this drops 25,669 px
+  on p09, **100% of them 0.0099 ft deep or less**. `depth_tol=0` matches RAS's extent.
+* **The holing rule**, deliberately. A lower-priority source is holed wherever a
+  higher-priority one has data; RAS leaves a partial fringe (4,826 px on p09) that its
+  own `.vrt` then covers with the higher-priority tile anyway.
+
+Do not build the hole by letting GDAL decimate the higher-priority mask into each tile —
+a boundless `out_shape` read of the 1 ft c02 source into 3.28 ft tiles over-masked
+30,891 px whose centres lie nowhere near c02, dropping 0.58% of the water. The mask is
+held in memory and indexed by computed row/column instead.
+
+Going the other way, **RAS Mapper drops one pixel this module writes**, the same one in
+all 12 plans: c02 row 3381 col 6551 (2771850.4, 1085707.3), where the c02 terrain is valid
+at 745.69 — 7.4 ft below the LiDAR, so deep channel — and 12.7 ft submerged, and RAS's c02
+depth tile is NoData. 10 of the surrounding 5x5 are written by RAS against 11 valid c02
+terrain pixels. One pixel in 243,219, and this module's value is the defensible one; noted
+so nobody re-investigates it.
+
+### The interpolation rules (`mode="interpolated"`)
 
 Triangles are fanned **per cell**, centre to outline, so no edge ever crosses a mesh
 face. Cell centres carry `read_wse` unaltered. A face point takes the mean of the
@@ -2175,6 +2269,12 @@ rendering choice, so it favours nobody:
 | … + Shallow reduces to Horizontal | +1.18% | +24.92% |
 | Horizontal | −2.19% | −7.91% |
 | **this module** | **−2.19%** | **−5.43%** |
+
+Those were computed against the terrain `.vrt` read as a single raster, which is now known
+to return LiDAR in the surveyed channel (see the priority trap above). Re-run per source on
+2026-09-14, `mode="horizontal"` on p15 gives `Interior` **−2.19%** — unchanged, the channel
+is not in it — and `RockCr` **−7.41%** rather than −7.91%: the half percent is the c02
+surveyed bed finally being subtracted where it belongs.
 
 `Sloping (Cell Corners)` maps **more than twice** the water RAS stored in `RockCr`,
 92% of its cells off by more than 25%. The negative figures for `Horizontal` and this
@@ -2327,11 +2427,13 @@ Terrain precision propagates straight into cell minimum elevations and volume ta
 **Cell min/max are EFFECTIVE ground** — which is why a re-import at a different rounding
 changes results and needs a re-run.
 
-### When to use this instead of RAS Mapper's Horizontal
+### When to use `interpolated` rather than `horizontal`
 
-**On a flat, finely-meshed area, use RAS Mapper's `Horizontal` and do not use this module.**
-That is the conclusion from the Hillside `Interior` measurements, and it held against the
-module's own author-bias, so state it plainly to anyone who asks.
+**On a flat, finely-meshed area, use `horizontal` and do not interpolate.** That is the
+conclusion from the Hillside `Interior` measurements, and it held against the module's own
+author-bias, so state it plainly to anyone who asks. The choice used to be "this module vs
+RAS Mapper"; since `mode="horizontal"` reproduces `Horizontal` exactly it is now just a
+`mode`, and there is no longer any reason to leave the model for it.
 
 Measured on p15, `Interior` (the leveed interior drainage area) against `RockCr`:
 
@@ -2361,7 +2463,7 @@ apart, 5.6% more than 2 hours, 2.9% more than 6 hours (max 11.98 h), so interpol
 two cell maxima blends two different instants. `RockCr` is far more synchronous (0.4% past
 30 min), so this argument cuts specifically toward horizontal on the flat interior.
 
-**Where this module earns its place** is the opposite regime — steep, coarse cells, where
+**Where `interpolated` earns its place** is the opposite regime — steep, coarse cells, where
 `Sloping (Cell Corners)` maps +117% of the water RAS stored and `Horizontal` is visibly
 blocky. It delivers horizontal's accuracy without the cell-boundary steps.
 
@@ -2427,8 +2529,26 @@ with modifications baked in, a clipped subset) is a legitimate workflow.
 
 ### Runner
 
-`Scripts/Results_WSE_Depth_Maps/map_results.py` + a YAML config. 485 Mpx at 1 ft over the
-full Hillside mesh takes ~22 s per plan; everything is tiled, nothing holds the full grid.
+`Scripts/Results_WSE_Depth_Maps/map_results.py` + a YAML config. Everything is tiled and
+nothing holds the full grid.
+
+Each plan writes into `out_dir\<its Short Identifier>\` — the same folder name RAS Mapper
+uses for its own exports, so `Mapped_Results\500year\` sits beside `Current_Model\500year\`
+and the two compare file for file. **Nothing is ever written into the RAS Mapper export
+folders themselves.** A plan with no Short Identifier, or one holding a character a folder
+name cannot, falls back to the plan id rather than failing the run. Differences go to
+`out_dir\<b>_minus_<a>_<wse_type>\`.
+
+| config key | default | |
+|---|---|---|
+| `mode` | `horizontal` | `horizontal` or `interpolated` |
+| `per_source` | `true` | one raster per terrain source + a `.vrt`, vs one grid |
+| `depth_tol` | `0.01` | the one knob that changes the wet extent against RAS Mapper |
+
+Timing on the full Hillside mesh, 2026-09-14: **`per_source` 115 Mpx in ~5 s per plan**,
+against ~22 s for 485 Mpx on the single 1 ft grid. The 1 m LiDAR is 11x fewer pixels when it
+is not upsampled to sit beside the 1 ft channel survey, and none of that upsampling carried
+information.
 
 ## Geometry XS GIS Shift (`hack_ras/geometry/shift.py`)
 

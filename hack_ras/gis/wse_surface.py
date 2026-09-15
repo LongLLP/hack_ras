@@ -1,7 +1,30 @@
 # hack_ras/gis/wse_surface.py
 # Requires: pip install hack_ras[gis,results]
 """
-Mapping 2D results as a WSE surface interpolated on the mesh's own connectivity.
+Mapping 2D results as a WSE surface built on the mesh's own connectivity.
+
+Two rules are available, chosen with `mode`:
+
+`horizontal`
+    Each cell renders flat at its own computed WSE.  This reproduces RAS
+    Mapper's `Horizontal` render mode — **exactly**, not approximately.
+    Measured 2026-09-14 against RAS Mapper exports of `NKC_Hillside_Levee`, all
+    12 plans that have them, `Depth (Max)` *and* `WSE (Max)`, both terrain
+    sources: **82,968,192 px per variable, 0.00000 ft mean, 0.000000 rms and
+    0.00000 ft max difference** — every one of the 24 comparisons.  It is also
+    the volume-faithful rule, for the reason given below, and the cheap one: no
+    face, structure or neighbour is consulted.
+
+`interpolated` (the default)
+    The surface ramps between cell centres wherever a continuous water surface
+    actually exists.  The rest of this docstring is about that rule — what it
+    is for, when it is worse than `horizontal`, and the evidence behind each
+    decision inside it.
+
+Use `horizontal` to reproduce or replace a RAS Mapper depth export, and
+`interpolated` where the mesh is steep and coarse enough that flat cells read as
+blocky.  Both draw the same triangles from the same cell fans; only the vertex
+values differ, so every other comparison in this module applies to either.
 
 **Why not just use RAS Mapper.**  RAS Mapper renders (and writes) results with a
 user-selected render mode — horizontal, sloping, or hybrid.  Horizontal draws each
@@ -187,6 +210,40 @@ Per cell the median excess is 0.0000%; 10 of 3686 Hillside cells exceed 0.1% and
 the worst is 3.2%.  Hillside has 65 concave `Interior` cells and 104 concave
 `RockCr` cells, so concavity is common and its consequence is still negligible.
 
+Reproducing RAS Mapper's own output
+-----------------------------------
+`export_wse_depth_per_source` writes RAS Mapper's file layout: one raster per
+terrain source, each on that source's own grid, tied by a `.vrt` cloned from the
+terrain's.  Drop it beside a RAS Mapper export and the two compare pixel for
+pixel with nothing resampled on either side.
+
+Prefer it to `export_wse_depth` on a multi-source terrain, because **a terrain
+`.vrt` read as a single raster returns the wrong source where sources overlap.**
+GDAL composites a VRT in document order, so the *last* source wins; RAS Mapper
+lists sources highest priority *first* and stitches them internally rather than
+holing the lower tiles.  Measured on `NKC_Hillside_Levee` 2026-09-14: the c02
+surveyed channel is `Priority` 0 and listed first, the s04 LiDAR is `Priority` 1
+and listed last, and reading `02_Surveyed_Channel.vrt` hands back **LiDAR
+throughout the channel, up to 2.5 ft above the surveyed bed** over the 249,405
+ft**2 the survey covers.  See `vrt_sources`.
+
+What is left between this module and a RAS Mapper export is one knob and one
+deliberate choice.  The knob is `depth_tol`: RAS writes any positive depth — its
+smallest on p09 is 0.000977 ft, which is float32 granularity, not a threshold —
+so at `depth_tol=0.01` this drops 25,669 px of p09's 7.4M s04 pixels, every one
+of them 0.0099 ft deep or less.  Set `depth_tol=0` to match the extent exactly.
+The choice is that a lower-priority source is holed wherever a higher-priority
+one has data; RAS Mapper leaves a partial fringe there instead, 4,826 px on p09,
+which its own `.vrt` then covers with the higher-priority tile anyway.
+
+RAS Mapper's `WSE (Max)` export carries the **same mask as its depth** — the wet
+pixel counts agree exactly on all 12 plans — so this masks WSE by depth too.  A
+WSE raster that runs past the water's edge is nobody's intent.
+
+One pixel goes the other way, the same one in all 12 plans: c02 row 3381 col
+6551, valid terrain at 745.69 and 12.7 ft submerged, which RAS leaves NoData and
+this writes.  One pixel in 243,219; recorded so nobody re-investigates it.
+
 Terrain
 -------
 Depth is the surface minus the terrain the model computed with, clipped at zero.
@@ -233,6 +290,9 @@ __all__ = [
     "barrier_faces",
     "rasterize_surface",
     "export_wse_depth",
+    "export_wse_depth_per_source",
+    "vrt_sources",
+    "clone_source_vrt",
     "difference_rasters",
     "area_bounds",
     "same_mesh",
@@ -252,6 +312,8 @@ class WseSurface:
     ----------
     area : str
         Name of the 2D flow area.
+    mode : str
+        `"interpolated"` or `"horizontal"` — which rule produced `values`.
     points : (P, 2) float64
         Triangulation vertices in project coordinates.  A face point shared by
         two non-communicating cells appears more than once, once per side.
@@ -271,9 +333,15 @@ class WseSurface:
         How many faces were treated as barriers and how many face points ended up
         carrying more than one value.  Both are worth printing: zero split points
         on a mesh with internal connections means the barrier detection missed.
+
+        In `horizontal` mode both are reported differently and should be read
+        differently: no face is ever consulted, so `n_barrier_faces` is 0, and
+        every face point between two cells of differing WSE is a split, so
+        `n_split_points` counts cell boundaries rather than barriers.
     """
 
     area: str
+    mode: str
     points: np.ndarray
     values: np.ndarray
     triangles: np.ndarray
@@ -471,6 +539,7 @@ def build_wse_surface(
     wse: np.ndarray,
     *,
     dry_tol: float = DRY_TOL,
+    mode: str = "interpolated",
 ) -> WseSurface:
     """Triangulate one 2D flow area's water surface on the mesh connectivity.
 
@@ -486,6 +555,20 @@ def build_wse_surface(
         area's cell count.
     dry_tol : float
         A cell is wet when `wse > min_elevation + dry_tol`.
+    mode : str
+        `"interpolated"` (default) applies the rules in the module docstring:
+        a face point takes the mean of the WSE of the cells communicating with
+        it, so the surface ramps where a continuous water surface exists.
+
+        `"horizontal"` gives every vertex of a cell — centre and outline alike —
+        that cell's own WSE, so each cell renders as a flat plane at its computed
+        water level and the surface steps at every cell boundary.  This is
+        RAS Mapper's `Horizontal` render mode, and it is the *volume-faithful*
+        one: HEC-RAS carries one WSE per cell and takes the cell's storage from
+        its subgrid volume-elevation curve, so a flat cell surface is exactly
+        what the solver assumed.  No face, structure or neighbour is consulted,
+        which also makes it the cheap mode — `_barrier_faces` and
+        `_facepoint_components` are both skipped.
 
     Returns
     -------
@@ -494,12 +577,18 @@ def build_wse_surface(
     Raises
     ------
     ValueError
-        If `wse` does not match the area's cell count.
+        If `wse` does not match the area's cell count, or `mode` is not one of
+        `"interpolated"` / `"horizontal"`.
     KeyError
         If the HDF predates the perimeter face datasets (pre-RAS-7.0); there is no
         approximate fallback here, because a cell outline that does not follow the
         mesh boundary produces triangles that hang outside the mesh.
     """
+    if mode not in ("interpolated", "horizontal"):
+        raise ValueError(
+            f"mode must be 'interpolated' or 'horizontal', not {mode!r}"
+        )
+
     base = f"Geometry/2D Flow Areas/{area}"
     with h5py.File(hdf_path, "r") as hdf:
         grp = hdf[base]
@@ -536,8 +625,14 @@ def build_wse_surface(
         real = ~np.isnan(min_elev)
         wet = real & np.isfinite(wse) & (wse > min_elev + dry_tol)
 
-        barriers = _barrier_faces(hdf, area)
-        fp_vals = _facepoint_components(grp, wet, wse, barriers, face_min_elev)
+        if mode == "horizontal":
+            # Nothing to consult: every vertex will fall back to the cell's own
+            # WSE below, which is what a flat cell surface means.
+            barriers = set()
+            fp_vals: dict[int, dict[int, float]] = {}
+        else:
+            barriers = _barrier_faces(hdf, area)
+            fp_vals = _facepoint_components(grp, wet, wse, barriers, face_min_elev)
 
     points: list[np.ndarray] = []
     values: list[float] = []
@@ -589,6 +684,7 @@ def build_wse_surface(
 
     surface = WseSurface(
         area=area,
+        mode=mode,
         points=np.asarray(points, dtype=np.float64).reshape(-1, 2),
         values=np.asarray(values, dtype=np.float64),
         triangles=np.asarray(triangles, dtype=np.int32).reshape(-1, 3),
@@ -600,8 +696,9 @@ def build_wse_surface(
         n_split_points=n_split,
     )
     logging.info(
-        "%s: %d/%d cells wet, %d triangles, %d barrier faces, %d split face points",
-        area, surface.n_wet, surface.n_cells, len(surface.triangles),
+        "%s [%s]: %d/%d cells wet, %d triangles, %d barrier faces, "
+        "%d split face points",
+        area, mode, surface.n_wet, surface.n_cells, len(surface.triangles),
         surface.n_barrier_faces, surface.n_split_points,
     )
     return surface
@@ -801,8 +898,9 @@ def export_wse_depth(
     bounds: tuple[float, float, float, float] | None = None,
     allow_crs_mismatch: bool = False,
     volume_check: bool = True,
+    mode: str = "interpolated",
 ) -> dict:
-    """Write WSE and depth GeoTIFFs for one plan.
+    """Write WSE and depth GeoTIFFs for one plan, on one grid.
 
     The output grid is a window of the terrain raster's own grid, so terrain is
     never resampled and depth is a pixel-for-pixel subtraction.  Both rasters
@@ -852,6 +950,8 @@ def export_wse_depth(
     volume_check : bool
         Accumulate the mapped volume per cell during the tiling pass, for
         `check_cell_volumes`.  Costs nothing measurable.
+    mode : str
+        Passed to `build_wse_surface`: `"interpolated"` or `"horizontal"`.
 
     Returns
     -------
@@ -859,13 +959,18 @@ def export_wse_depth(
         `wse_path`, `depth_path`, `surfaces` (`{area: WseSurface}`),
         `mapped_volumes` (`{area: (N,) float64 ft**3}`, zeros when
         `volume_check` is False), `wse` (`{area: (N,) float64}` as read),
-        `bounds`, `shape`.
+        `bounds`, `shape`, `mode`.
+
+    See Also
+    --------
+    export_wse_depth_per_source : one output per terrain source, at that
+        source's own resolution, tied by a `.vrt` — which is what RAS Mapper
+        writes, and the only way to get the terrain right when a source other
+        than the last one in the `.vrt` has priority.  See `vrt_sources`.
     """
     import os
 
     import rasterio
-    from rasterio.windows import Window
-    from rasterio.windows import transform as window_transform
 
     from hack_ras.results.reader import list_areas, read_wse
 
@@ -881,7 +986,7 @@ def export_wse_depth(
     for area in areas:
         wse_by_area[area] = read_wse(hdf_path, area, wse_type)
         surfaces[area] = build_wse_surface(
-            hdf_path, area, wse_by_area[area], dry_tol=dry_tol
+            hdf_path, area, wse_by_area[area], dry_tol=dry_tol, mode=mode
         )
     live = [s for s in surfaces.values() if len(s.triangles)]
     if not live:
@@ -904,76 +1009,15 @@ def export_wse_depth(
     wse_path = os.path.join(out_dir, f"{prefix}_WSE.tif")
     depth_path = os.path.join(out_dir, f"{prefix}_Depth.tif")
 
-    nodata = -9999.0
     mapped = {a: np.zeros(s.n_cell_slots, dtype=np.float64)
               for a, s in surfaces.items()}
 
     with rasterio.open(terrain_path) as terr:
-        row_off, col_off, height, width = _snapped_grid(
-            (xs0, ys0, xs1, ys1), terr.transform, terr.width, terr.height
+        grid, height, width = _write_depth_grid(
+            surfaces, terr, (xs0, ys0, xs1, ys1), wse_path, depth_path,
+            mapped=mapped, tile=tile, depth_tol=depth_tol,
+            volume_check=volume_check, label=terrain_path,
         )
-        if height <= 0 or width <= 0:
-            raise ValueError(
-                "the mesh does not overlap the terrain raster; check that "
-                f"{terrain_path} is the terrain this geometry was built on"
-            )
-        win = Window(col_off, row_off, width, height)
-        grid = window_transform(win, terr.transform)
-        px_area = abs(grid.a * grid.e)
-
-        profile = dict(
-            driver="GTiff", dtype="float32", count=1, nodata=nodata,
-            width=width, height=height, transform=grid, crs=terr.crs,
-            tiled=True, blockxsize=256, blockysize=256,
-            compress="deflate", predictor=3, zlevel=6, BIGTIFF="YES",
-        )
-
-        with rasterio.open(wse_path, "w", **profile) as dst_w, \
-             rasterio.open(depth_path, "w", **profile) as dst_d:
-            for r0 in range(0, height, tile):
-                h = min(tile, height - r0)
-                for c0 in range(0, width, tile):
-                    w = min(tile, width - c0)
-                    out_w = np.full((h, w), nodata, dtype=np.float32)
-                    out_d = np.full((h, w), nodata, dtype=np.float32)
-
-                    ground = terr.read(
-                        1, window=Window(col_off + c0, row_off + r0, w, h)
-                    ).astype(np.float64)
-                    if terr.nodata is not None:
-                        ground[ground == terr.nodata] = np.nan
-
-                    wrote = False
-                    for area, surf in surfaces.items():
-                        if not len(surf.triangles):
-                            continue
-                        arr = np.full((h, w), np.nan, dtype=np.float32)
-                        cel = (np.full((h, w), -1, dtype=np.int32)
-                               if volume_check else None)
-                        # `grid` is already the output window's transform, so
-                        # the tile offsets are output-grid, not terrain-grid;
-                        # row_off/col_off belong only to the terrain read above.
-                        rasterize_surface(surf, grid, r0, c0,
-                                          h, w, out=arr, cells_out=cel)
-                        if not np.isfinite(arr).any():
-                            continue
-                        depth = arr - ground
-                        wet = np.isfinite(depth) & (depth > depth_tol)
-                        if not wet.any():
-                            continue
-                        wrote = True
-                        if volume_check:
-                            mapped[area] += np.bincount(
-                                cel[wet], weights=depth[wet] * px_area,
-                                minlength=surf.n_cell_slots,
-                            )
-                        fresh = wet & (out_d == nodata)
-                        out_w[fresh] = arr[fresh]
-                        out_d[fresh] = depth[fresh].astype(np.float32)
-
-                    if wrote:
-                        dst_w.write(out_w, 1, window=Window(c0, r0, w, h))
-                        dst_d.write(out_d, 1, window=Window(c0, r0, w, h))
 
     return {
         "wse_path": wse_path,
@@ -984,7 +1028,453 @@ def export_wse_depth(
         "bounds": (grid.c, grid.f + grid.e * height,
                    grid.c + grid.a * width, grid.f),
         "shape": (height, width),
+        "mode": mode,
     }
+
+
+NODATA = -9999.0
+
+
+def _write_depth_grid(
+    surfaces,
+    terr,
+    bounds,
+    wse_path,
+    depth_path,
+    *,
+    mapped,
+    tile: int,
+    depth_tol: float,
+    volume_check: bool,
+    label: str,
+    mask_sources=(),
+):
+    """Rasterise every surface onto one terrain raster's grid and write it.
+
+    The shared body of both exports.  `terr` is an open reader; the output grid
+    is the window of *its* grid covering `bounds`, so the terrain being
+    subtracted is never resampled.
+
+    `mask_sources` is an iterable of open readers for terrain sources that
+    outrank `terr`.  A pixel whose centre lands on valid data in any of them is
+    left NoData here, so a lower-priority source never paints over ground a
+    higher-priority one already describes.  Empty for a single-grid export.
+
+    Each such source's valid/invalid mask is held in memory for the whole pass,
+    one byte per source pixel, and indexed by computed row and column rather than
+    resampled.  Letting GDAL decimate the mask into each tile instead looked
+    equivalent and was not: measured on Hillside 2026-09-14, a boundless
+    `out_shape` read of the 1 ft c02 source into 3.28 ft tiles over-masked
+    30,891 px whose centres lie nowhere near c02, dropping 0.58% of the water.
+    Indexing is exact, and holding the mask is affordable because the
+    higher-priority source is the detail patch, not the base — c02 is 38 MB.
+
+    Returns `(grid_transform, height, width)`.  `mapped` is accumulated in place.
+    """
+    import rasterio
+    from rasterio.windows import Window
+    from rasterio.windows import transform as window_transform
+
+    row_off, col_off, height, width = _snapped_grid(
+        bounds, terr.transform, terr.width, terr.height
+    )
+    if height <= 0 or width <= 0:
+        raise ValueError(
+            "the mesh does not overlap the terrain raster; check that "
+            f"{label} is the terrain this geometry was built on"
+        )
+    win = Window(col_off, row_off, width, height)
+    grid = window_transform(win, terr.transform)
+    px_area = abs(grid.a * grid.e)
+
+    profile = dict(
+        driver="GTiff", dtype="float32", count=1, nodata=NODATA,
+        width=width, height=height, transform=grid, crs=terr.crs,
+        tiled=True, blockxsize=256, blockysize=256,
+        compress="deflate", predictor=3, zlevel=6, BIGTIFF="YES",
+    )
+
+    masks = []
+    for higher in mask_sources:
+        hnd = higher.nodata
+        block = higher.read(1)
+        masks.append(((block != hnd) if hnd is not None
+                      else np.ones(block.shape, dtype=bool), higher.transform))
+        del block
+
+    with rasterio.open(wse_path, "w", **profile) as dst_w, \
+         rasterio.open(depth_path, "w", **profile) as dst_d:
+        for r0 in range(0, height, tile):
+            h = min(tile, height - r0)
+            for c0 in range(0, width, tile):
+                w = min(tile, width - c0)
+                out_w = np.full((h, w), NODATA, dtype=np.float32)
+                out_d = np.full((h, w), NODATA, dtype=np.float32)
+
+                ground = terr.read(
+                    1, window=Window(col_off + c0, row_off + r0, w, h)
+                ).astype(np.float64)
+                if terr.nodata is not None:
+                    ground[ground == terr.nodata] = np.nan
+
+                if masks:
+                    # Output pixel centres, in project coordinates.
+                    xs = grid.c + (c0 + np.arange(w) + 0.5) * grid.a
+                    ys = grid.f + (r0 + np.arange(h) + 0.5) * grid.e
+                    for valid, ht in masks:
+                        hh, hw_ = valid.shape
+                        hc = np.floor((xs - ht.c) / ht.a).astype(np.int64)
+                        hr = np.floor((ys - ht.f) / ht.e).astype(np.int64)
+                        okc = (hc >= 0) & (hc < hw_)
+                        okr = (hr >= 0) & (hr < hh)
+                        if not (okc.any() and okr.any()):
+                            continue
+                        sub = valid[np.ix_(hr[okr], hc[okc])]
+                        ground[np.ix_(okr, okc)] = np.where(
+                            sub, np.nan, ground[np.ix_(okr, okc)]
+                        )
+
+                wrote = False
+                for area, surf in surfaces.items():
+                    if not len(surf.triangles):
+                        continue
+                    arr = np.full((h, w), np.nan, dtype=np.float32)
+                    cel = (np.full((h, w), -1, dtype=np.int32)
+                           if volume_check else None)
+                    # `grid` is already the output window's transform, so the
+                    # tile offsets are output-grid, not terrain-grid;
+                    # row_off/col_off belong only to the terrain read above.
+                    rasterize_surface(surf, grid, r0, c0,
+                                      h, w, out=arr, cells_out=cel)
+                    if not np.isfinite(arr).any():
+                        continue
+                    depth = arr - ground
+                    wet = np.isfinite(depth) & (depth > depth_tol)
+                    if not wet.any():
+                        continue
+                    wrote = True
+                    if volume_check:
+                        mapped[area] += np.bincount(
+                            cel[wet], weights=depth[wet] * px_area,
+                            minlength=surf.n_cell_slots,
+                        )
+                    fresh = wet & (out_d == NODATA)
+                    out_w[fresh] = arr[fresh]
+                    out_d[fresh] = depth[fresh].astype(np.float32)
+
+                if wrote:
+                    dst_w.write(out_w, 1, window=Window(c0, r0, w, h))
+                    dst_d.write(out_d, 1, window=Window(c0, r0, w, h))
+
+    return grid, height, width
+
+
+# ---------------------------
+# Per-source export (RAS Mapper's own layout)
+# ---------------------------
+
+def vrt_sources(vrt_path: str) -> list[str]:
+    """Source rasters of a terrain `.vrt`, in RAS Mapper priority order.
+
+    RAS Mapper builds a terrain from one raster per source dataset and writes a
+    `.vrt` tying them together.  The `.hdf` beside it records a `Priority` per
+    source under `Terrain/<name>`, **0 being the highest**, and the `.vrt` lists
+    the sources in that same order — highest priority first.
+
+    That correspondence is not assumed here.  When a sibling `.hdf` carries
+    `Priority` attributes they are read and used, and a disagreement with the
+    `.vrt`'s own order is logged as a warning rather than silently resolved one
+    way; without them the `.vrt` order stands.  Surveyed across every terrain in
+    this workspace 2026-09-14 — 38 `.vrt`, 36 of them with `Priority` — the two
+    agreed **36 times out of 36**, single-source and multi (Hillside's 2, the
+    Baxter example's 5, Muncie's `TerrainWithChannel` 2).  The two without
+    `Priority` are old HEC example projects, one of them multi-source
+    (`BaldEagleCrkMulti2D/Terrain50`: `dtm_20ft` then `baldeagledem`), which is
+    why the `.vrt` order has to remain a working fallback.
+
+    **GDAL renders a VRT in the opposite order.**  Sources are composited in
+    document order, so the *last* one wins wherever it has data — and RAS Mapper
+    does not hole the lower-priority terrain tiles, it stitches them internally
+    instead (`Terrain/Stitch TIN *` in the `.hdf`).  The consequence, measured on
+    `NKC_Hillside_Levee` `02_Surveyed_Channel` 2026-09-14: the c02 surveyed
+    channel is `Priority` 0 and listed first, the s04 LiDAR is `Priority` 1 and
+    listed last, and **reading the `.vrt` returns the LiDAR throughout the
+    channel** — up to 2.5 ft above the surveyed bed over the 249,405 ft**2 the
+    survey covers.  So a depth raster computed against the bare `.vrt` is wrong
+    by that much in exactly the place a ditch model cares about.
+
+    `export_wse_depth_per_source` avoids this by computing against each source
+    raster directly and masking out whatever a higher-priority source covers,
+    which is also what RAS Mapper's own depth export does — verified on the same
+    model: over the 52,493 px where its c02 and s04 depth tiles overlap,
+    `c02 + depth_c02` equals `s04 + depth_s04` exactly, and its s04 depth tile is
+    NoData over 79% of the c02 footprint.
+
+    Returns absolute paths, `relativeToVRT` resolved.  Raises `ValueError` when
+    the file has no sources.
+    """
+    import os
+    import xml.etree.ElementTree as ET
+
+    root = ET.parse(vrt_path).getroot()
+    base = os.path.dirname(os.path.abspath(vrt_path))
+    out = []
+    for node in root.iter("SourceFilename"):
+        name = (node.text or "").strip()
+        if not name:
+            continue
+        if node.get("relativeToVRT") == "1":
+            name = os.path.join(base, name)
+        out.append(os.path.abspath(name))
+    if not out:
+        raise ValueError(f"{vrt_path} lists no source rasters")
+
+    ranked = _hdf_priority_order(vrt_path, out)
+    if ranked is not None and ranked != out:
+        logging.warning(
+            "%s lists its sources in a different order than the Priority "
+            "attributes in the terrain HDF beside it; using the HDF. "
+            "vrt=%s hdf=%s",
+            os.path.basename(vrt_path),
+            [os.path.basename(x) for x in out],
+            [os.path.basename(x) for x in ranked],
+        )
+        return ranked
+    return out
+
+
+def _hdf_priority_order(vrt_path: str, sources: list[str]) -> list[str] | None:
+    """`sources` reordered by the sibling terrain HDF's `Priority`, or None.
+
+    None when there is no readable sibling `.hdf`, when it carries no `Priority`
+    attributes, or when its groups do not cover every source — any of which
+    leaves the `.vrt`'s own order as the only evidence.
+    """
+    import os
+
+    hdf_path = os.path.splitext(vrt_path)[0] + ".hdf"
+    if not os.path.exists(hdf_path):
+        return None
+    try:
+        with h5py.File(hdf_path, "r") as hdf:
+            grp = hdf.get("Terrain")
+            if grp is None:
+                return None
+            prio = {k: int(grp[k].attrs["Priority"])
+                    for k in grp
+                    if hasattr(grp[k], "attrs") and "Priority" in grp[k].attrs}
+    except (OSError, KeyError, ValueError):
+        # An unreadable or unexpected HDF is not a reason to fail the export.
+        return None
+    if not prio:
+        return None
+
+    # The group name is the source's stem, which is how RAS ties the two files.
+    by_stem = {os.path.splitext(os.path.basename(s))[0]: s for s in sources}
+    if set(prio) != set(by_stem):
+        return None
+    return [by_stem[k] for k in sorted(prio, key=lambda k: prio[k])]
+
+
+def clone_source_vrt(terrain_vrt: str, out_vrt: str, replacements: dict) -> str:
+    """Clone a terrain `.vrt`, pointing each source at another raster instead.
+
+    Cloning rather than rebuilding keeps the grid bit for bit: RAS Mapper places
+    a source at a fractional `DstRect` offset (8446.30497208284 px on Hillside),
+    and a rebuilt VRT would round it.  `replacements` maps each source's absolute
+    path — as `vrt_sources` returns it — to the file that replaces it; a source
+    with no entry is dropped from the clone.
+
+    Every replacement must sit on its source's own full grid, which is what
+    `export_wse_depth_per_source` writes, because the clone keeps the terrain's
+    `SrcRect` and `DstRect`.  Use it to wrap anything derived source by source —
+    a set of per-source differences, say.
+
+    Band statistics and histograms describe the terrain, not whatever replaced
+    it, so they are stripped; GDAL recomputes them on demand.
+    """
+    import os
+    import xml.etree.ElementTree as ET
+
+    tree = ET.parse(terrain_vrt)
+    root = tree.getroot()
+    base = os.path.dirname(os.path.abspath(terrain_vrt))
+
+    for band in root.findall("VRTRasterBand"):
+        for tag in ("Metadata", "Histograms"):
+            for stale in band.findall(tag):
+                band.remove(stale)
+        for src in list(band):
+            fn = src.find("SourceFilename")
+            if fn is None:
+                continue
+            name = (fn.text or "").strip()
+            if fn.get("relativeToVRT") == "1":
+                name = os.path.join(base, name)
+            hit = replacements.get(os.path.abspath(name))
+            if hit is None:
+                band.remove(src)
+                continue
+            fn.set("relativeToVRT", "1")
+            fn.text = os.path.basename(hit)
+
+    tree.write(out_vrt, encoding="utf-8", xml_declaration=False)
+    return out_vrt
+
+
+def export_wse_depth_per_source(
+    hdf_path: str,
+    terrain_vrt: str,
+    out_dir: str,
+    *,
+    areas: list[str] | None = None,
+    wse_type: str = "Maximum",
+    prefix: str | None = None,
+    tile: int = 2048,
+    depth_tol: float = 0.01,
+    dry_tol: float = DRY_TOL,
+    allow_crs_mismatch: bool = False,
+    volume_check: bool = True,
+    mode: str = "horizontal",
+) -> dict:
+    """Write one WSE and depth raster per terrain source, plus a `.vrt`.
+
+    This is the layout RAS Mapper itself writes — `Depth (Max).<terrain>.<source>
+    .tif` for each source at that source's own resolution, tied by a `.vrt`
+    cloned from the terrain's — so the output drops straight in beside a RAS
+    Mapper export and compares to it pixel for pixel, with no resampling of
+    either side.
+
+    Two reasons to prefer it over `export_wse_depth`:
+
+    * **The terrain is right.**  Depth is computed against each source raster
+      directly, so a high-priority source is not silently overwritten by a
+      coarser one the way it is when the `.vrt` is read as a single raster.  See
+      `vrt_sources` for the measurement.
+    * **The output is the size it should be.**  A 1 m source upsampled to a 1 ft
+      grid is ~11x the pixels for no information.
+
+    Every source keeps its own grid, so the outputs are *not* a single array and
+    cannot be differenced across sources — read them through the `.vrt`, or use
+    `export_wse_depth` when a single grid is what is wanted.  Differencing two
+    *plans* needs no care at all here, though: there is no `bounds` parameter
+    because each output covers its source's **full extent**, exactly as RAS
+    Mapper writes it, so every plan mapped against one terrain lands on the same
+    grid per source and `difference_rasters` works file for file.  Writing the
+    full extent is also what keeps the cloned `.vrt` correct — its `SrcRect` and
+    `DstRect` are the terrain's, and a windowed output would not fit them.  The
+    cost is only NoData, which deflates to almost nothing.
+
+    Parameters
+    ----------
+    hdf_path, out_dir, areas, wse_type, prefix, tile, depth_tol, dry_tol,
+    allow_crs_mismatch, volume_check, mode
+        As `export_wse_depth`.  `mode` defaults to `"horizontal"` here, because
+        reproducing RAS Mapper's own output is what this layout is for.
+    terrain_vrt : str
+        Terrain `.vrt`.  A plain GeoTIFF has one source and works, but then
+        `export_wse_depth` is the simpler call.
+
+    Returns
+    -------
+    dict
+        `wse_path` and `depth_path` (the two `.vrt` files), `wse_paths` and
+        `depth_paths` (`{source: tif}` in priority order), `surfaces`, `wse`,
+        `mapped_volumes`, `shapes` (`{source: (h, w)}`), `mode`.
+    """
+    import os
+
+    import rasterio
+
+    from hack_ras.results.reader import list_areas, read_wse
+
+    _check_terrain_crs(hdf_path, terrain_vrt, allow_crs_mismatch)
+
+    sources = vrt_sources(terrain_vrt)
+    if areas is None:
+        areas = list_areas(hdf_path)
+    if not areas:
+        raise ValueError(f"{hdf_path} has no 2D flow areas to map")
+
+    surfaces = {}
+    wse_by_area = {}
+    for area in areas:
+        wse_by_area[area] = read_wse(hdf_path, area, wse_type)
+        surfaces[area] = build_wse_surface(
+            hdf_path, area, wse_by_area[area], dry_tol=dry_tol, mode=mode
+        )
+    live = [s for s in surfaces.values() if len(s.triangles)]
+    if not live:
+        raise ValueError(
+            f"no wet cells in {areas} of {hdf_path} at wse_type={wse_type!r}"
+        )
+    mesh = (min(s.bounds[0] for s in live), min(s.bounds[1] for s in live),
+            max(s.bounds[2] for s in live), max(s.bounds[3] for s in live))
+
+    os.makedirs(out_dir, exist_ok=True)
+    if prefix is None:
+        stem = os.path.splitext(os.path.basename(hdf_path))[0]
+        prefix = f"{stem}_{wse_type.replace(' ', '_')}"
+
+    mapped = {a: np.zeros(s.n_cell_slots, dtype=np.float64)
+              for a, s in surfaces.items()}
+    wse_paths: dict[str, str] = {}
+    depth_paths: dict[str, str] = {}
+    shapes: dict[str, tuple[int, int]] = {}
+
+    # Priority order, highest first, so each source masks out every source
+    # already written above it.
+    for i, source in enumerate(sources):
+        src_stem = os.path.splitext(os.path.basename(source))[0]
+        w_path = os.path.join(out_dir, f"{prefix}_WSE.{src_stem}.tif")
+        d_path = os.path.join(out_dir, f"{prefix}_Depth.{src_stem}.tif")
+        opened = [rasterio.open(s) for s in sources[:i]]
+        try:
+            with rasterio.open(source) as terr:
+                b = terr.bounds
+                if (b.right <= mesh[0] or b.left >= mesh[2]
+                        or b.top <= mesh[1] or b.bottom >= mesh[3]):
+                    # A source that does not reach the mesh at all is normal on a
+                    # terrain assembled from tiles; drop it from the mosaic.
+                    logging.info("%s does not reach the mesh; skipped", src_stem)
+                    continue
+                # The source's own full extent, so the cloned .vrt still fits.
+                _, h, w = _write_depth_grid(
+                    surfaces, terr, (b.left, b.bottom, b.right, b.top),
+                    w_path, d_path,
+                    mapped=mapped, tile=tile, depth_tol=depth_tol,
+                    volume_check=volume_check, label=source,
+                    mask_sources=opened,
+                )
+        finally:
+            for r in opened:
+                r.close()
+        wse_paths[source] = w_path
+        depth_paths[source] = d_path
+        shapes[source] = (h, w)
+
+    if not depth_paths:
+        raise ValueError(
+            f"no source of {terrain_vrt} overlaps the mesh of {hdf_path}"
+        )
+
+    wse_vrt = clone_source_vrt(
+        terrain_vrt, os.path.join(out_dir, f"{prefix}_WSE.vrt"), wse_paths)
+    depth_vrt = clone_source_vrt(
+        terrain_vrt, os.path.join(out_dir, f"{prefix}_Depth.vrt"), depth_paths)
+
+    return {
+        "wse_path": wse_vrt,
+        "depth_path": depth_vrt,
+        "wse_paths": wse_paths,
+        "depth_paths": depth_paths,
+        "surfaces": surfaces,
+        "wse": wse_by_area,
+        "mapped_volumes": mapped,
+        "shapes": shapes,
+        "mode": mode,
+    }
+
 
 
 # ---------------------------
