@@ -48,6 +48,23 @@ def _read(path):
         return f.read()
 
 
+def _entry_ids(path, key):
+    """The file IDs on the .prj's <key> lines, in document order."""
+    return [l[len(key):].strip() for l in _read(path).splitlines()
+            if l.startswith(key)]
+
+
+def _set_entry_order(path, key, ids):
+    """Rewrite the .prj's <key> lines to name <ids>, keeping line positions —
+    i.e. scramble the entry order without touching anything else."""
+    lines = _read(path).splitlines()
+    slots = [i for i, l in enumerate(lines) if l.startswith(key)]
+    assert len(slots) == len(ids), (slots, ids)
+    for i, fid in zip(slots, ids):
+        lines[i] = f"{key}{fid}"
+    _write(path, lines)
+
+
 def _plan_lines(title, breach_time):
     return [
         f"Plan Title={title}",
@@ -548,14 +565,29 @@ class TestCompactPlans(RichProjectBase):
     def test_compact_noop_when_contiguous(self):
         self.assertEqual(compact_plans(self.project), {})
 
+    def test_compact_leaves_the_prj_entry_order_alone(self):
+        # deliberate asymmetry with reorder_plans: compacting is numbering
+        # hygiene, not presentation, and an entry order that differs from the
+        # numeric one is a legitimate thing to have curated — e.g. a recycled
+        # number deliberately kept last in the list
+        delete_plan(self.project, "p01")              # p02, p03 remain
+        _set_entry_order(self.prj_path, "Plan File=", ["p03", "p02"])
+        self.project = RasProject(self.prj_path)
+        self.assertEqual(compact_plans(self.project), {"p02": "p01",
+                                                       "p03": "p02"})
+        self.assertEqual(_entry_ids(self.prj_path, "Plan File="),
+                         ["p02", "p01"])
+
 
 class TestReorderPlans(RichProjectBase):
     def test_reorder_swaps_plans_and_follows_artifacts(self):
         # p01, p03, p02 -> the p02/p03 pair trades places (a 2-cycle)
         mapping = reorder_plans(self.project, ["p01", "p03", "p02"])
         self.assertEqual(mapping, {"p03": "p02", "p02": "p03"})
+        # reorder_plans sorts the .prj's Plan File= lines, so the entry order
+        # reads ascending; the plans themselves traded places (titles below)
         self.assertEqual(self.project.model.plan_file_ids,
-                         ["p01", "p03", "p02"])
+                         ["p01", "p02", "p03"])
         self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p02")))
         self.assertIn("Plan Title=Bravo", _read(self.path("Mini.p03")))
         # Bravo's plan-keyed artifacts and its restart file moved with it
@@ -579,12 +611,30 @@ class TestReorderPlans(RichProjectBase):
         delete_plan(self.project, "p02")           # p01, p03 remain
         mapping = reorder_plans(self.project, ["p03", "p01"])
         self.assertEqual(mapping, {"p03": "p01", "p01": "p02"})
-        # values are replaced in the .prj lines' existing positions, so the
-        # entry order needs sort_prj_entries — the IDs are what matter here
-        self.assertEqual(sorted(self.project.model.plan_file_ids),
-                         ["p01", "p02"])
+        self.assertEqual(self.project.model.plan_file_ids, ["p01", "p02"])
         self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p01")))
         self.assertIn("Plan Title=Alpha", _read(self.path("Mini.p02")))
+
+    def test_reorder_sorts_the_prj_entry_lines(self):
+        # renumber_plans rewrites each entry line's p## token in place and
+        # never moves the lines, so without the trailing sort the .prj would
+        # still read p03, p02, p01 and HEC-RAS's dropdown — which lists in
+        # .prj order — would show the pre-reorder sequence
+        reorder_plans(self.project, ["p03", "p02", "p01"])
+        self.assertEqual(_entry_ids(self.prj_path, "Plan File="),
+                         ["p01", "p02", "p03"])
+        self.assertIn("Plan Title=Charlie", _read(self.path("Mini.p01")))
+        self.assertIn("Plan Title=Alpha", _read(self.path("Mini.p03")))
+
+    def test_reorder_sorts_entries_even_when_nothing_is_renumbered(self):
+        # the numbering already matches the requested order, so no file moves —
+        # but a scrambled .prj is exactly the state this call is asking to fix,
+        # so the sort is unconditional rather than guarded by the mapping
+        _set_entry_order(self.prj_path, "Plan File=", ["p03", "p01", "p02"])
+        self.project = RasProject(self.prj_path)
+        self.assertEqual(reorder_plans(self.project, ["p01", "p02", "p03"]), {})
+        self.assertEqual(_entry_ids(self.prj_path, "Plan File="),
+                         ["p01", "p02", "p03"])
 
     def test_incomplete_order_refuses_and_touches_nothing(self):
         with self.assertRaises(ValueError) as ctx:

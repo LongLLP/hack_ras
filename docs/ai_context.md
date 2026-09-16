@@ -263,11 +263,14 @@ insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5; retu
 compact_plans(project)                    # renumber survivors to contiguous p01..pN
 reorder_plans(project, ["p01", "p02",    # renumber into this order as p01..pN;
                         "p05", "p06",    #   the COMPLETE current-ID list is required
-                        "p03", "p04"])   #   (ValueError up front otherwise)
+                        "p03", "p04"])   #   (ValueError up front otherwise). SORTS the
+                                         #   prj entry lines itself — see below
 delete_plans(project, "16-17,21-26,30-35")  # bulk delete by id-spec (fail-fast)
-sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Flow File=
-                                         #   lines ascending; kinds=("plan",) etc. to limit
-                                         #   (kind 'steady' == the prj's 'Flow File=f##' lines)
+sort_prj_entries(project)                # re-sort prj Plan/Geom/Unsteady/Flow File= lines
+                                         #   ascending; kinds=("plan",) etc. to limit
+                                         #   (kind 'steady' == the prj's 'Flow File=f##' lines).
+                                         #   The reorder_* fns call it; after renumber_*/
+                                         #   compact_*/insert_*_gap, call it yourself
 delete_plan(project, "p08",              # deletes plan + outputs; optional unused-file cleanup
             delete_unused_geom=True, delete_unused_flow=True)
 retitle_plan(project, "p58", "FC 002year 260824")   # rename in place; short id follows title
@@ -364,7 +367,29 @@ alone.
   deliberate: naming only the plans to move would make the outcome depend on
   plans the caller never mentioned. Because positions come from the list, a
   project with gaps gets compacted as a side effect. It is the answer to
-  "insert p05 and p06 after p02" — write the order you want, not the moves. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
+  "insert p05 and p06 after p02" — write the order you want, not the moves.
+- **The three `reorder_*` functions sort their own `.prj` entry lines; nothing
+  else does.** Renumbering rewrites each entry line's `p##`/`g##`/`u##` token in
+  place and never moves the lines, so on its own it leaves the `.prj` in its old
+  sequence — and HEC-RAS's plan dropdown and RAS Mapper both list in `.prj`
+  order, so the GUI still looks unsorted even though every file is numbered
+  right. That is not a meaningful state for a *reorder*, whose caller has just
+  named the order they want and for whom the entry order is the only place that
+  order becomes visible, so `reorder_plans` / `reorder_geoms` / `reorder_flows`
+  each end with `sort_prj_entries` for their own kind (unconditionally — a
+  scrambled `.prj` is the state the call is asking to fix, even when the
+  mapping comes back empty). `renumber_*`, `compact_*` and `insert_*_gap`
+  deliberately do NOT: an entry order that differs from the numeric one is a
+  legitimate thing to curate (HEC-RAS appends a recycled number at the END of
+  the list, so a project built in the GUI can read p02, p03, ..., p01 on
+  purpose), and those three are numbering hygiene rather than presentation.
+  Hit for real in the Hillside levee suite 2026-09-11: a reorder looked like it
+  "didn't get fully re-ordered" when only the entry order was stale.
+  **The `.rasmap` is never sorted automatically** — call `project.rasmap.sort()`
+  yourself, and only after RAS Mapper has been opened once so every result layer
+  exists to sort (see `plans_with_unlisted_results`). That asymmetry is the
+  reason the reorder docstrings name it explicitly: the `.prj` being handled for
+  you makes the remaining `.rasmap` step easy to forget. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
   bulk-deletes by a flexible id-spec (`'16-17,21-26,30-35'` string, or a list —
   via `resolve.expand_id_spec`); it validates every id up front (exists, listed,
   not mid-run) so a bad spec deletes NOTHING, then loops `delete_plan` and returns

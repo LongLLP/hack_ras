@@ -58,6 +58,7 @@ from hack_ras.project.plans import (
     plan_path,
 )
 from hack_ras.project.ras_project import RasProject
+from hack_ras.project.sync import sort_prj_entries
 from hack_ras.project.rasmap import (
     remove_flows_from_rasmap,
     renumber_flows_in_rasmap,
@@ -462,8 +463,13 @@ def compact_flows(
     The two namespaces are compacted independently — pass kinds=("unsteady",)
     to leave steady numbering alone (or the reverse). Both kinds' mappings are
     applied in ONE renumber_flows call, so validation still happens before any
-    file is touched. Returns the combined {old_id: new_id} mapping of what moved
-    (empty if everything requested is already contiguous).
+    file is touched.
+
+    The .prj's entry ORDER is left untouched (unlike reorder_flows) — this is
+    numbering hygiene, not presentation. Follow with
+    `sync.sort_prj_entries(project, kinds=kinds)` if the HEC-RAS flow lists
+    should be re-sorted too. Returns the combined {old_id: new_id} mapping of
+    what moved (empty if everything requested is already contiguous).
     """
     mapping = {}
     for kind in kinds:
@@ -491,6 +497,14 @@ def reorder_flows(project: RasProject, order) -> dict:
     listed flow of that kind must appear exactly once — a missing, duplicated,
     unknown, or mixed-kind ID raises ValueError before any file is touched.
     Because positions come from the list, a kind with gaps gets compacted too.
+
+    That kind's .prj entry lines are re-sorted ascending before returning
+    (`sync.sort_prj_entries`) — only that kind's, since the two namespaces are
+    independent. Renumbering alone rewrites each line's ## token in place
+    without moving the lines, so the .prj would keep its old sequence and
+    HEC-RAS's flow list — which reads in .prj order — would still show the
+    pre-reorder one. `compact_flows` and `renumber_flows` deliberately do NOT
+    sort; see reorder_plans for the reasoning.
 
     Returns the {old_id: new_id} mapping of what moved (empty if `order` is
     already the current numbering).
@@ -531,6 +545,7 @@ def reorder_flows(project: RasProject, order) -> dict:
             mapping[fid] = target
     if mapping:
         renumber_flows(project, mapping)
+    sort_prj_entries(project, kinds=(_LETTER_KIND[letter],))
     return mapping
 
 

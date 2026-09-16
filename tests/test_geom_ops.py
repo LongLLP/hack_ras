@@ -42,6 +42,23 @@ def _read(path):
         return f.read()
 
 
+def _entry_ids(path, key):
+    """The file IDs on the .prj's <key> lines, in document order."""
+    return [l[len(key):].strip() for l in _read(path).splitlines()
+            if l.startswith(key)]
+
+
+def _set_entry_order(path, key, ids):
+    """Rewrite the .prj's <key> lines to name <ids>, keeping line positions —
+    i.e. scramble the entry order without touching anything else."""
+    lines = _read(path).splitlines()
+    slots = [i for i, l in enumerate(lines) if l.startswith(key)]
+    assert len(slots) == len(ids), (slots, ids)
+    for i, fid in zip(slots, ids):
+        lines[i] = f"{key}{fid}"
+    _write(path, lines)
+
+
 _RASMAP = [
     "<RASMapper>",
     "  <Geometries>",
@@ -204,6 +221,20 @@ class TestReorderGeoms(GeomProjectBase):
         self.assertIn('GeometryHDF=".\\Mini.g03.hdf"', rm)
         self.assertEqual([n for n in os.listdir(self.folder)
                           if "renumtmp" in n], [])
+
+    def test_reorder_sorts_its_own_prj_entry_lines_only(self):
+        # renumber_geoms rewrites each entry line's g## token in place without
+        # moving the lines, so the trailing sort is what actually reorders
+        # HEC-RAS's geometry list. The plan entries are a different kind and
+        # must be left exactly as they were.
+        _set_entry_order(self.prj_path, "Plan File=",
+                         ["p04", "p01", "p02", "p03"])
+        self.project = RasProject(self.prj_path)
+        reorder_geoms(self.project, ["g01", "g03", "g02"])
+        self.assertEqual(_entry_ids(self.prj_path, "Geom File="),
+                         ["g01", "g02", "g03"])
+        self.assertEqual(_entry_ids(self.prj_path, "Plan File="),
+                         ["p04", "p01", "p02", "p03"])
 
     def test_reorder_accepts_loose_ids(self):
         self.assertEqual(reorder_geoms(self.project, ["1", "G3", "g2"]),

@@ -50,6 +50,23 @@ def _read(path):
         return f.read()
 
 
+def _entry_ids(path, key):
+    """The file IDs on the .prj's <key> lines, in document order."""
+    return [l[len(key):].strip() for l in _read(path).splitlines()
+            if l.startswith(key)]
+
+
+def _set_entry_order(path, key, ids):
+    """Rewrite the .prj's <key> lines to name <ids>, keeping line positions —
+    i.e. scramble the entry order without touching anything else."""
+    lines = _read(path).splitlines()
+    slots = [i for i, l in enumerate(lines) if l.startswith(key)]
+    assert len(slots) == len(ids), (slots, ids)
+    for i, fid in zip(slots, ids):
+        lines[i] = f"{key}{fid}"
+    _write(path, lines)
+
+
 _RASMAP = [
     "<RASMapper>",
     "  <EventConditions>",
@@ -284,6 +301,20 @@ class TestReorderFlows(FlowProjectBase):
         self.assertIn("Flow Title=Unsteady One", _read(self.path("Mini.u02")))
         self.assertIn("Flow Title=Unsteady Four", _read(self.path("Mini.u03")))
         self.assertEqual(self.plan_flow("p05"), "u01")
+
+    def test_reorder_sorts_only_the_kind_it_was_given(self):
+        # the two namespaces are independent, so reordering the unsteady flows
+        # sorts the Unsteady File= lines and must leave a deliberately
+        # scrambled Flow File= (steady) order untouched
+        _set_entry_order(self.prj_path, "Unsteady File=",
+                         ["u04", "u01", "u02"])
+        _set_entry_order(self.prj_path, "Flow File=", ["f03", "f01"])
+        self.project = RasProject(self.prj_path)
+        reorder_flows(self.project, ["u02", "u01", "u04"])
+        self.assertEqual(_entry_ids(self.prj_path, "Unsteady File="),
+                         ["u01", "u02", "u03"])
+        self.assertEqual(_entry_ids(self.prj_path, "Flow File="),
+                         ["f03", "f01"])
 
     def test_reorder_steady(self):
         self.assertEqual(reorder_flows(self.project, ["f03", "f01"]),

@@ -35,6 +35,7 @@ from hack_ras.project.plans import (
     plan_path,
 )
 from hack_ras.project.ras_project import RasProject
+from hack_ras.project.sync import sort_prj_entries
 from hack_ras.project.rasmap import (
     remove_geoms_from_rasmap,
     renumber_geoms_in_rasmap,
@@ -317,8 +318,13 @@ def insert_geom_gap(project: RasProject, at_id: str, count: int) -> dict:
 
 def compact_geoms(project: RasProject) -> dict:
     """Renumber the listed geometries to a contiguous g01..gN by ascending
-    number, filling any gaps (e.g. g01,g03,g05 -> g01,g02,g03). Returns the
-    {old_id: new_id} mapping of what moved (empty if already contiguous)."""
+    number, filling any gaps (e.g. g01,g03,g05 -> g01,g02,g03).
+
+    The .prj's entry ORDER is left untouched (unlike reorder_geoms) — this is
+    numbering hygiene, not presentation. Follow with
+    `sync.sort_prj_entries(project, kinds=("geom",))` if the HEC-RAS geometry
+    list should be re-sorted too. Returns the {old_id: new_id} mapping of what
+    moved (empty if already contiguous)."""
     sorted_ids = sorted(project.model.geom_file_ids, key=_geom_num)
     mapping = {}
     for i, gid in enumerate(sorted_ids, start=1):
@@ -351,6 +357,13 @@ def reorder_geoms(project: RasProject, order) -> dict:
     that uses it (plus the .rasmap's `<Geometries>` layer and each plan layer's
     `GeometryHDF=`). The renumbering itself is done by renumber_geoms; see there.
 
+    The .prj's `Geom File=` entry lines are re-sorted ascending before
+    returning (`sync.sort_prj_entries`). Renumbering alone rewrites each line's
+    g## token in place without moving the lines, so the .prj would keep its old
+    sequence and HEC-RAS's geometry list — which reads in .prj order — would
+    still show the pre-reorder one. `compact_geoms` and `renumber_geoms`
+    deliberately do NOT sort; see reorder_plans for the reasoning.
+
     Returns the {old_id: new_id} mapping of what moved (empty if `order` is
     already the current numbering).
     """
@@ -379,6 +392,7 @@ def reorder_geoms(project: RasProject, order) -> dict:
             mapping[gid] = target
     if mapping:
         renumber_geoms(project, mapping)
+    sort_prj_entries(project, kinds=("geom",))
     return mapping
 
 
