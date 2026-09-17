@@ -351,6 +351,12 @@ def reorder_geoms(project: RasProject, order) -> dict:
     that uses it (plus the .rasmap's `<Geometries>` layer and each plan layer's
     `GeometryHDF=`). The renumbering itself is done by renumber_geoms; see there.
 
+    The .prj's entry ORDER is not changed — renumbering rewrites each entry
+    line's g## token in place without moving the lines, so HEC-RAS's geometry
+    list, which reads in .prj order, still shows the old sequence. Follow with
+    `sync.sort_prj_entries(project, kinds=("geom",))`; see reorder_plans for
+    why no sort is automatic.
+
     Returns the {old_id: new_id} mapping of what moved (empty if `order` is
     already the current numbering).
     """

@@ -51,7 +51,12 @@ VALUES_KEY = "Faces Area Elevation Values"
 INFO_KEY = "Faces Area Elevation Info"
 
 
-@unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
+# HAS_GIS, not HAS_RESULTS: read_face_geometry builds shapely polygons via a
+# lazy `from shapely.geometry import Polygon` inside reader.py, so h5py alone is
+# not enough and nothing at module level reveals the dependency. With only the
+# results guard these five tests FAIL with ModuleNotFoundError (instead of
+# skipping like their three siblings below) in any env without shapely.
+@unittest.skipUnless(HAS_GIS, "hack_ras[gis,results] extras not installed")
 @unittest.skipUnless(HAS_HDF, "no .p##.hdf fixture at tests/data/")
 class TestReadFaceGeometry(unittest.TestCase):
 

@@ -492,6 +492,13 @@ def reorder_flows(project: RasProject, order) -> dict:
     unknown, or mixed-kind ID raises ValueError before any file is touched.
     Because positions come from the list, a kind with gaps gets compacted too.
 
+    The .prj's entry ORDER is not changed — renumbering rewrites each entry
+    line's ## token in place without moving the lines, so HEC-RAS's flow list,
+    which reads in .prj order, still shows the old sequence. Follow with
+    `sync.sort_prj_entries(project, kinds=(<this kind>,))` — 'unsteady' or
+    'steady', since the two namespaces are independent. See reorder_plans for
+    why no sort is automatic.
+
     Returns the {old_id: new_id} mapping of what moved (empty if `order` is
     already the current numbering).
     """

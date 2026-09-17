@@ -52,7 +52,8 @@ block module as its parser, so read/write format knowledge stays in one place �
 pattern. Shared 8-char fixed-width helpers (`_fmt`, `_fmt_or_blank`,
 `_write_triplet_lines`) live in `blocks/base.py` next to `read_fixed_fields`.
 
-Implemented block parsers (as of 2026-06-23):
+Implemented block parsers (list current as of 2026-09-17 — `ls
+hack_ras/geometry/blocks/` is the live check). Documented in detail below:
 - `blocks/xs_sta_elev.py` — `#Sta/Elev= N`: reads N station/elevation pairs from
   8-char fixed-width fields; returns `(List[Tuple[float,float]], lines_consumed)`.
   Populates `CrossSection.sta_elev`.
@@ -71,6 +72,16 @@ Implemented block parsers (as of 2026-06-23):
   Populates `CrossSection.manning_def`.
 - `blocks/xs_bank_sta.py` — `Bank Sta=left,right`: single-line parse; returns
   `((float, float), 1)`.  Populates `CrossSection.bank_stations`.
+- `blocks/river_reach.py`, `blocks/xs_metadata.py`, `blocks/xs_gis.py` — the
+  reach header, per-XS metadata, and `XS GIS Cut Line=` blocks underpinning the
+  geometry parse and `geometry/shift.py`.
+- `blocks/xs_block_obstruct.py` — `#Block Obstruct=` → `CrossSection.blocked_obstructions`.
+- `blocks/xs_levee.py` — `Levee=` → `CrossSection.levee`. Both added 2026-07-21 for
+  the active-flow work and are PARSE-ONLY: no writer / `merge.py` support yet
+  (item A in `docs/TODO.md`). Same 8-char triplet layout as IFAs, but with no
+  `Permanent` follower line — see the active-flow notes in `ai_context.md`.
+- `blocks/storage_area_2d.py` — storage-area / 2D-flow-area blocks, incl. the
+  `Storage Area 2D Points` cell-seed block.
 - `blocks/connection.py` — the `Connection=` block family (SA/2D connections).
   Header gives name + label anchor (a GUI draw position, NOT a geometry point);
   `Connection Line=` is the 16-char XY layout of `XS GIS Cut Line=` and

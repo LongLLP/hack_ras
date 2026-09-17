@@ -263,11 +263,14 @@ insert_plan_gap(project, "p25", 5)       # shifts all plans >= p25 up by 5; retu
 compact_plans(project)                    # renumber survivors to contiguous p01..pN
 reorder_plans(project, ["p01", "p02",    # renumber into this order as p01..pN;
                         "p05", "p06",    #   the COMPLETE current-ID list is required
-                        "p03", "p04"])   #   (ValueError up front otherwise)
+                        "p03", "p04"])   #   (ValueError up front otherwise). Does NOT
+                                         #   sort the prj/rasmap — see the bullet below
 delete_plans(project, "16-17,21-26,30-35")  # bulk delete by id-spec (fail-fast)
-sort_prj_entries(project)                # optional: re-sort prj Plan/Geom/Unsteady/Flow File=
-                                         #   lines ascending; kinds=("plan",) etc. to limit
-                                         #   (kind 'steady' == the prj's 'Flow File=f##' lines)
+sort_prj_entries(project)                # re-sort prj Plan/Geom/Unsteady/Flow File= lines
+                                         #   ascending; kinds=("plan",) etc. to limit
+                                         #   (kind 'steady' == the prj's 'Flow File=f##' lines).
+                                         #   Standalone — NOTHING calls it for you; it is the
+                                         #   required 2nd step after any renumber/reorder
 delete_plan(project, "p08",              # deletes plan + outputs; optional unused-file cleanup
             delete_unused_geom=True, delete_unused_flow=True)
 retitle_plan(project, "p58", "FC 002year 260824")   # rename in place; short id follows title
@@ -364,7 +367,33 @@ alone.
   deliberate: naming only the plans to move would make the outcome depend on
   plans the caller never mentioned. Because positions come from the list, a
   project with gaps gets compacted as a side effect. It is the answer to
-  "insert p05 and p06 after p02" — write the order you want, not the moves. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
+  "insert p05 and p06 after p02" — write the order you want, not the moves.
+- **Renumbering NEVER re-sorts the `.prj` or the `.rasmap` — a reorder is a
+  two- or three-step job.** This catches people out, so it is worth stating
+  flatly: `renumber_*`, `compact_*`, `insert_*_gap` and the three `reorder_*`
+  functions all rewrite each `.prj` entry line's `p##`/`g##`/`u##` TOKEN in
+  place and never move the lines. The entry order is therefore whatever it
+  already was — and HEC-RAS's plan dropdown, its geometry/flow lists, and RAS
+  Mapper all display in `.prj` order, so after a reorder the GUI still shows
+  the OLD sequence even though every file on disk is numbered correctly. The
+  full incantation:
+
+  ```python
+  reorder_plans(project, order)                      # 1. the files
+  sort_prj_entries(project, kinds=("plan",))         # 2. the GUI order
+  project.rasmap.sort()                              # 3. RAS Mapper's layers
+  ```
+
+  Step 3 belongs AFTER RAS Mapper has been opened once post-run, so every
+  result layer exists to be sorted (`plans_with_unlisted_results` tells you
+  whether it has). Hit for real in the Hillside levee suite 2026-09-11: a
+  reorder looked like it "didn't get fully re-ordered" when only step 2 was
+  missing. Making step 2 automatic inside `reorder_*` was implemented and then
+  deliberately REVERTED (2026-09-16/17) — an entry order that differs from the
+  numeric one is a legitimate thing to curate, since HEC-RAS appends a recycled
+  number at the END of the list, so a GUI-built project can read p02, p03, ...,
+  p01 on purpose; and auto-sorting only the `.prj` would make the still-manual
+  step 3 easier to forget. Do not re-propose it without asking. `delete_plans(project, spec, delete_unused_geom=, delete_unused_flow=)`
   bulk-deletes by a flexible id-spec (`'16-17,21-26,30-35'` string, or a list —
   via `resolve.expand_id_spec`); it validates every id up front (exists, listed,
   not mid-run) so a bad spec deletes NOTHING, then loops `delete_plan` and returns
@@ -2939,12 +2968,17 @@ and `list_breach_connections` strips the area prefix so the two spellings collap
 entry.
 
 ## Current Work
-*(Last updated: 2026-08-03, session 18)*
+*(Last updated: 2026-08-03, session 18 — the list below has NOT been maintained
+since. Subsystems added after it each own a `##` section above: plan settings,
+version detection, culvert groups, breach definitions/results, active flow,
+WSE/depth mapping and raster diffing. `grep "^## " docs/ai_context.md` is the
+reliable index; trust the per-topic sections over this one.)*
 - `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
 - `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
 - `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
-  `CrossSection.sta_elev`, `CrossSection.ineff`, `CrossSection.manning`, and
-  `CrossSection.bank_stations` are all populated.
+  `CrossSection.sta_elev`, `CrossSection.ineff`, `CrossSection.manning_def`, and
+  `CrossSection.bank_stations` are all populated. (The field is `manning_def`, a
+  `ManningDef`; there is no `CrossSection.manning`.)
 - `CrossSection._raw_line_start` and `CrossSection._raw_line_end` track each XS's
   position in `GeometryFile.raw_lines` (set by the parser; not semantic fields).
 - `geometry/merge.py` provides `Transform`, `MergeConfig`, `merge_sta_elev()`,
@@ -2970,6 +3004,26 @@ entry.
   runtime instead of hardcoding configs, so config/fixture/test can't drift apart
   silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
 - Test coverage for `project/catalog.py` and `utils/` modules not yet written
+
+### Folder names in the dated entries below are AS OF their date
+
+`Scripts/` was renamed wholesale on 2026-09-08 to `<Function>_<Subject>` with
+`QC_` / `Results_` / `Geometry_` / `DataMgmt_` prefixes, so a consumer path in an
+older session entry will not resolve today. The entries are left as written —
+they are dated records, not current instructions. Translation table for the
+names that appear below:
+
+| as written in a session entry | folder today |
+|---|---|
+| `Scripts/Mesh_cell_nvals`, `Scripts/Mesh_nvals` | `Scripts/Geometry_Mesh_nvals` |
+| `Scripts/Mesh_Health` | `Scripts/Geometry_Mesh_Health` |
+| `Scripts/Profile_Lines_Volume` | `Scripts/Results_Profile_Lines_Volume` |
+| `Scripts/FWDT_Output` | `Scripts/Results_FWDT_Output` |
+| `Scripts/Results_GIS` | `Scripts/DataMgmt_Results_Collection` |
+| `Scripts/Pipe_Profile_Comparison` | `Scripts/Results_Pipe_Profile_Comparison` |
+
+`ls Scripts` is the live check — the set changes often. Scripts are not part of
+this repo, so nothing here is verified by the test suite.
 
 ### Session 21 changes (2026-08-24): 2D mesh Manning's n export — faces only
 
@@ -3747,14 +3801,18 @@ part, not a case worth adding branching for.
 
 ## Future Features — Not Yet Implemented
 
-**`docs/TODO.md` is the authoritative open-items list.** As of 2026-08-10 it has
-two OPEN items: (A) writer / `merge.py` support for Blocked Obstructions
-(`#Block Obstruct=`) and `Levee=` — described just below, currently parse-only;
-and (B) dry-run/preview on the mutating ops (LOW PRIORITY). Everything else once
-listed there is DONE: the session-13 plan-file-op gaps, the session-17 geometry
-subsystem / rasmap cleanup / health inspector, and — both in session 20 — item D
-(the `flows` subsystem) and item C (the `project.rasmap` bound accessor). Ask the
-user before implementing.
+**`docs/TODO.md` is the authoritative open-items list — re-read it rather than
+trusting this summary, which has gone stale before.** As of 2026-09-14 it lists
+FOUR open items, in its own priority order: (A) writer / `merge.py` support for
+Blocked Obstructions (`#Block Obstruct=`) and `Levee=` — described just below,
+currently parse-only; (E2) the interior flood-volume peak and (E4) the analysis
+script on top of it, both part of the deferred pipe-network helpers in its §E;
+and (B) dry-run/preview on the mutating ops (LOW PRIORITY). Closed since this
+note was first written: §F cross-mesh result comparison (built 2026-09-14), the
+E1/E3a pipe readers (built 2026-08-27), the session-13 plan-file-op gaps, the
+session-17 geometry subsystem / rasmap cleanup / health inspector, and — both in
+session 20 — item D (the `flows` subsystem) and item C (the `project.rasmap`
+bound accessor). Ask the user before implementing.
 
 ### `#Block Obstruct=` (Blocked Obstructions) — now PARSED (read-only)
 

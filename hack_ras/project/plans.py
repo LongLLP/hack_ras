@@ -338,6 +338,12 @@ def renumber_plans(project: RasProject, mapping: dict) -> dict:
     exists. One pass matters: applying entries sequentially would corrupt
     chained mappings (p02->p06 while p06->p12).
 
+    Only the p## TOKENS on the .prj's entry lines change — the lines keep their
+    positions, so the .prj's entry order (and with it the HEC-RAS dropdown
+    order) is whatever it was. Follow with
+    `sync.sort_prj_entries(project, kinds=("plan",))` when it should read
+    ascending.
+
     Returns a report dict: {'files': [(old_name, new_name), ...],
     'restart_refs': [...], 'rasmap_tokens': int}.
     """
@@ -481,8 +487,11 @@ def compact_plans(project: RasProject) -> dict:
     """Renumber the listed plans to a contiguous p01..pN by ascending number,
     filling any gaps (e.g. p01,p03,p06 -> p01,p02,p03). This is the plan-side
     analogue of geoms.compact_geoms, and the "...and renumber the rest
-    sequentially" half of a typical delete-then-compact request. Returns the
-    {old_id: new_id} mapping of what moved (empty if already contiguous)."""
+    sequentially" half of a typical delete-then-compact request.
+
+    Like every renumbering op, this leaves the .prj's entry ORDER alone — see
+    reorder_plans. Returns the {old_id: new_id} mapping of what moved (empty if
+    already contiguous)."""
     sorted_ids = sorted(project.model.plan_file_ids, key=_plan_num)
     mapping = {}
     for i, pid in enumerate(sorted_ids, start=1):
@@ -510,10 +519,27 @@ def reorder_plans(project: RasProject, order) -> dict:
     unknown ID raises ValueError before any file is touched, so a partial order
     cannot silently reshuffle the rest.
 
+    **The .prj's entry ORDER is not changed, and neither is the .rasmap's.**
+    Renumbering rewrites each entry line's p## token in place and never moves
+    the lines, so the .prj keeps whatever sequence it already had — and both
+    HEC-RAS's plan dropdown and RAS Mapper list in .prj order, so after a
+    reorder the GUI still shows the OLD sequence even though every file is
+    numbered correctly. Finish the job with:
+
+        sync.sort_prj_entries(project, kinds=("plan",))   # the dropdown order
+        project.rasmap.sort()                             # RAS Mapper's layers
+
+    Call `project.rasmap.sort()` only once RAS Mapper has been opened after the
+    run, so every result layer exists to be sorted (`plans_with_unlisted_results`
+    tells you). Neither sort is automatic: an entry order that differs from the
+    numeric one is a legitimate thing to curate — HEC-RAS appends a recycled
+    number at the END of the list, so a project built in the GUI can read
+    p02, p03, ..., p01 on purpose.
+
     Returns the {old_id: new_id} mapping of what moved (empty if `order` is
     already the current numbering). The renumbering itself — the plan-keyed
-    file family, the .prj, restart references, the .rasmap — is done by
-    renumber_plans; see there.
+    file family, the .prj's p## TOKENS, restart references, the .rasmap — is
+    done by renumber_plans; see there.
     """
     ids = [_normalize_plan_id(p) for p in order]
     dupes = sorted({p for p in ids if ids.count(p) > 1}, key=_plan_num)

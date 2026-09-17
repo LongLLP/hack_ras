@@ -169,7 +169,7 @@ build in from the start:
     already raises rather than reading silently when a path's conduits are absent
     from a plan.
 
-The existing `Scripts/Pipe_Profile_Comparison` workbook machinery (sheets, chart
+The existing `Scripts/Results_Pipe_Profile_Comparison` workbook machinery (sheets, chart
 styling, delta blocks) carries over; only the comparison axis changes.
 
 ---
