@@ -562,50 +562,81 @@ def rasmap_layer_refs(rasmap_path: str) -> list:
     return out
 
 
+# Which layer type each sortable section holds, and the file-ID letters that
+# section is KEYED ON — the sort key is that file's number, and it is not the
+# plan number everywhere: <Plans>/<Results> are keyed on p##, <Geometries> on
+# g##, and <EventConditions> on the flow number. EventConditions takes both
+# 'u' and 'f' because unsteady and steady are independent namespaces that can
+# coexist in one project, so layers sort grouped by letter and then by number.
+_SORT_SECTIONS = {
+    "Geometries": ("rasgeometry", "g"),
+    "Plans": ("rasplan", "p"),
+    "EventConditions": ("raseventconditions", "uf"),
+    "Results": ("rasresults", "p"),
+}
+
+
 def sort_rasmap_layers(
-    rasmap_path: str, base_name: str, sections: tuple = ("Plans", "Results")
+    rasmap_path: str, base_name: str,
+    sections: tuple = tuple(_SORT_SECTIONS),
 ) -> dict:
-    """Re-sort the RASPlan / RASResults layers into ascending plan-number order.
+    """Re-sort a .rasmap's file-keyed layers into ascending number order.
 
-    Mirrors `sync.sort_prj_entries`: within each section the plan-keyed layers
-    are redistributed across the positions they already occupy, sorted by plan
-    number. Any other top-level layer in the section (e.g. a CalculatedLayer)
-    keeps its position, and everything else in the file is byte-identical.
+    Mirrors `sync.sort_prj_entries`, and covers the same ground: every section
+    whose layers are keyed to a numbered HEC-RAS file. Within each section the
+    layers are redistributed across the positions they already occupy, sorted
+    by that section's own file number (see `_SORT_SECTIONS` — it is NOT the
+    plan number in `<Geometries>` or `<EventConditions>`). Any other top-level
+    layer in the section (e.g. a CalculatedLayer) keeps its position, and
+    everything else in the file is byte-identical.
 
-    sections selects which to sort ('Plans', 'Results'). Returns
-    {'plans': [pids in final order], 'results': [pids in final order]} for the
-    sections present.
+    sections defaults to all four ('Geometries', 'Plans', 'EventConditions',
+    'Results'), in document order. Returns {section.lower(): [file IDs in final
+    order]} for the sections present — e.g. {'plans': ['p01', 'p02'],
+    'eventconditions': ['u01', 'u02']}.
+
+    Sorting `<Geometries>` / `<EventConditions>` was added 2026-09-17. It was
+    not an oversight originally: when this function was written hack_ras could
+    not renumber a geometry or a flow, so those orders could never drift. The
+    `geoms` and `flows` subsystems made them drift-able, which left hack_ras
+    able to scramble an order it could not restore — observed live on
+    Model_Hillside/Prelim_Model2 after a two-flow `reorder_flows`, where RAS
+    Mapper then displayed the event conditions u02, u01 and did NOT normalize
+    them on open/close.
     """
     with open(rasmap_path, "r", encoding="latin-1", newline="") as f:
         text = f.read()
 
-    type_of = {"Plans": "rasplan", "Results": "rasresults"}
     result: dict = {}
     changed = False
     for section in sections:
-        want_type = type_of.get(section)
-        if want_type is None:
+        spec = _SORT_SECTIONS.get(section)
+        if spec is None:
             raise ValueError(
-                f"Unknown section {section!r}; expected one of {sorted(type_of)}"
+                f"Unknown section {section!r}; "
+                f"expected one of {sorted(_SORT_SECTIONS)}"
             )
+        want_type, letters = spec
         inner = _section_inner(text, section)
         if not inner:
             continue
 
-        targets = []  # (position_span, num, pid, chunk)
+        targets = []  # (position_span, sort_key, file_id, chunk)
         for bstart, bend, tag in _top_level_layer_blocks(text, *inner):
             type_m = _TYPE_RE.search(tag)
             if not type_m or type_m.group(1).lower() != want_type:
                 continue
             basename = _layer_basename(tag)
             num_m = basename and re.match(
-                re.escape(base_name) + r"\.p(\d{2})", basename
+                re.escape(base_name) + r"\.([" + letters + r"])(\d{2})",
+                basename,
             )
             if not num_m:
                 continue
+            letter, num = num_m.group(1), num_m.group(2)
             ls, le = _line_span(text, bstart, bend)
-            targets.append(((ls, le), int(num_m.group(1)),
-                            f"p{num_m.group(1)}", text[ls:le]))
+            targets.append(((ls, le), (letter, int(num)),
+                            f"{letter}{num}", text[ls:le]))
 
         key = section.lower()
         if not targets:
@@ -689,8 +720,8 @@ class RasMap:
 
     # -- mutations ----------------------------------------------------------
 
-    def sort(self, sections: tuple = ("Plans", "Results")) -> dict:
-        """Re-sort plan-keyed layers by number — see sort_rasmap_layers."""
+    def sort(self, sections: tuple = tuple(_SORT_SECTIONS)) -> dict:
+        """Re-sort file-keyed layers by number — see sort_rasmap_layers."""
         return sort_rasmap_layers(self.path, self.base_name, sections)
 
     def renumber_plans(self, idmap: dict) -> int:

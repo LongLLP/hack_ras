@@ -117,6 +117,35 @@ _MODEL = "\r\n".join([
 ])
 
 
+def _swap_lines(text, a_sub, b_sub):
+    """Swap the two single-line layers containing these substrings."""
+    lines = text.split("\r\n")
+    ia = next(i for i, l in enumerate(lines) if a_sub in l)
+    ib = next(i for i, l in enumerate(lines) if b_sub in l)
+    lines[ia], lines[ib] = lines[ib], lines[ia]
+    return "\r\n".join(lines)
+
+
+# _MODEL with <Geometries> and <EventConditions> ALSO out of numeric order.
+# _MODEL has those two ascending already, so on its own it cannot tell a working
+# sort from one that skips them entirely — which is exactly the bug this guards.
+_MODEL_SCRAMBLED = _swap_lines(
+    _swap_lines(_MODEL, 'Name="G1"', 'Name="G2"'),
+    'Name="FlowA"', 'Name="FlowC"')
+
+# One <EventConditions> section holding BOTH flow kinds, to pin the grouping.
+_MIXED_KINDS = "\r\n".join([
+    "<RASMapper>",
+    "  <EventConditions>",
+    '    <Layer Name="U2" Type="RASEventConditions" Filename=".\\M.u02.hdf" />',
+    '    <Layer Name="F1" Type="RASEventConditions" Filename=".\\M.f01.hdf" />',
+    '    <Layer Name="U1" Type="RASEventConditions" Filename=".\\M.u01.hdf" />',
+    "  </EventConditions>",
+    "</RASMapper>",
+    "",
+])
+
+
 class RemovePlansFromRasmapTest(unittest.TestCase):
 
     def test_removes_plan_and_result_subtrees(self):
@@ -244,10 +273,15 @@ class RenumberGeomsInRasmapTest(unittest.TestCase):
 
 class SortRasmapLayersTest(unittest.TestCase):
 
-    def test_sorts_plans_and_results_by_number(self):
+    def test_sorts_every_section_by_its_own_file_number(self):
+        # the default is all four sections, and each is keyed on its OWN file
+        # number — g## in Geometries, u##/f## in EventConditions, p## in the
+        # other two
         path = _write(_MODEL)
         result = sort_rasmap_layers(path, "M")
-        self.assertEqual(result, {"plans": ["p01", "p02", "p03"],
+        self.assertEqual(result, {"geometries": ["g01", "g02"],
+                                  "plans": ["p01", "p02", "p03"],
+                                  "eventconditions": ["u01", "u02", "u03"],
                                   "results": ["p01", "p03"]})
         with open(path, encoding="latin-1", newline="") as f:
             text = f.read()
@@ -261,6 +295,47 @@ class SortRasmapLayersTest(unittest.TestCase):
                         text.index('Name="Third" Type="RASResults"'))
         # each nested Encroachment child moved with its parent (still 1 each)
         self.assertEqual(text.count('Filename=".\\M.p02"'), 2)
+
+    def test_sorts_geometries_and_event_conditions_when_scrambled(self):
+        # the regression this generalization exists for: reorder_flows can
+        # scramble <EventConditions>, and RAS Mapper does NOT normalize it on
+        # open/close (observed live, Model_Hillside/Prelim_Model2 2026-09-17)
+        path = _write(_MODEL_SCRAMBLED)
+        result = sort_rasmap_layers(path, "M")
+        self.assertEqual(result["geometries"], ["g01", "g02"])
+        self.assertEqual(result["eventconditions"], ["u01", "u02", "u03"])
+        with open(path, encoding="latin-1", newline="") as f:
+            text = f.read()
+        self.assertLess(text.index('Name="G1"'), text.index('Name="G2"'))
+        self.assertLess(text.index('Name="FlowA"'), text.index('Name="FlowB"'))
+        self.assertLess(text.index('Name="FlowB"'), text.index('Name="FlowC"'))
+        # <Results> holds nested RASGeometry / RASEventConditions sub-layers
+        # that name .p##.hdf — they are not top-level, so sorting those two
+        # sections must leave them exactly where they were
+        self.assertEqual(
+            text.count('Type="RASGeometry" Filename=".\\M.p03.hdf"'), 1)
+
+    def test_sections_argument_limits_what_moves(self):
+        path = _write(_MODEL_SCRAMBLED)
+        result = sort_rasmap_layers(path, "M", sections=("EventConditions",))
+        self.assertEqual(list(result), ["eventconditions"])
+        with open(path, encoding="latin-1", newline="") as f:
+            text = f.read()
+        self.assertLess(text.index('Name="FlowA"'), text.index('Name="FlowB"'))
+        self.assertLess(text.index('Name="G2"'), text.index('Name="G1"'))
+
+    def test_both_flow_kinds_group_by_letter_then_number(self):
+        # unsteady and steady are independent namespaces, so u01 and f01 must
+        # not interleave on number alone
+        path = _write(_MIXED_KINDS)
+        self.assertEqual(sort_rasmap_layers(path, "M")["eventconditions"],
+                         ["f01", "u01", "u02"])
+
+    def test_unknown_section_refused(self):
+        path = _write(_MODEL)
+        with self.assertRaises(ValueError) as ctx:
+            sort_rasmap_layers(path, "M", sections=("Terrains",))
+        self.assertIn("EventConditions", str(ctx.exception))
 
     def test_already_sorted_is_noop(self):
         path = _write(_MODEL)

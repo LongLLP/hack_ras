@@ -279,10 +279,11 @@ retitle_plan(project, "p58", "FC 002year 260824",  # ...or give the short id its
 clone_plan(project, "p24", "L4 1214",    # copy with new Plan Title / Short Identifier (padding kept)
            line_edits={"Breach Start=": "Breach Start=False,,01JAN2025,1214,False,,,0"},
            new_id="p25")                 # new_id optional — defaults to next free number
-project.rasmap.sort()                    # optional: re-sort .rasmap RASPlan/RASResults
-                                         #   layers into ascending plan-number order
-                                         #   (bound accessor — see below; the free
-                                         #   sort_rasmap_layers(path, base) still works)
+project.rasmap.sort()                    # re-sort ALL FOUR .rasmap layer sections into
+                                         #   ascending number order (Geometries, Plans,
+                                         #   EventConditions, Results) — bound accessor;
+                                         #   the free sort_rasmap_layers(path, base) still
+                                         #   works. sections=(...) to limit.
 ```
 
 Renumbering/deleting covers the whole plan-keyed file family — `.p##`, `.p##.hdf`,
@@ -335,13 +336,26 @@ alone.
   time the project is opened — the common state after running plans headlessly.
   Use it to know before opening (e.g. run `sort_rasmap_layers` only AFTER opening
   RAS Mapper once, so it has materialized every result). Read-only.
-- `sort_rasmap_layers(rasmap_path, base_name, sections=("Plans","Results"))` is the
-  `.rasmap` analogue of `sort_prj_entries`: it re-sorts the RASPlan/RASResults
-  layers into ascending plan-number order (each redistributed across the positions
-  its kind already occupies; other layers — e.g. CalculatedLayer siblings — and
-  `<EventConditions>`, which is keyed to `.u##`, stay put). Standalone/optional; not
-  called by delete or renumber. Note `<Results>` is otherwise stored by RAS in
-  run order, not numeric order.
+- `sort_rasmap_layers(rasmap_path, base_name, sections=<all four>)` is the
+  `.rasmap` analogue of `sort_prj_entries`, and since 2026-09-17 it covers the same
+  ground: every section whose layers are keyed to a numbered file. Each section is
+  sorted by ITS OWN file number — `<Geometries>` on `g##`, `<Plans>` and
+  `<Results>` on `p##`, `<EventConditions>` on `u##`/`f##` (grouped by letter first,
+  since the two flow namespaces are independent). Layers are redistributed across
+  the positions their kind already occupies; anything else — e.g. CalculatedLayer
+  siblings, and the nested RASGeometry / RASEventConditions sub-layers inside a
+  `<Results>` block, which name `Base.p##.hdf` — stays put. Standalone; not called
+  by delete or renumber. Note `<Results>` is otherwise stored by RAS in run order,
+  not numeric order.
+  **`<Geometries>` / `<EventConditions>` support was NOT in the original.** That was
+  not an oversight: when the sorter was written hack_ras could not renumber a
+  geometry or a flow, so those orders could never drift. The `geoms` and `flows`
+  subsystems made them drift-able, leaving hack_ras able to scramble an order it
+  could not restore. Found live on Model_Hillside/Prelim_Model2 (2026-09-17) after a
+  two-flow `reorder_flows`: RAS Mapper then displayed the event conditions u02, u01,
+  and — contrary to what you might assume — it does NOT normalize them itself. It
+  rewrote the `.rasmap` on open/close (leaving its own `.backup`) and preserved the
+  scrambled order.
 - `clone_plan` enforces plan-title uniqueness (`DuplicatePlanTitle`) and inserts the
   new `Plan File=` entry in ascending numeric position in the `.prj`. After writing
   it sanity-checks breach triggers: an ACTIVE Set Time trigger dated outside the
@@ -866,8 +880,9 @@ functions:
 
 ```python
 project.rasmap.exists()            # many projects have no .rasmap at all
-project.rasmap.sort()                          # sort_rasmap_layers
-project.rasmap.sort(sections=("Plans",))
+project.rasmap.sort()                          # sort_rasmap_layers — all 4 sections
+project.rasmap.sort(sections=("Plans",))       # ...or just one
+project.rasmap.sort(sections=("EventConditions",))
 project.rasmap.renumber_plans({"p02": "p06"})  # renumber_*_in_rasmap
 project.rasmap.renumber_geoms({"g03": "g02"})
 project.rasmap.renumber_flows({"u01": "u02"})
