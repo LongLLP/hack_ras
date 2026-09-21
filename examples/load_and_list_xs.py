@@ -2,7 +2,7 @@
 from pathlib import Path
 from hack_ras.geometry.parser import GeometryParser
 
-data = Path(__file__).resolve().parents[1] / "tests" / "data" / "beaver.g01"
+data = Path(__file__).resolve().parents[1] / "tests" / "data" / "Beaver" / "beaver.g01"
 
 gp = GeometryParser()
 geom = gp.parse_file(str(data))
