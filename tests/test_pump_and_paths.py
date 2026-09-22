@@ -29,7 +29,9 @@ try:
         read_pump_curves,
         read_pump_station,
         pump_station_capacity,
+        RouteMismatch,
         trace_path,
+        verify_path,
     )
     from hack_ras.results.model import (
         ConduitPath, PathProfile, PipeConduit, PipeNetwork, PumpCurve,
@@ -557,6 +559,253 @@ class TestPumpCurvesAbsent(unittest.TestCase):
     def test_gravity_geometry_raises_key_error(self):
         with self.assertRaises(KeyError):
             read_pump_curves(_HDF_FIXTURE, 'Anything')
+
+
+@unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
+class TestConduitPathSerialization(unittest.TestCase):
+    """
+    Round-tripping a route, and re-checking it against a network.
+
+    Same synthetic topology as TestTracePathForks, so the fork that makes `via`
+    load-bearing is explicit:
+
+        A -> B -> C -> E        (via D on the long branch)
+        B -> D -> E
+        C -> X                  (dead end)
+    """
+
+    def setUp(self):
+        self.net = _fake_network({
+            'c_ab': ('A', 'B'),
+            'c_bc': ('B', 'C'),
+            'c_ce': ('C', 'E'),
+            'c_bd': ('B', 'D'),
+            'c_de': ('D', 'E'),
+            'c_cx': ('C', 'X'),
+        })
+
+    def test_trace_path_records_its_waypoints(self):
+        """`via` is parallel to `segments`, and empty when none were given."""
+        self.assertEqual(trace_path(self.net, 'C', 'E').via, [[]])
+        self.assertEqual(trace_path(self.net, 'A', 'E', via=['D']).via, [['D']])
+
+    def test_round_trip_is_equal(self):
+        path = trace_path(self.net, 'A', 'E', via=['D'])
+        self.assertEqual(ConduitPath.from_dict(path.to_dict()), path)
+
+    def test_to_dict_holds_only_native_types(self):
+        """It must survive yaml.safe_dump / json.dumps -- no tuples, no numpy."""
+        d = trace_path(self.net, 'A', 'E', via=['D']).to_dict()
+        self.assertIsInstance(d['network'], str)
+        for key in ('conduits', 'nodes', 'segments', 'via', 'bridges', 'forks'):
+            self.assertIsInstance(d[key], list, key)
+        for seg in d['segments']:
+            self.assertIsInstance(seg, list)
+            self.assertTrue(all(isinstance(n, str) for n in seg))
+
+    def test_to_dict_carries_no_derivable_value(self):
+        """start/end come from `nodes`; storing them too could disagree."""
+        d = trace_path(self.net, 'C', 'E').to_dict()
+        self.assertNotIn('start', d)
+        self.assertNotIn('end', d)
+
+    def test_stored_via_still_pins_the_route(self):
+        """
+        The point of storing `via`: a recorded route re-traces on its own.
+
+        Without the waypoints the same segment is an AmbiguousRoute, so this
+        distinguishes a record that can check itself from one that cannot.
+        """
+        stored = ConduitPath.from_dict(
+            trace_path(self.net, 'A', 'E', via=['D']).to_dict())
+        self.assertEqual(verify_path(self.net, stored).conduits,
+                         ['c_ab', 'c_bd', 'c_de'])
+        with self.assertRaises(AmbiguousRoute):
+            trace_path(self.net, 'A', 'E')
+
+    def test_verify_returns_the_freshly_traced_path(self):
+        path = trace_path(self.net, 'C', 'E')
+        traced = verify_path(self.net, path)
+        self.assertIsNot(traced, path)
+        self.assertEqual(traced.conduits, path.conduits)
+
+    def test_verify_detects_a_changed_alignment(self):
+        """
+        The geometry-moved case: same recipe, different answer.
+
+        C -> E is replaced by C -> C2 -> E, so re-tracing C -> E returns a
+        different conduit sequence and the recorded list must be rejected.
+        """
+        recorded = trace_path(self.net, 'C', 'E')
+        changed = _fake_network({
+            'c_ab': ('A', 'B'),
+            'c_bc': ('B', 'C'),
+            'c_cc2': ('C', 'C2'),
+            'c_c2e': ('C2', 'E'),
+        })
+        with self.assertRaises(RouteMismatch) as cm:
+            verify_path(changed, recorded)
+        msg = str(cm.exception)
+        self.assertIn('c_ce', msg)      # recorded but not traced
+        self.assertIn('c_cc2', msg)     # traced but not recorded
+
+    def test_verify_rejects_a_foreign_network(self):
+        path = trace_path(self.net, 'C', 'E')
+        other = _fake_network({'c_ce': ('C', 'E')}, name='OtherNet')
+        with self.assertRaises(RouteMismatch) as cm:
+            verify_path(other, path)
+        self.assertIn('OtherNet', str(cm.exception))
+
+    def test_verify_needs_a_recipe(self):
+        """A path with no segments carries no recipe, so there is nothing to re-run."""
+        path = ConduitPath(network=self.net.name, conduits=['c_ce'],
+                           nodes=['C', 'E'], segments=[])
+        with self.assertRaises(ValueError):
+            verify_path(self.net, path)
+
+    def test_joining_a_path_with_no_recorded_via_still_round_trips(self):
+        """
+        join_paths must not build a path that from_dict would reject.
+
+        A hand-built path can carry segments and no `via`; joining used to copy
+        that straight through, leaving `via` shorter than `segments` -- an
+        object the library could produce but not read back.
+        """
+        legs = [trace_path(self.net, 'A', 'B'), trace_path(self.net, 'C', 'E')]
+        legs[0].via = []                      # as if never recorded
+        joined = join_paths(legs, {'B': (0.0, 0.0), 'C': (3.0, 4.0)})
+        self.assertEqual(len(joined.via), len(joined.segments))
+        self.assertEqual(ConduitPath.from_dict(joined.to_dict()), joined)
+
+    def test_joining_rejects_a_via_of_the_wrong_length(self):
+        """Neither empty nor parallel is malformed -- padding would drop waypoints."""
+        leg = trace_path(self.net, 'A', 'B')
+        leg.via = [['X'], ['Y']]              # 2 entries, 1 segment
+        with self.assertRaises(ValueError):
+            join_paths([leg, trace_path(self.net, 'C', 'E')],
+                       {'B': (0.0, 0.0), 'C': (3.0, 4.0)})
+
+    def test_from_dict_defaults_missing_via(self):
+        """An older record, or hand-written YAML, may omit `via` entirely."""
+        d = trace_path(self.net, 'C', 'E').to_dict()
+        del d['via']
+        self.assertEqual(ConduitPath.from_dict(d).via, [[]])
+
+    def test_from_dict_rejects_a_missing_required_key(self):
+        d = trace_path(self.net, 'C', 'E').to_dict()
+        del d['conduits']
+        with self.assertRaises(ValueError) as cm:
+            ConduitPath.from_dict(d)
+        self.assertIn('conduits', str(cm.exception))
+
+    def test_from_dict_rejects_via_not_matching_segments(self):
+        d = trace_path(self.net, 'A', 'E', via=['D']).to_dict()
+        d['via'] = [['D'], ['D']]
+        with self.assertRaises(ValueError) as cm:
+            ConduitPath.from_dict(d)
+        self.assertIn('parallel', str(cm.exception))
+
+    def test_from_dict_rejects_an_inconsistent_node_count(self):
+        """nodes == conduits + segments; a silent off-by-one must not load."""
+        d = trace_path(self.net, 'C', 'E').to_dict()
+        d['nodes'] = d['nodes'][:-1]
+        with self.assertRaises(ValueError) as cm:
+            ConduitPath.from_dict(d)
+        self.assertIn('inconsistent', str(cm.exception))
+
+    def test_from_dict_rejects_a_malformed_bridge(self):
+        d = trace_path(self.net, 'C', 'E').to_dict()
+        d['bridges'] = [['C', 'E']]
+        with self.assertRaises(ValueError):
+            ConduitPath.from_dict(d)
+
+    def test_from_dict_rejects_a_non_list_field(self):
+        d = trace_path(self.net, 'C', 'E').to_dict()
+        d['conduits'] = 'c_ce'
+        with self.assertRaises(ValueError):
+            ConduitPath.from_dict(d)
+
+
+@unittest.skipUnless(HAS_RESULTS, "hack_ras[results] extras not installed")
+@unittest.skipUnless(HAS_HDF_FIXTURE, "no .p##.hdf fixture at tests/data/")
+class TestFingerprintAndSerializationOnRealFixture(unittest.TestCase):
+    """
+    The same machinery against the real pipe network.
+
+    The fixture mirrors the Hillside Armour Rd tail, so J321 -> J317 joined to
+    J316 -> OF5 exercises a genuine bridged break the way a recorded trunk route
+    does.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.hdf = _HDF_FIXTURE
+        cls.net = read_pipe_network(cls.hdf, list_pipe_networks(cls.hdf)[0])
+        cls.points = read_node_points(cls.hdf)
+
+    def _joined(self):
+        return join_paths([trace_path(self.net, 'J321', 'J317'),
+                           trace_path(self.net, 'J316', 'OF5')], self.points)
+
+    def test_conduit_length_is_populated(self):
+        lengths = [c.length for c in self.net.conduits.values()]
+        self.assertTrue(all(np.isfinite(lengths)))
+        self.assertTrue(all(v > 0 for v in lengths))
+
+    def test_fingerprint_matches_the_network(self):
+        fp = self.net.fingerprint()
+        self.assertEqual(fp['network'], self.net.name)
+        self.assertEqual(fp['nodes'], len(self.net.nodes))
+        self.assertEqual(fp['conduits'], len(self.net.conduits))
+        self.assertAlmostEqual(
+            fp['total_length_ft'],
+            sum(c.length for c in self.net.conduits.values()), places=6)
+
+    def test_fingerprint_is_pure_native_types(self):
+        fp = self.net.fingerprint()
+        self.assertIsInstance(fp['nodes'], int)
+        self.assertIsInstance(fp['conduits'], int)
+        self.assertIsInstance(fp['total_length_ft'], float)
+
+    def test_joined_path_round_trips_with_its_bridge(self):
+        path = self._joined()
+        self.assertEqual(len(path.bridges), 1)
+        back = ConduitPath.from_dict(path.to_dict())
+        self.assertEqual(back, path)
+        self.assertEqual(back.segments,
+                         [('J321', 'J317'), ('J316', 'OF5')])
+
+    def test_joined_path_verifies(self):
+        path = ConduitPath.from_dict(self._joined().to_dict())
+        self.assertEqual(verify_path(self.net, path, self.points).conduits,
+                         path.conduits)
+
+    def test_verify_requires_node_points_for_a_joined_path(self):
+        path = self._joined()
+        with self.assertRaises(ValueError) as cm:
+            verify_path(self.net, path)
+        self.assertIn('node_points', str(cm.exception))
+
+    def test_verify_detects_a_moved_joining_node(self):
+        """The conduit sequence can be intact while the break distance is not."""
+        d = self._joined().to_dict()
+        d['bridges'][0][2] += 5.0
+        with self.assertRaises(RouteMismatch) as cm:
+            verify_path(self.net, ConduitPath.from_dict(d), self.points)
+        self.assertIn('Bridged break', str(cm.exception))
+
+    def test_verify_detects_a_dropped_bridge_record(self):
+        """A zip over the two bridge lists would skip this silently."""
+        d = self._joined().to_dict()
+        d['bridges'] = []
+        with self.assertRaises(RouteMismatch) as cm:
+            verify_path(self.net, ConduitPath.from_dict(d), self.points)
+        self.assertIn('bridged break', str(cm.exception))
+
+    def test_verify_accepts_a_gap_within_tolerance(self):
+        d = self._joined().to_dict()
+        d['bridges'][0][2] += 0.005
+        verify_path(self.net, ConduitPath.from_dict(d), self.points)
 
 
 if __name__ == '__main__':

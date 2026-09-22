@@ -7,11 +7,18 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Four items are open. In rough priority:
+Three items are open as whole pieces of work. In rough priority:
 
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
-2. **Interior flood-volume peak (E2) and the analysis script (E4)** — §E below.
+2. **Interior flood-volume peak (E2)** — §E below.
 3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+
+Two more are half-built and easy to miss, because they are not on that list:
+**E1** and **E3b** each have all their readers and none of the metric on top
+(see the 2026-08-27 note below, and §E).
+
+**E4 (the pumped-vs-gravity analysis script) is DONE** — built 2026-09-22 as
+`Scripts/Results_Pipe_Profile_Comparison/gravity_vs_pumped.py`.
 
 **Closed 2026-09-14:** §F cross-mesh result comparison (built — see below). The
 `Ditch_fix_RS_9580` GUI-visibility question was closed the same day as a RAS
@@ -24,6 +31,142 @@ layer), `read_node_rims`, `read_node_max_wse`, `read_volume_accounting` /
 `list_volume_accounting`, and `PathProfile.surcharge_margin` (E3a complete). What
 remains of E1 is the metric on top of the readers; E2 needs the peak computation;
 E3b needs the comparison on top of its two readers.
+
+### A. Blocked Obstruction / Levee writer + `merge.py` support — OPEN, top priority
+
+Both blocks PARSE (added 2026-07-21 for the active-flow work) and neither can be
+WRITTEN. `CrossSection.blocked_obstructions` and `CrossSection.levee` are
+read-only, so `RAS_xsedit` can draw both features and edit neither — every other
+cross-section block has a writer. Nothing here changes what a levee or an
+obstruction MEANS; the active-flow semantics in `ai_context.md` stand.
+
+**These are two different jobs, because the two formats are not alike.** A line
+in `dev_rules.md` lumps them together ("same 8-char triplet layout as IFAs");
+that is true of `#Block Obstruct=` and false of `Levee=`.
+
+**A1. `#Block Obstruct=` — the IFA twin.**
+
+8-char fixed-width triplets, N x 3 = `(start_sta, end_sta, elevation)`. `flag` 0
+-> `normal` (one area left of the channel, one right, with 0.0 station sentinels
+for the XS edges); `flag` -1 -> `multiple_block` (1-10 areas at literal
+stations). Blank station field -> 0.0, blank elevation -> `None`. There is NO
+`Permanent` follower line — an obstruction is always solid.
+
+So this is `#XS Ineff=` minus the Permanent block, and `merge_ineff()` is the
+template. Most of the work is copying it:
+
+  * `write_block_obstruct()` in `blocks/xs_block_obstruct.py` — the writer goes
+    beside its parser per `dev_rules.md`, reusing `_write_triplet_lines()` and
+    `_fmt_or_blank()` from `blocks/base.py`.
+  * `MergeConfig.obstruct_source: str = 'A'` — a whole-XS choice like
+    `ineff_source`, NOT per-segment: a blocked range cannot be meaningfully
+    split between two surveys.
+  * `merge_obstruct()`, preserving the chosen source's `obstr_type` verbatim
+    (`normal` stays `normal`, `multiple_block` stays `multiple_block`), exactly
+    as `merge_ineff` preserves `ifa_type`.
+  * register `'#Block Obstruct='` in `_KEY_PREFIXES` / `_KEY_PARSERS` so
+    `_scan_xs_content` finds it wherever it sits in the source file.
+
+Carry the IFA sentinel rule over unchanged: a 0.0 edge sentinel is written back
+as literal 0.0 and must **NOT** be shifted by the `Transform`'s `h_offset`.
+Shifting it turns "the XS edge, whatever it turns out to be" into an arbitrary
+station and destroys the self-updating meaning. Only `normal` has sentinels;
+every `multiple_block` field is literal and does get shifted.
+
+Obstruction boundaries do **not** need to land on an existing output station
+(confirmed for IFAs), so no `_snap_to_nearest_station()` call — unlike bank
+stations and Manning's n breakpoints.
+
+**A2. `Levee=` — a single line, not a block.**
+
+    Levee=<Lflag>,<Lsta>,<Lelev>,<Rflag>,<Rsta>,<Relev>,,<name>
+
+Comma-separated, one line. A flag of -1 means that side's levee is present; 0 or
+blank means absent, and that side's station/elevation fields are blank and parse
+to `None`. Field 7 is always empty and field 8 onward is an optional name, which
+may itself contain commas (`parse_levee` joins the tail back together).
+
+The writer is therefore a single-line formatter shaped like `write_bank_sta()`,
+not a triplet writer. Two things it must get right: reproduce the empty 7th
+field, and re-emit a name containing commas the way RAS does.
+
+**UNVERIFIED, and the one thing here that needs a GUI test rather than a code
+decision:** a levee is one station per side, so it may be subject to the snapping
+rule that IFAs escape. Check in HEC-RAS whether a levee station must coincide
+with an existing `#Sta/Elev=` station before deciding whether to snap it. Getting
+this wrong fails the way the original Manning's-n bug did — a geometry RAS cannot
+open.
+
+**The trap that will bite.** `_is_trivial_config()` must learn about both new
+source options, and its docstring currently says the opposite in as many words:
+"Blocked obstructions are not currently configurable; they always pass through
+verbatim from A." It checks the breakpoint count, a single segment from A, an
+identity transform, A's full station extent, `cutline_source` and `ineff_source`.
+A config that changes ONLY the obstruction or levee source would be classified
+trivial and exported as a byte-for-byte copy of A, silently discarding the edit.
+The same class of bug has been found and fixed twice already — 2026-06-25 for
+`mann_option` / `cutline_source`, and 2026-07-02 for truncated all-A configs.
+
+Finally, GUI wiring in `RAS_xsedit` (and note its no-disabled-controls rule —
+route to a fallback flow rather than greying a control out).
+
+---
+
+### B. Dry-run / preview on the mutating operations — OPEN, LOW PRIORITY
+
+Before a renumber / delete / reorder / retitle / settings change touches a file,
+report the complete change-set and write nothing.
+
+**Why it is low priority:** the user backs up before every run, which already
+covers the same risk. Confirmed 2026-07-28 that this item stands alone and
+blocks nothing — the health inspector was built without it, and a preview only
+ever reuses that rendering.
+
+**Why it is cheap: the change-set already exists.** Every mutating op validates
+everything up front and builds its complete mapping before writing the first
+byte — that is the existing fail-fast contract (a bad spec changes nothing, on
+any file). A preview is that same computation with the write suppressed, not a
+new analysis.
+
+**The one rule that matters: it must not be a second code path.** A preview that
+recomputes the change-set independently will drift from the real one and
+eventually lie, which is worse than having no preview at all. Suppress the write
+inside the existing function; never mirror it.
+
+Scope — the ops that mutate:
+
+  * `plans`: `renumber_plan` / `renumber_plans`, `insert_plan_gap`,
+    `compact_plans`, `reorder_plans`, `clone_plan`, `delete_plan` /
+    `delete_plans`, `retitle_plan`
+  * `geoms` and `flows`: the same families
+  * `plan_settings.set_plan_settings`
+  * `sync.sync_prj`, `sync.sort_prj_entries`
+  * `rasmap`: `renumber_*`, `remove_*`, `retitle_in_rasmap`, `sort`
+
+What a preview should show: every file renamed (old -> new) or deleted; `.prj`
+entry lines added, removed or retokenized; `Geom File=` / `Flow File=` rewrites
+in each referencing plan; `Restart Filename=` rewrites in `.u` files; `.rasmap`
+token remaps and layer subtrees spliced out; `.hdf` title attributes written; and
+every warning the real run would emit.
+
+Open questions, for the scope discussion `dev_rules.md` requires:
+
+  1. A `dry_run=True` keyword on each op, or a parallel `preview_*` function per
+     op? The keyword keeps one code path, which argues for it — but it means
+     every op can return a report for work it did not do, so the report needs an
+     unambiguous "nothing was written" marker.
+  2. Reuse each op's existing report dict as the preview shape, so preview and
+     apply return the same structure? Or one uniform change-set type across all
+     ops? The first is less work and less to learn; the second renders once.
+  3. Net effect only, or the intermediate steps? A chained or cyclic renumber
+     hops through `.renumtmp` to break cycles. A preview should almost certainly
+     report `p02 -> p06` and not the temp hop — but that hides a state that
+     genuinely exists on disk mid-operation.
+  4. Where the renderer lives: `format_changes()` beside `format_health()` in
+     `project/health.py`, or its own module. Health is the rendering precedent
+     either way.
+
+---
 
 ### E. Pipe-network analysis helpers — DEFERRED 2026-08-27
 
@@ -155,22 +298,51 @@ exactly reaches the rim counts as an exceedance. No additional tolerance.
 
 ---
 
-**E4. The pumped-vs-gravity analysis script.** Phase 3, still to build. A new
-config-driven folder under `Scripts/`, comparing plan PAIRS within ONE model
-(Existing vs Future, pumped vs gravity) rather than two models. Two things to
-build in from the start:
+**E4. The pumped-vs-gravity analysis script — DONE 2026-09-22.**
 
-  * **Persist the `ConduitPath` conduit list in the output**, so a later run can
-    pin the identical route with one line instead of re-deriving it. Node
-    sequences are already recoverable from an existing workbook's Node column,
-    but the conduit list is the exact handle.
-  * **Match by NAME across the paired geometries** — a pumped geometry drops the
-    outfall conduits, so row-position matching will not work. `read_path_profile`
-    already raises rather than reading silently when a path's conduits are absent
-    from a plan.
+Built as `Scripts/Results_Pipe_Profile_Comparison/gravity_vs_pumped.py` with
+`config_gravity_vs_pumped.yaml`, comparing plan PAIRS inside one model. (A
+sibling script comparing the same plan across two model DIRECTORIES existed
+briefly and was deleted 2026-09-22 — its shape could not express the pairs, and
+the two models it compared were gone.) Both requirements from the original entry
+were met, plus three that only surfaced once real data was involved:
 
-The existing `Scripts/Results_Pipe_Profile_Comparison` workbook machinery (sheets, chart
-styling, delta blocks) carries over; only the comparison axis changes.
+* **Routes are pinned, not discovered — and no longer retyped.** Originally the
+  route was declared twice: `via` waypoints in each config, plus a hand-copied
+  `expect_conduits` list. That left a one-directional hole — editing the
+  waypoints in the exporter's config re-recorded the route silently, while
+  editing them in the consumer's config aborted. Since 2026-09-22 the route is
+  declared once, in `config_trunk_routes.yaml`, and crosses to the consumer as
+  DATA: `export_trunk_paths.py` writes `trunk_routes.lock.yaml` via
+  `ConduitPath.to_dict()`, and `gravity_vs_pumped.py` reads it and calls
+  `verify_path` against EACH plan's own network before any results are read. The
+  recipe (`segments` + `via`) travels with the answer (`conduits`), so the record
+  re-runs and checks itself. The readable twin is the project's trunk-routes
+  workbook.
+* **A network fingerprint is provenance, not a contract.** The lock records
+  `PipeNetwork.fingerprint()` for the geometry the routes were accepted against.
+  It must NOT be enforced: the paired gravity and pumped geometries differ in
+  node count, conduit count and total length by design, so a fingerprint gate
+  would reject exactly the comparison the script exists for. Re-tracing per plan
+  is both the weaker assumption and the stronger check.
+* **Each side gets its own station column.** The two sides run different
+  geometries, so the axes agree over the whole route EXCEPT the final conduit
+  into the terminal node — the pumped geometry drops the outfall, which changes
+  that conduit's face count. Measured: one trunk matched face-for-face
+  (113 = 113), the other was 167 vs 166 with all three unmatched rows inside the
+  last conduit. Each chart series therefore plots against its own side's
+  stations.
+* **The workbook is data only.** It carried a delta block and a formula
+  summary until 2026-09-22; both were removed at the user's direction, along
+  with the charts, because openpyxl cannot round-trip a chart and would destroy
+  one on the next refresh. Charts and deltas now live in a companion workbook
+  that references this one. The per-row station test survives in Python: the
+  script still reports how many rows align within 0.01 ft and which conduit the
+  rest fall in, on the console and the README, so nothing is ever subtracted
+  across different stations.
+* **Same-side axes are asserted.** All plans on one side share a geometry, so a
+  differing axis there means something is wrong — the script exits rather than
+  writing.
 
 ---
 

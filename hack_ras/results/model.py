@@ -273,10 +273,17 @@ class PipeNode:
 
 @dataclass
 class PipeConduit:
-    """A pipe from Geometry/Pipe Conduits/Attributes."""
+    """
+    A pipe from Geometry/Pipe Conduits/Attributes.
+
+    `length` is that table's `Conduit Length`. It is carried here so a network's
+    total length -- part of `PipeNetwork.fingerprint()` -- costs no extra HDF
+    read; `ConduitProfile` remains the route to a conduit's full geometry.
+    """
     name: str
     us_node: str
     ds_node: str
+    length: float = float('nan')
 
 
 @dataclass
@@ -307,6 +314,25 @@ class PipeNetwork:
     conduit_index: dict
     upstream_of: dict
     downstream_of: dict
+
+    def fingerprint(self) -> dict:
+        """
+        A small, comparable summary of this network's shape.
+
+        `{'network', 'nodes', 'conduits', 'total_length_ft'}`. Recorded alongside
+        a serialized ConduitPath so a stored route can say which network it was
+        accepted against -- a paired gravity / pumped geometry differs in all
+        three numbers, and so does an edited mesh.
+
+        Pure; no HDF read. `total_length_ft` is nan if any conduit length is.
+        """
+        return {
+            'network': self.name,
+            'nodes': len(self.nodes),
+            'conduits': len(self.conduits),
+            'total_length_ft': float(
+                sum(c.length for c in self.conduits.values())),
+        }
 
 
 @dataclass
@@ -616,6 +642,20 @@ class VolumeAccounting:
     units: str
 
 
+def _seq(key: str, value):
+    """Require a list/tuple of list/tuples, for ConduitPath.from_dict."""
+    if not isinstance(value, (list, tuple)):
+        raise ValueError(
+            f"Serialized ConduitPath key '{key}' must be a list, got "
+            f'{type(value).__name__}')
+    for item in value:
+        if not isinstance(item, (list, tuple)):
+            raise ValueError(
+                f"Serialized ConduitPath key '{key}' must hold lists, got "
+                f'{item!r}')
+    return value
+
+
 @dataclass
 class ConduitPath:
     """
@@ -640,6 +680,13 @@ class ConduitPath:
         Node names, len(conduits) + 1 for a single segment.
     segments : list[tuple[str, str]]
         (start_node, end_node) of each contiguous run.
+    via : list[list[str]]
+        The waypoints each segment was traced with, PARALLEL to `segments` --
+        `via[i]` belongs to `segments[i]`, and is `[]` for a segment that needed
+        none. Kept so a path records HOW it was found, not only what was found:
+        `segments` + `via` is the tracing recipe and `conduits` is the answer, so
+        a serialized path can be re-traced and checked against itself. See
+        `reader.verify_path`.
     bridges : list[tuple[str, str, float]]
         (from_node, to_node, distance_ft) for each joined break.
     forks : list[str]
@@ -649,6 +696,7 @@ class ConduitPath:
     conduits: list = field(default_factory=list)
     nodes: list = field(default_factory=list)
     segments: list = field(default_factory=list)
+    via: list = field(default_factory=list)
     bridges: list = field(default_factory=list)
     forks: list = field(default_factory=list)
 
@@ -662,6 +710,103 @@ class ConduitPath:
     @property
     def end(self) -> str:
         return self.nodes[-1]
+
+    def to_dict(self) -> dict:
+        """
+        This route as plain JSON/YAML-native types, for a durable record.
+
+        Round-trips through `from_dict`. Deliberately CANONICAL -- it holds no
+        derivable value (`start` / `end` come from `nodes`) and no provenance, so
+        nothing in it can disagree with anything else in it. A caller writing a
+        lock file adds its own schema version, timestamp and
+        `PipeNetwork.fingerprint()` alongside this, not inside it.
+        """
+        return {
+            'network': self.network,
+            'conduits': list(self.conduits),
+            'nodes': list(self.nodes),
+            'segments': [[a, b] for a, b in self.segments],
+            'via': [list(v) for v in self.via],
+            'bridges': [[a, b, float(gap)] for a, b, gap in self.bridges],
+            'forks': list(self.forks),
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> 'ConduitPath':
+        """
+        Rebuild a ConduitPath from `to_dict` output (or hand-written YAML).
+
+        Rebuilds ONLY -- it does not consult a network, so it cannot tell whether
+        the route is still valid. Call `reader.verify_path` for that; keeping the
+        two apart is what puts the check at the call site instead of hiding it in
+        a constructor.
+
+        `via` may be omitted, and is then taken as no waypoints on any segment.
+
+        Raises
+        ------
+        ValueError
+            If a required key is missing, a field is not a list, `via` does not
+            match `segments` in length, a bridge is not a 3-tuple, or the node
+            count contradicts the conduit and segment counts.
+        """
+        if not isinstance(data, dict):
+            raise ValueError(
+                f'ConduitPath.from_dict needs a dict, got {type(data).__name__}')
+        for key in ('network', 'conduits', 'nodes', 'segments'):
+            if key not in data:
+                raise ValueError(
+                    f"Serialized ConduitPath is missing required key '{key}'. "
+                    f'Present: {sorted(data)}')
+
+        def _str_list(key, value):
+            if not isinstance(value, (list, tuple)):
+                raise ValueError(
+                    f"Serialized ConduitPath key '{key}' must be a list, got "
+                    f'{type(value).__name__}')
+            return [str(v) for v in value]
+
+        conduits = _str_list('conduits', data['conduits'])
+        nodes = _str_list('nodes', data['nodes'])
+        forks = _str_list('forks', data.get('forks') or [])
+
+        segments = []
+        for seg in _seq('segments', data['segments']):
+            if len(seg) != 2:
+                raise ValueError(
+                    f'Serialized ConduitPath segment {seg!r} must be '
+                    f'(start_node, end_node)')
+            segments.append((str(seg[0]), str(seg[1])))
+
+        raw_via = data.get('via')
+        if raw_via is None:
+            via = [[] for _ in segments]
+        else:
+            via = [_str_list('via', v) for v in _seq('via', raw_via)]
+            if len(via) != len(segments):
+                raise ValueError(
+                    f'Serialized ConduitPath has {len(via)} `via` entries for '
+                    f'{len(segments)} segments; `via` is parallel to `segments`, '
+                    f'so give an empty list for a segment with no waypoints.')
+
+        bridges = []
+        for br in _seq('bridges', data.get('bridges') or []):
+            if len(br) != 3:
+                raise ValueError(
+                    f'Serialized ConduitPath bridge {br!r} must be '
+                    f'(from_node, to_node, distance_ft)')
+            bridges.append((str(br[0]), str(br[1]), float(br[2])))
+
+        if len(nodes) != len(conduits) + len(segments):
+            raise ValueError(
+                f'Serialized ConduitPath is inconsistent: {len(nodes)} nodes '
+                f'for {len(conduits)} conduits across {len(segments)} '
+                f'segment(s); each segment contributes one node more than its '
+                f'conduit count, so {len(conduits) + len(segments)} were '
+                f'expected.')
+
+        return cls(network=str(data['network']), conduits=conduits, nodes=nodes,
+                   segments=segments, via=via, bridges=bridges, forks=forks)
 
 
 @dataclass

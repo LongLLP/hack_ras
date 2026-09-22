@@ -1527,11 +1527,21 @@ and on the `2D culvert bridge levee precip pipes` fixture (`Watershed Bridge`):
   use `read_culvert_group_results()`.
 
 ### Pipe Network Geometry & Results
+
+**A pipe network exists ONLY in the geometry HDF.** Grepping all four Hillside
+geometry text files for `pipe|conduit|manhole|junction|inlet|network` returns
+**zero hits** — the `.g##` text carries only Storage Area / 2D, Connection and
+culvert blocks. Nothing in it can rebuild the network, so never delete a
+`.g##.hdf` to force a mesh regen; bump `Storage Area 2D PointsPerimeterTime=`
+instead (see the mesh-snapper notes). The definition lives in three groups:
+`Geometry/Pipe Nodes/`, `Geometry/Pipe Conduits/`, and
+`Geometry/Pipe Networks/{net}/` (the computed mesh).
+
 ```
 Geometry/Pipe Networks/{network}/Node Indices      # global→local mapping
 Geometry/Pipe Networks/{network}/Conduit Indices
 Geometry/Pipe Nodes/Attributes                     # structured array: Name, System Name
-Geometry/Pipe Conduits/Attributes                  # structured array: Name, US Node, DS Node
+Geometry/Pipe Conduits/Attributes                  # structured array: Name, US Node, DS Node, Conduit Length, Shape, Rise, Span, Manning's n, US/DS Elevation, Slope, ...
 
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Cell Water Surface   (T, N_cells)
 Results/…/Unsteady Time Series/Pipe Networks/{network}/Cell Courant         (T, N_cells)
@@ -1798,8 +1808,8 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `BreachState` | `connection`, `fired: bool`, `hdf_path_kind`, `center_station`, `breach_at`, `breach_at_days`, `bottom_width`, `bottom_elev`, `left_slope`, `right_slope`, `top_width`, `max_flow`, `max_velocity`, `max_flow_area`, `time_of_max_top_width`, `columns` | The widest state REACHED, not the plan's terminal geometry. `fired=False` = defined but never triggered. `top_width` is None unless a crest elevation was supplied |
 | `ConnectionCenterline` | `name`, `points (N,2)`, `profile (M,2)`, `us_area`, `ds_area`, `mode`, `snn_id`, `parts` | HDF twin of the ASCII `Connection Line=` / `Conn Weir SE=` blocks |
 | `PipeNode` | `name: str`, `system_name: str` | From `Geometry/Pipe Nodes/Attributes` |
-| `PipeConduit` | `name: str`, `us_node: str`, `ds_node: str` | From `Geometry/Pipe Conduits/Attributes` |
-| `PipeNetwork` | `name`, `nodes dict[str,int]`, `conduits dict[str,PipeConduit]`, `conduit_index dict[str,int]`, `upstream_of dict`, `downstream_of dict` | `nodes[name]` → results column index |
+| `PipeConduit` | `name: str`, `us_node: str`, `ds_node: str`, `length: float` | From `Geometry/Pipe Conduits/Attributes`; `length` is its `Conduit Length`, carried so `PipeNetwork.fingerprint()` costs no extra read. `nan` if that column is absent |
+| `PipeNetwork` | `name`, `nodes dict[str,int]`, `conduits dict[str,PipeConduit]`, `conduit_index dict[str,int]`, `upstream_of dict`, `downstream_of dict`; method `fingerprint()` | `nodes[name]` → results column index. `fingerprint()` → `{network, nodes, conduits, total_length_ft}`, pure, for recording which network a stored route was accepted against |
 | `NodeTimeSeries` | `timestamps`, `depth`, `wse`, `inlet_flow`, `flow_in`, `flow_out` — all `(T,) float64` | `flow_in` = sum of `Pipe Flow DS` for conduits draining into node |
 | `ConduitTimeSeries` | `timestamps`, `flow_us`, `flow_ds`, `vel_us`, `vel_ds` — all `(T,) float64` | US/DS ends of the conduit |
 | `Pump` | `name`, `ws_on`, `ws_off` | One physical pump's trigger elevations |
@@ -1809,7 +1819,7 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `NodeRims` | `names`, `node_types`, `invert`, `depth`, `terrain`, `override`, `rim`, `source`; `has_override`, `as_dict()` | `rim` follows the selected source; `invert + depth` reproduces the OVERRIDE rim |
 | `NodeMaxWse` | `network`, `names`, `wse (N,)`, `time_index (N,)`, `timestamps`; `as_dict()`, `time_of_max(node)` | Max over the run per node; Summary Output's equivalent is per CELL and cannot be used |
 | `VolumeAccounting` | `kind`, `name`, `vol_starting`, `vol_ending`, `cum_inflow`, `cum_outflow`, `error`, `error_percent`, `precip_excess`, `precip_excess_depth`, `units` | RAS's own mass balance, stored as group ATTRIBUTES. `vol_ending` is END-of-run, not the peak |
-| `ConduitPath` | `network`, `conduits`, `nodes`, `segments`, `bridges`, `forks`; properties `start`, `end` | ROUTE ONLY, no results — trace once and reuse across every plan compared |
+| `ConduitPath` | `network`, `conduits`, `nodes`, `segments`, `via`, `bridges`, `forks`; properties `start`, `end`; `to_dict()` / `from_dict()` | ROUTE ONLY, no results — trace once and reuse across every plan compared. `via` is PARALLEL to `segments` (`via[i]` belongs to `segments[i]`), so a path records the recipe as well as the answer and `verify_path` can re-run it. `to_dict()` is canonical — JSON/YAML-native, no derivable values, no provenance |
 | `PathProfile` | `path`, `when`, `station`, `invert`, `crown`, `wse`, `velocity`, `flow`, `conduit_of`, `node_at`, `total_length`; properties `depth`, `is_surcharged`, `surcharge_margin`, `energy_grade` | One continuous profile chained along a ConduitPath, station accumulated across conduits and bridged gaps |
 | `ConduitProfile` | `station`, `invert`, `wse`, `velocity`, `flow`, `face_indices` — all `(F,)`; plus `us_node`/`ds_node`, `us_invert`/`ds_invert`, `length`, `rise`, `span`, `shape`, `si_units` | Along-conduit profile at FACE resolution — the RAS Mapper profile plot. Properties: `depth`, `crown`, `is_surcharged`, `energy_grade` (`wse + V²/2g`), `station_from_ds` (RAS Mapper x-axis). `station` ascends US→DS |
 
@@ -1914,6 +1924,7 @@ alignment.
 | `trace_path(network, start, end, via=None, resolver=None)` | `ConduitPath` | Downstream route. Branches that cannot reach `end` are discarded first; a genuine fork raises `AmbiguousRoute` unless `via` or a `resolver` is given |
 | `peak_flow_resolver(hdf_path, network)` | callable | Opt-in fork resolver preferring the greater peak \|flow\|. **PLAN-DEPENDENT** — see the empirical section above |
 | `join_paths(paths, node_points)` | `ConduitPath` | Join runs across a physical break (open channel, detention pond); station later advances by the true node-to-node distance |
+| `verify_path(network, path, node_points=None, gap_tol=0.01)` | `ConduitPath` | Re-trace a RECORDED route (`path.segments` + `path.via`) and confirm it still resolves the same way. Raises `RouteMismatch` on a different network, a different conduit sequence, or a moved bridged gap; returns the freshly traced path. `node_points` required only for a multi-segment path. Deliberately separate from `from_dict`, so the check is visible at the call site |
 | `read_pump_curves(hdf_path, station)` | `dict[str, PumpCurve]` | Per-group head/flow curves. Flow is PER PUMP — see the Pump Stations section |
 | `pump_station_capacity(curves, head)` | `(np.ndarray, int)` | Total capacity with every pump running, plus a count of heads clamped outside a curve. Compare against INFLOW, not station outflow |
 | `read_node_rims(hdf_path, source='override')` | `NodeRims` | Rim elevations and node types. `'override'` (default, what RAS uses) or `'terrain'` |

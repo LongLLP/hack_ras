@@ -1529,11 +1529,17 @@ def read_pipe_network(hdf_path: str, network: str) -> PipeNetwork:
         ]
 
         raw_conduits = hdf['Geometry/Pipe Conduits/Attributes'][()]
+        # Structural probe rather than a version check: a file without the
+        # column reports nan lengths, so PipeNetwork.fingerprint() says it does
+        # not know the total length instead of raising.
+        has_length = 'Conduit Length' in (raw_conduits.dtype.names or ())
         global_conduits = [
             PipeConduit(
                 name=_decode(r['Name']),
                 us_node=_decode(r['US Node']),
                 ds_node=_decode(r['DS Node']),
+                length=(float(r['Conduit Length']) if has_length
+                        else float('nan')),
             )
             for r in raw_conduits
         ]
@@ -2051,6 +2057,10 @@ class AmbiguousRoute(ValueError):
     """Raised when more than one downstream branch reaches the destination."""
 
 
+class RouteMismatch(ValueError):
+    """Raised when a recorded route no longer matches what the network traces."""
+
+
 def read_node_points(hdf_path: str) -> dict:
     """
     Return {node name: (x, y)} for every pipe node in the file.
@@ -2188,7 +2198,27 @@ def trace_path(network: PipeNetwork, start: str, end: str,
             nodes.append(cur)
 
     return ConduitPath(network=network.name, conduits=conduits, nodes=nodes,
-                       segments=[(start, end)], bridges=[], forks=forks)
+                       segments=[(start, end)], via=[list(via or [])],
+                       bridges=[], forks=forks)
+
+
+def _parallel_via(path: ConduitPath) -> list:
+    """
+    A path's `via` guaranteed parallel to its `segments`.
+
+    A path built by hand may carry segments and no recorded waypoints; that
+    honestly means "no waypoints known", so it pads with empty lists. A `via`
+    that is neither empty nor the right length is malformed and raises, because
+    silently padding it would drop waypoints that a later re-trace needs.
+    """
+    if len(path.via) == len(path.segments):
+        return [list(v) for v in path.via]
+    if not path.via:
+        return [[] for _ in path.segments]
+    raise ValueError(
+        f'ConduitPath has {len(path.via)} `via` entries for '
+        f'{len(path.segments)} segments; `via` is parallel to `segments`, so '
+        f'give an empty list for a segment with no waypoints.')
 
 
 def join_paths(paths: list, node_points: dict) -> ConduitPath:
@@ -2222,6 +2252,7 @@ def join_paths(paths: list, node_points: dict) -> ConduitPath:
                       conduits=list(paths[0].conduits),
                       nodes=list(paths[0].nodes),
                       segments=list(paths[0].segments),
+                      via=_parallel_via(paths[0]),
                       bridges=list(paths[0].bridges),
                       forks=list(paths[0].forks))
     for nxt in paths[1:]:
@@ -2237,8 +2268,104 @@ def join_paths(paths: list, node_points: dict) -> ConduitPath:
         out.conduits.extend(nxt.conduits)
         out.nodes.extend(nxt.nodes)
         out.segments.extend(nxt.segments)
+        out.via.extend(_parallel_via(nxt))
         out.forks.extend(nxt.forks)
     return out
+
+
+def verify_path(network: PipeNetwork, path: ConduitPath, node_points: dict = None,
+                gap_tol: float = 0.01) -> ConduitPath:
+    """
+    Re-trace a recorded route against a live network and confirm it is unchanged.
+
+    This is the check that makes a stored route trustworthy. `path.segments` and
+    `path.via` are the recipe; `path.conduits` is the answer that was accepted.
+    Re-running the recipe on THIS network and comparing tells you whether the
+    geometry still resolves the same way -- before any results are read, rather
+    than after a workbook full of plausible numbers has been written.
+
+    Parameters
+    ----------
+    network : PipeNetwork
+        The network to re-trace against, from read_pipe_network().
+    path : ConduitPath
+        The recorded route, typically ConduitPath.from_dict(...) off a lock file.
+    node_points : dict, optional
+        From read_node_points(). Required only for a multi-segment path, whose
+        bridged gaps cannot be measured without coordinates.
+    gap_tol : float
+        Feet. A bridged gap differing by more than this is a mismatch -- the
+        joining nodes moved even though the conduit sequence did not.
+
+    Returns
+    -------
+    ConduitPath
+        The freshly traced path. Use it in place of the recorded one so
+        downstream reads work from what this network actually contains.
+
+    Raises
+    ------
+    ValueError
+        If the path names no segments, or a multi-segment path is given no
+        `node_points`. A node absent from the network, or an unreachable
+        destination, propagates from trace_path.
+    RouteMismatch
+        If the network name, conduit sequence, or a bridged gap differs.
+    """
+    if not path.segments:
+        raise ValueError(
+            'ConduitPath has no segments to re-trace; it carries no recipe. '
+            'Trace it with trace_path() rather than verifying it.')
+    if path.network != network.name:
+        raise RouteMismatch(
+            f"Recorded route is for pipe network '{path.network}' but was "
+            f"verified against '{network.name}'.")
+
+    via = path.via or [[] for _ in path.segments]
+    if len(via) != len(path.segments):
+        raise ValueError(
+            f'ConduitPath has {len(via)} `via` entries for '
+            f'{len(path.segments)} segments; they must be parallel.')
+
+    legs = [trace_path(network, start, end, via=way or None)
+            for (start, end), way in zip(path.segments, via)]
+    if len(legs) == 1:
+        traced = legs[0]
+    else:
+        if node_points is None:
+            raise ValueError(
+                f'This route has {len(legs)} segments joined across a physical '
+                f'break, so verifying it needs node coordinates. Pass '
+                f'node_points=read_node_points(hdf_path).')
+        traced = join_paths(legs, node_points)
+
+    if traced.conduits != list(path.conduits):
+        missing = [c for c in path.conduits if c not in traced.conduits]
+        extra = [c for c in traced.conduits if c not in path.conduits]
+        raise RouteMismatch(
+            f"Route {path.start} -> {path.end} on network '{network.name}' no "
+            f'longer traces to its recorded conduit list.\n'
+            f'  recorded {len(path.conduits)} conduits\n'
+            f'  traced   {len(traced.conduits)}\n'
+            f'  recorded but not traced: {missing or "none"}\n'
+            f'  traced but not recorded: {extra or "none"}\n'
+            f'Either the geometry changed or the record is stale. Re-generate '
+            f'the record and check the difference before accepting it.')
+
+    if len(path.bridges) != len(traced.bridges):
+        raise RouteMismatch(
+            f'Route {path.start} -> {path.end} records {len(path.bridges)} '
+            f'bridged break(s) but tracing produces {len(traced.bridges)}. A '
+            f'zip over the two would silently skip the difference, so this is '
+            f'reported instead.')
+    for (ra, rb, rgap), (ta, tb, tgap) in zip(path.bridges, traced.bridges):
+        if (ra, rb) != (ta, tb) or abs(rgap - tgap) > gap_tol:
+            raise RouteMismatch(
+                f'Bridged break {ra} -> {rb} was recorded at {rgap:.2f} ft but '
+                f'now measures {ta} -> {tb} at {tgap:.2f} ft (tolerance '
+                f'{gap_tol} ft). The conduit sequence is unchanged, so a joining '
+                f'node moved.')
+    return traced
 
 
 def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,

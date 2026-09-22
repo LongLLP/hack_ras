@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 846 passing tests (plus any added in the current
+All tests must pass. The baseline is 872 passing tests (plus any added in the current
 session), and 1 skipped by design — a 5.0.3 fixture HDF that has no culvert table.
 If a new test is added, the new count becomes the baseline.
 
@@ -76,10 +76,15 @@ hack_ras/geometry/blocks/` is the live check). Documented in detail below:
   reach header, per-XS metadata, and `XS GIS Cut Line=` blocks underpinning the
   geometry parse and `geometry/shift.py`.
 - `blocks/xs_block_obstruct.py` — `#Block Obstruct=` → `CrossSection.blocked_obstructions`.
-- `blocks/xs_levee.py` — `Levee=` → `CrossSection.levee`. Both added 2026-07-21 for
-  the active-flow work and are PARSE-ONLY: no writer / `merge.py` support yet
-  (item A in `docs/TODO.md`). Same 8-char triplet layout as IFAs, but with no
-  `Permanent` follower line — see the active-flow notes in `ai_context.md`.
+  The 8-char triplet layout of `#XS Ineff=`, but with NO `Permanent` follower line
+  (an obstruction is always solid).
+- `blocks/xs_levee.py` — `Levee=` → `CrossSection.levee`. NOT a triplet block: one
+  comma-separated line, `Levee=<Lflag>,<Lsta>,<Lelev>,<Rflag>,<Rsta>,<Relev>,,<name>`,
+  where a flag of -1 means that side is present and 0/blank means absent (its
+  station and elevation blank, parsed as `None`).
+  Both added 2026-07-21 for the active-flow work and both PARSE-ONLY: no writer /
+  `merge.py` support yet (item A in `docs/TODO.md`, which now carries the full
+  plan) — see also the active-flow notes in `ai_context.md`.
 - `blocks/storage_area_2d.py` — storage-area / 2D-flow-area blocks, incl. the
   `Storage Area 2D Points` cell-seed block.
 - `blocks/connection.py` — the `Connection=` block family (SA/2D connections).
