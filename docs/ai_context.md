@@ -3018,8 +3018,8 @@ reliable index; trust the per-topic sections over this one.)*
 - `geometry/xs_interp.py` is the canonical tool for mapping RAS station values to GIS
   cut-line XY coordinates; use it for any future station-referenced feature export.
 - XS Editor GUI app lives at `../RAS_xsedit/xsedit.py` (sibling to this repo); built with
-  PySide6 + pyqtgraph; uses the `xsedit` conda environment. The `hack_ras` test suite
-  uses the `Hillside_Levee` conda environment.
+  PySide6 + pyqtgraph; uses the `RAS_xsedit` conda environment. The `hack_ras` test suite
+  uses the `hack_ras` conda environment.
 - `tests/test_geometry_merge.py` covers `write_merged_geometry` using Sterp Creek fixtures
   in the sibling `RAS_xsedit` repo. See `RAS_xsedit/tests/README.md` for how to add cases.
 - **`SterpCreek.g03` regenerated and verified (2026-07-06)** — the user exported a new

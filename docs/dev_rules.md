@@ -8,7 +8,7 @@ admin privileges and must handle installs themselves.
 ## Run Tests After Every Code Change
 
 After any edit to `hack_ras`, run the full test suite before reporting the task complete.
-Use the `Hillside_Levee` conda environment (the base env is missing h5py/geopandas/shapely):
+Use the `hack_ras` conda environment (the base env is missing h5py/geopandas/shapely):
 
 ```
 cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
