@@ -170,6 +170,26 @@ class TestHealthOnRealFixture(unittest.TestCase):
         remove_plans_from_rasmap(self.path("Model.rasmap"), "Model", ["p04"])
         self.assertEqual(project_health(self.project).unlisted_results, ["p04"])
 
+    def test_layer_associations_inventoried(self):
+        h = project_health(self.project)
+        self.assertEqual(h.geometries[0].layers.terrain.name, "Terrain")
+        self.assertEqual(h.plans[0].layers.infiltration.name, "Infiltration")
+        self.assertIsNone({p.id: p.layers for p in h.plans}["p03"])   # never run
+        self.assertEqual(h.layer_mismatches, [])
+        text = format_health(h)
+        self.assertIn("Layer associations", text)
+        self.assertIn("  g02  Terrain | LandCover | Infiltration", text)
+
+    def test_layer_mismatch_flagged(self):
+        # p02 (on g02) as if it had been run before g02 was re-associated.
+        with h5py.File(self.path("Model.p02.hdf"), "r+") as f:
+            f["Geometry"].attrs["Infiltration Layername"] = b"Old"
+            f["Geometry"].attrs["Infiltration Filename"] = b".\\Land_Classification\\Old.hdf"
+        h = project_health(self.project)
+        self.assertEqual(h.layer_mismatches,
+                         ["p02 infiltration: ran with Old, g02 now has Infiltration"])
+        self.assertIn("layer_mismatches", h.issues)
+
 
 if __name__ == "__main__":
     unittest.main()

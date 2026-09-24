@@ -5,14 +5,16 @@
 plans / geometries / flows (with titles and cross-references) plus a set of
 consistency checks (orphan files, stale .prj entries, rasmap duplicate /
 missing-file layers, computed results not yet in the rasmap, duplicate titles,
-unused geometries / flows, active runs). `format_health(report)` renders it as a
-readable text summary.
+unused geometries / flows, active runs, results run with different layers than
+their geometry now uses). `format_health(report)` renders it as a readable text
+summary.
 
 Purely read-only: nothing here writes to any file. It assembles data the library
 already exposes (the .prj model, the plan/geom/flow text files, and the rasmap
-queries in project/rasmap.py). Reading plan HDFs for "has results" needs h5py
-(imported lazily); if h5py is unavailable those fields are left as None and the
-unlisted-results check is skipped, everything else still works.
+queries in project/rasmap.py). Reading plan HDFs for "has results" and the
+.g##.hdf / .p##.hdf layer associations needs h5py (imported lazily); if h5py is
+unavailable those fields are left as None and the checks built on them are
+skipped, everything else still works.
 """
 from __future__ import annotations
 
@@ -20,6 +22,7 @@ from collections import defaultdict
 from dataclasses import dataclass, field
 import os
 
+from hack_ras.project.associations import LayerAssociations, read_layer_associations
 from hack_ras.project.plans import _read_plan_ref, plan_path
 from hack_ras.project.ras_project import RasProject
 from hack_ras.project.rasmap import rasmap_layer_refs, result_plan_ids
@@ -28,8 +31,12 @@ from hack_ras.utils.lines import content_of, read_lines
 _ISSUE_FIELDS = (
     "orphan_files", "stale_prj_entries", "rasmap_duplicate_layers",
     "rasmap_missing_file_layers", "unlisted_results", "duplicate_titles",
-    "unused_geometries", "unused_flows", "active_runs",
+    "unused_geometries", "unused_flows", "active_runs", "layer_mismatches",
 )
+
+# (LayerAssociations field, label) in the dialog's column order
+_LAYER_KINDS = (("terrain", "terrain"), ("mannings_n", "Manning's n"),
+                ("infiltration", "infiltration"))
 
 
 @dataclass
@@ -39,6 +46,7 @@ class PlanInfo:
     geom: str | None
     flow: str | None
     has_results: bool | None   # None: no .hdf, or h5py unavailable
+    layers: LayerAssociations | None = None   # layers the plan RAN with (.p##.hdf)
 
 
 @dataclass
@@ -46,6 +54,7 @@ class FileInfo:
     id: str
     title: str
     used_by: list[str]         # plan ids referencing this geometry / flow
+    layers: LayerAssociations | None = None   # geometries only (.g##.hdf)
 
 
 @dataclass
@@ -65,6 +74,7 @@ class ProjectHealth:
     unused_geometries: list[str] = field(default_factory=list)
     unused_flows: list[str] = field(default_factory=list)
     active_runs: list[str] = field(default_factory=list)
+    layer_mismatches: list[str] = field(default_factory=list)
 
     @property
     def issues(self) -> dict:
@@ -96,6 +106,19 @@ def _dup_titles(kind: str, items: list) -> list[str]:
             by_title[title].append(fid)
     return [f"{kind} title {t!r}: {', '.join(ids)}"
             for t, ids in by_title.items() if len(ids) > 1]
+
+
+def _layers(hdf: str, have_h5py: bool) -> LayerAssociations | None:
+    if not (have_h5py and os.path.isfile(hdf)):
+        return None
+    try:
+        return read_layer_associations(hdf)
+    except (OSError, ValueError):   # unreadable, or no /Geometry group
+        return None
+
+
+def _layer_name(ref) -> str:
+    return ref.name if ref else "(None)"
 
 
 def project_health(project: RasProject) -> ProjectHealth:
@@ -131,7 +154,7 @@ def project_health(project: RasProject) -> ProjectHealth:
                 hr = None
         plan_geom[pid], plan_flow[pid], has_results[pid] = geom, flow, hr
         plan_titles.append((pid, title))
-        plans.append(PlanInfo(pid, title, geom, flow, hr))
+        plans.append(PlanInfo(pid, title, geom, flow, hr, _layers(hdf, have_h5py)))
 
     def _used_by(kind_key: str, refs: dict) -> dict:
         used = defaultdict(list)
@@ -149,7 +172,8 @@ def project_health(project: RasProject) -> ProjectHealth:
         gpath = os.path.join(folder, f"{base}.{gid}")
         t = _title(gpath, "Geom Title")
         geom_titles.append((gid, t))
-        geometries.append(FileInfo(gid, t, sorted(geom_used.get(gid, []))))
+        geometries.append(FileInfo(gid, t, sorted(geom_used.get(gid, [])),
+                                   _layers(gpath + ".hdf", have_h5py)))
     # Steady (f##) and unsteady (u##) flows share one inventory: a plan's
     # 'Flow File=' reference points at either, so flow_used is already keyed
     # across both. Listed steady-first to match .prj order. Both file types
@@ -220,6 +244,19 @@ def project_health(project: RasProject) -> ProjectHealth:
         if os.path.isfile(os.path.join(folder, f"{base}.{pid}.tmp.hdf")):
             health.active_runs.append(pid)
 
+    # --- issues: results run with different layers than the geometry now has ---
+    geom_layers = {g.id: g.layers for g in geometries}
+    for p in plans:
+        now = geom_layers.get(p.geom)
+        if not (p.has_results and p.layers and now):
+            continue
+        for fld, label in _LAYER_KINDS:
+            ran, cur = getattr(p.layers, fld), getattr(now, fld)
+            if (ran and ran.filename) != (cur and cur.filename):
+                health.layer_mismatches.append(
+                    f"{p.id} {label}: ran with {_layer_name(ran)}, "
+                    f"{p.geom} now has {_layer_name(cur)}")
+
     return health
 
 
@@ -233,6 +270,7 @@ _ISSUE_LABELS = {
     "unused_geometries": "Geometries used by no plan",
     "unused_flows": "Flows used by no plan",
     "active_runs": "Plans mid-run (.p##.tmp.hdf present)",
+    "layer_mismatches": "Results run with different layers than their geometry now has (re-run?)",
 }
 
 
@@ -256,6 +294,14 @@ def format_health(h: ProjectHealth) -> str:
     for u in h.flows:
         used = ", ".join(u.used_by) if u.used_by else "(unused)"
         lines.append(f"  {u.id}  {u.title or '(missing)':<28} used by: {used}")
+
+    rows = [(g.id, g.layers) for g in h.geometries if g.layers] \
+        + [(p.id, p.layers) for p in h.plans if p.layers]
+    if rows:
+        lines.append("\nLayer associations (terrain | Manning's n | infiltration):")
+        for fid, a in rows:
+            lines.append(f"  {fid}  " + " | ".join(
+                _layer_name(getattr(a, fld)) for fld, _ in _LAYER_KINDS))
 
     issues = h.issues
     if not issues:

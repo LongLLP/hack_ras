@@ -9,7 +9,10 @@ it.
 
 ## Model status
 
-Run this first, run it again after edits, diff the two.
+Run this first, run it again after edits, diff the two. The report ends with a
+layer-associations table (terrain | Manning's n | infiltration per geometry and
+plan — RAS Mapper's Manage Layer Associations dialog) and flags any plan run with
+different layers than its geometry now has.
 
 ```python
 from hack_ras import RasProject

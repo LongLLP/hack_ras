@@ -10,7 +10,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | Package | Purpose |
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
-| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`) |
+| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`); `associations.py` — terrain / Manning's n / infiltration layer per geometry and plan |
 | `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation, line-in-polygon measurement, 2D mesh cell attribute export |
@@ -911,6 +911,51 @@ original TODO list, which predated `flows.py`. Tests: 7 in `tests/test_rasmap.py
 each pairing the accessor call with the equivalent free-function call so the sugar
 cannot drift from what it wraps.
 
+## Layer Associations — Terrain / Manning's n / Infiltration (`hack_ras/project/associations.py`)
+
+The query behind RAS Mapper's **Manage Layer Associations** dialog (right-click
+Geometries or Results): which terrain, Manning's n (land cover) and infiltration
+layer each geometry and each result uses. **The `.rasmap` does not hold this** — it
+lists the layers, not who uses them — and `rasmap_layer_refs` / `layer_refs()` only walk
+the Geometries/Plans/EventConditions/Results sections, so they never see the
+`<Terrains>` section either. The associations are attributes on the HDF `/Geometry` group:
+`Terrain Layername`/`Filename`, `Land Cover Layername`/`Filename` (the dialog's
+"Manning's n" column), `Infiltration Layername`/`Filename`.
+
+```python
+from hack_ras import RasProject
+from hack_ras.project.associations import read_layer_associations
+
+project.layer_associations()   # {'g01': LayerAssociations, ..., 'p01': ..., ...}
+a = read_layer_associations(r"...\Model.p12.hdf")
+a.terrain.name, a.terrain.filename, a.terrain.path   # layer name, stored rel path, abs path
+a.mannings_n, a.infiltration                         # LayerRef or None = "(None)"
+```
+
+- **Geometry rows read `.g##.hdf`; Results rows read `.p##.hdf`.** A plan HDF's
+  `/Geometry` is the copy the plan RAN with, so a result keeps its layers even after its
+  geometry is re-associated. `layer_associations()` lists .prj geometries then .prj plans,
+  skipping any without an HDF (never preprocessed / never run) — so it is the dialog.
+- **GUI-confirmed on Hillside (2026-09-24):** all 4 geometry rows and 24 result rows of the
+  dialog match, including the EC/FC infiltration split (p01–p11 `InfiltrationSCS`, p12–p24
+  `InfiltrationSCS_FutureConditions`).
+- **Version:** 5.0.3 writes only the terrain pair (DCRA Starkweather); 7.0 writes all three.
+  An absent attribute and an unassociated layer both read as `None` — indistinguishable.
+- **Per-2D-area copies** of the same attributes sit on each `Geometry/2D Flow Areas/<name>`
+  group. Across every model in hack_ras_local their names/filenames equal `/Geometry`;
+  only the `Date Last Modified` stamps differ. Not read.
+- **Out of scope until a model uses them:** % Impervious, Sediment Bed Material, Porosity
+  And Flow Drag, Spiral Intensity Source Factor — storage unverified.
+- Raises `FileNotFoundError` (no HDF) or `ValueError` (no `/Geometry` group). Tests:
+  `tests/test_layer_associations.py`, plus two in `tests/test_health.py`.
+- **Surfaced by `project_health`** as a per-row table and the `layer_mismatches` check —
+  see the Project Health section. Not added to the package `__all__` re-exports: callers
+  reach it through `project.layer_associations()` or `format_health`, and
+  `read_layer_associations` is one import line.
+- **The FERC submittal script does NOT use it**, on purpose: `Scripts/DataMgmt_FERC_Zips`
+  finds terrain folders from the `.rasmap` `TerrainLayer` entries, i.e. EVERY terrain in
+  the project, associated or not — a submittal ships the whole model.
+
 ## Project Health / Status Inspector (`hack_ras/project/health.py`)
 
 Read-only snapshot of a project — the thing to run to verify state after an
@@ -926,17 +971,30 @@ h.issues                             # {field: [...]} for every non-empty issue
 ```
 
 `ProjectHealth` carries an **inventory** — `current_plan`; `plans`
-(`PlanInfo`: id, title, geom, flow, has_results); `geometries` / `flows`
-(`FileInfo`: id, title, `used_by` plan-ids) — and these **issue lists** (all
+(`PlanInfo`: id, title, geom, flow, has_results, `layers`); `geometries` / `flows`
+(`FileInfo`: id, title, `used_by` plan-ids, `layers` — geometries only) — and these
+**issue lists** (all
 empty ⇒ `ok`): `orphan_files` (on disk, not in .prj), `stale_prj_entries`
 (listed, file missing), `rasmap_duplicate_layers` (same token twice in a
 section — the zombie case), `rasmap_missing_file_layers`, `unlisted_results`
 (computed `.p##.hdf` with no `<Results>` layer — RAS Mapper will append them out
 of order), `duplicate_titles` (RAS requires unique per kind), `unused_geometries`
-/ `unused_flows`, `active_runs` (`.p##.tmp.hdf` present). Nothing here writes.
-`has_results` / `unlisted_results` read the plan HDFs via h5py (imported lazily;
-absent h5py ⇒ those are `None` / skipped, the rest still works). Backed by the
-read-only `rasmap.rasmap_layer_refs()` and `rasmap.result_plan_ids()` queries.
+/ `unused_flows`, `active_runs` (`.p##.tmp.hdf` present), `layer_mismatches`
+(a plan with results whose terrain / Manning's n / infiltration differs from what its
+geometry has NOW — the geometry was re-associated after the run, so re-run it).
+Nothing here writes. `has_results` / `unlisted_results` and the `layers` fields read
+the HDFs via h5py (imported lazily; absent h5py ⇒ those are `None` / skipped, the rest
+still works). Backed by the read-only `rasmap.rasmap_layer_refs()` and
+`rasmap.result_plan_ids()` queries and by `associations.read_layer_associations`.
+
+`layers` is a `LayerAssociations` (see **Layer Associations**) — `None` when the HDF is
+absent (geometry never preprocessed, plan never run) or unreadable. `format_health`
+prints them as a `Layer associations (terrain | Manning's n | infiltration)` table,
+geometries then plans — the RAS Mapper dialog in text. `layer_mismatches` compares
+each LAYER's stored `Filename` (not its display name) between a plan's `.p##.hdf` and
+its geometry's `.g##.hdf`, and only for plans with results, so it cannot fire on a plan
+that has not run; entries read `p05 infiltration: ran with <old>, g03 now has <new>`.
+Measured clean (no mismatch) on Hillside and PCA 2026-09-24.
 
 The companion dry-run/preview (show a mutating op's change-set before applying)
 is the paired, still-open TODO item — see docs/TODO.md.

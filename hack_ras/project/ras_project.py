@@ -142,6 +142,23 @@ class RasProject:
         """
         return read_crs_wkt(self.folder, specified)
 
+    def layer_associations(self) -> dict:
+        """RAS Mapper's Manage Layer Associations dialog, as
+        {'g01': LayerAssociations, ..., 'p01': LayerAssociations, ...}.
+
+        Geometries first, then plans, each in .prj order. Only files listed in
+        the .prj whose .g##.hdf / .p##.hdf exists are included (a geometry never
+        preprocessed or a plan never run has no row). See project/associations.py.
+        """
+        from hack_ras.project.associations import read_layer_associations
+
+        out = {}
+        for fid in self.model.geom_file_ids + self.model.plan_file_ids:
+            path = os.path.join(self.folder, f"{self.base_name}.{fid}.hdf")
+            if os.path.isfile(path):
+                out[fid] = read_layer_associations(path)
+        return out
+
     def family(self) -> dict[str, list[str]]:
         """All sibling files belonging to this project, grouped by type.
 
