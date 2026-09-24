@@ -18,7 +18,7 @@ Two more are half-built and easy to miss, because they are not on that list:
 (see the 2026-08-27 note below, and §E).
 
 **E4 (the pumped-vs-gravity analysis script) is DONE** — built 2026-09-22 as
-`Scripts/Results_Pipe_Profile_Comparison/gravity_vs_pumped.py`.
+`hack_ras_scripts/Results_Pipe_Profile_Comparison/gravity_vs_pumped.py`.
 
 **Closed 2026-09-14:** §F cross-mesh result comparison (built — see below). The
 `Ditch_fix_RS_9580` GUI-visibility question was closed the same day as a RAS
@@ -300,7 +300,7 @@ exactly reaches the rim counts as an exceedance. No additional tolerance.
 
 **E4. The pumped-vs-gravity analysis script — DONE 2026-09-22.**
 
-Built as `Scripts/Results_Pipe_Profile_Comparison/gravity_vs_pumped.py` with
+Built as `hack_ras_scripts/Results_Pipe_Profile_Comparison/gravity_vs_pumped.py` with
 `config_gravity_vs_pumped.yaml`, comparing plan PAIRS inside one model. (A
 sibling script comparing the same plan across two model DIRECTORIES existed
 briefly and was deleted 2026-09-22 — its shape could not express the pairs, and

@@ -215,7 +215,7 @@ separates TOKENS, not specs, so a whole selection can be one string
 are ignored — `'16-17,21-23'` and `['16-17', '21-23']` are the same spec. That
 splitting used to be a `spec.split(",")` prelude repeated in `delete_plans`,
 `delete_geoms` and `set_plan_settings`; it moved in here (2026-09-11) so every
-caller gets it, including the YAML-driven `Scripts/` tools, where
+caller gets it, including the YAML-driven `hack_ras_scripts/` tools, where
 `plan_files: "5-24,30"` previously raised. Purely additive — a comma used to be
 a hard error, so no working spec changed meaning.
 `flows._expand_flow_spec` still splits commas itself, and must: it reads each
@@ -422,7 +422,7 @@ alone.
   protect (never delete) when collecting result GIS. A folder referenced by BOTH a
   results map and a source layer (a plan whose Short ID collides with, say, the
   terrain folder) stays protected. Consumed by
-  `Scripts/DataMgmt_Results_Collection/copy_results_gis.py`.
+  `hack_ras_scripts/DataMgmt_Results_Collection/copy_results_gis.py`.
 
 ## Plan Settings — Intervals / Time Window / Title (`hack_ras/project/plan_settings.py`)
 
@@ -952,7 +952,7 @@ a.mannings_n, a.infiltration                         # LayerRef or None = "(None
   see the Project Health section. Not added to the package `__all__` re-exports: callers
   reach it through `project.layer_associations()` or `format_health`, and
   `read_layer_associations` is one import line.
-- **The FERC submittal script does NOT use it**, on purpose: `Scripts/DataMgmt_FERC_Zips`
+- **The FERC submittal script does NOT use it**, on purpose: `hack_ras_scripts/DataMgmt_FERC_Zips`
   finds terrain folders from the `.rasmap` `TerrainLayer` entries, i.e. EVERY terrain in
   the project, associated or not — a submittal ships the whole model.
 
@@ -1245,7 +1245,7 @@ interpolated = np.interp(wse, elev, vol)
 - `cell_plan_area` comes from **`AreaGeometry.plan_areas[cell_idx]`** (i.e. RAS's own
   `Cells Surface Area`), not from `polygons[cell_idx].area`. The two agree to float32
   round-off on a 7.0 HDF, but `plan_areas` needs no reconstruction and stays correct on
-  the pre-7.0 fallback path. `Scripts/Results_Profile_Lines_Volume/extract_volume.py` uses it.
+  the pre-7.0 fallback path. `hack_ras_scripts/Results_Profile_Lines_Volume/extract_volume.py` uses it.
 
 #### Cell min/max are EFFECTIVE ground, not the source DEM
 `CellVolumeTable.top_elevations` vectorises the `elev[-1]` lookup for every cell (nan where a
@@ -2022,7 +2022,7 @@ Measured on a real 21-section table at `tol=1.0` ft, clean crossings came in at
 (10) sits in a wide gap. `LineInPolygon` fields: `length` (the width to report),
 `along_boundary`, `widened_length` (length against `polygon.buffer(tol)` — the
 number to quote when reporting the problem), `clean_crossing` (`4*tol`), `tol`,
-`coincident`, and the `empty` property. Consumer: `Scripts/Results_FWDT_Output`.
+`coincident`, and the `empty` property. Consumer: `hack_ras_scripts/Results_FWDT_Output`.
 
 ## GIS Profile Line Workflow (`hack_ras/gis/`)
 `compute_profile_stations(line, area_data)` takes a shapely `LineString` and a dict of
@@ -2147,7 +2147,7 @@ Verified end-to-end on Hillside `p47` (g07) and `p58` (g09): 7792 face polygons 
 (973→978), 0.08 (591→602) — which is the g07/g09 edit, and is exactly what a cell-centre
 layer could not see.
 
-`Scripts/Geometry_Mesh_nvals/` drives it.
+`hack_ras_scripts/Geometry_Mesh_nvals/` drives it.
 
 ## Mapping 2D Results (`hack_ras/gis/wse_surface.py`)
 
@@ -2678,7 +2678,7 @@ with modifications baked in, a clipped subset) is a legitimate workflow.
 
 ### Runner
 
-`Scripts/Results_WSE_Depth_Maps/map_results.py` + a YAML config. Everything is tiled and
+`hack_ras_scripts/Results_WSE_Depth_Maps/map_results.py` + a YAML config. Everything is tiled and
 nothing holds the full grid.
 
 Each plan writes into `out_dir\<its Short Identifier>\` — the same folder name RAS Mapper
@@ -2703,7 +2703,7 @@ against ~22 s for 485 Mpx on the single 1 ft grid. The 1 m LiDAR is 11x fewer pi
 is not upsampled to sit beside the 1 ft channel survey, and none of that upsampling carried
 information.
 
-### Differencing (`Scripts/Results_WSE_Depth_Maps/diff_results.py`)
+### Differencing (`hack_ras_scripts/Results_WSE_Depth_Maps/diff_results.py`)
 
 Separate tool, separate config. It reads **finished rasters** — no project, plan HDF or
 terrain — so either side can be a RAS Mapper export or a `map_results.py` export, in any
@@ -2787,7 +2787,7 @@ is not modified).  River/reach/RS matching is case- and whitespace-insensitive.
 All other geometry content is passed through byte-for-byte.
 
 The companion CLI script is at
-`Scripts/Geometry_XS_GIS_Shift/shift_xs_gis.py` (YAML-configured,
+`hack_ras_scripts/Geometry_XS_GIS_Shift/shift_xs_gis.py` (YAML-configured,
 `python shift_xs_gis.py config.yaml`).
 
 Config keys: `prj_path`, `geom_in` (e.g. `g16`), `geom_out` (e.g. `g17`),
@@ -3093,21 +3093,24 @@ reliable index; trust the per-topic sections over this one.)*
 
 `Scripts/` was renamed wholesale on 2026-09-08 to `<Function>_<Subject>` with
 `QC_` / `Results_` / `Geometry_` / `DataMgmt_` prefixes, so a consumer path in an
-older session entry will not resolve today. The entries are left as written —
-they are dated records, not current instructions. Translation table for the
-names that appear below:
+older session entry will not resolve today. On 2026-09-24 the whole folder then
+became its own private git repo, `hack_ras_scripts/` (a sibling of `hack_ras/`),
+so every `Scripts/` prefix below now reads `hack_ras_scripts/`. The entries are
+left as written — they are dated records, not current instructions. Translation
+table for the names that appear below:
 
 | as written in a session entry | folder today |
 |---|---|
-| `Scripts/Mesh_cell_nvals`, `Scripts/Mesh_nvals` | `Scripts/Geometry_Mesh_nvals` |
-| `Scripts/Mesh_Health` | `Scripts/Geometry_Mesh_Health` |
-| `Scripts/Profile_Lines_Volume` | `Scripts/Results_Profile_Lines_Volume` |
-| `Scripts/FWDT_Output` | `Scripts/Results_FWDT_Output` |
-| `Scripts/Results_GIS` | `Scripts/DataMgmt_Results_Collection` |
-| `Scripts/Pipe_Profile_Comparison` | `Scripts/Results_Pipe_Profile_Comparison` |
+| `Scripts/Mesh_cell_nvals`, `Scripts/Mesh_nvals` | `hack_ras_scripts/Geometry_Mesh_nvals` |
+| `Scripts/Mesh_Health` | `hack_ras_scripts/Geometry_Mesh_Health` |
+| `Scripts/Profile_Lines_Volume` | `hack_ras_scripts/Results_Profile_Lines_Volume` |
+| `Scripts/FWDT_Output` | `hack_ras_scripts/Results_FWDT_Output` |
+| `Scripts/Results_GIS` | `hack_ras_scripts/DataMgmt_Results_Collection` |
+| `Scripts/Pipe_Profile_Comparison` | `hack_ras_scripts/Results_Pipe_Profile_Comparison` |
 
-`ls Scripts` is the live check — the set changes often. Scripts are not part of
-this repo, so nothing here is verified by the test suite.
+`ls hack_ras_scripts` is the live check — the set changes often. The scripts live
+in their own repo, so nothing here is verified by this test suite; when a
+`hack_ras` API change touches them, grep `hack_ras_scripts/` in the same sitting.
 
 ### Session 21 changes (2026-08-24): 2D mesh Manning's n export — faces only
 
