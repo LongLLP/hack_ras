@@ -2511,7 +2511,7 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
     station, invert, crown, wse, vel, flow, owner = [], [], [], [], [], [], []
     energy, shape, rise, span = [], [], [], []
     times = {}
-    node_at = {}
+    node_stations = []
     offset = 0.0
     prev_ds = None
 
@@ -2520,7 +2520,8 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         if prev_ds is not None and prev_ds in bridge_at:
             offset += bridge_at[prev_ds][1]
         n = len(pr.station)
-        node_at[len(station)] = pr.us_node
+        if not node_stations or node_stations[-1][0] != pr.us_node:
+            node_stations.append((pr.us_node, offset))
         station.extend(offset + pr.station)
         invert.extend(pr.invert)
         crown.extend(pr.invert + pr.rise)
@@ -2535,12 +2536,10 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         for key, t in pr.times.items():
             times.setdefault(key, []).append(t)
         offset += pr.length
+        node_stations.append((pr.ds_node, offset))
         prev_ds = pr.ds_node
         si = pr.si_units
         stored_energy = pr.energy is not None
-
-    if station:
-        node_at[len(station) - 1] = path.nodes[-1]
 
     return PathProfile(
         path=path,
@@ -2552,7 +2551,7 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         velocity=np.asarray(vel, dtype=np.float64),
         flow=np.asarray(flow, dtype=np.float64),
         conduit_of=np.asarray(owner, dtype=object),
-        node_at=node_at,
+        node_stations=node_stations,
         total_length=offset,
         si_units=bool(si) if station else False,
         energy=(np.asarray(energy, dtype=np.float64)

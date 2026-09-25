@@ -420,11 +420,27 @@ class TestPathsOnRealFixture(unittest.TestCase):
                                    prof.velocity ** 2 / (2.0 * g))
         self.assertEqual(set(prof.conduit_of), set(path.conduits))
 
-    def test_path_profile_labels_the_end_nodes(self):
+    def test_node_stations_sit_at_the_summed_conduit_lengths(self):
         path = trace_path(self.net, 'J321', 'J317')
         prof = read_path_profile(_HDF_FIXTURE, self.net, path, 'Maximum')
-        self.assertEqual(prof.node_at[0], 'J321')
-        self.assertEqual(prof.node_at[len(prof.station) - 1], 'J317')
+        self.assertEqual([n for n, _ in prof.node_stations], path.nodes)
+        want, offset = [0.0], 0.0
+        for c in path.conduits:
+            offset += read_conduit_profile(_HDF_FIXTURE, self.net, c,
+                                           'Maximum').length
+            want.append(offset)
+        np.testing.assert_allclose([s for _, s in prof.node_stations], want)
+        self.assertAlmostEqual(prof.node_stations[-1][1], prof.total_length)
+
+    def test_node_stations_list_both_ends_of_a_bridged_break(self):
+        joined = self._bridged()
+        gap = joined.bridges[0][2]
+        prof = read_path_profile(_HDF_FIXTURE, self.net, joined, 'Maximum')
+        st = dict(prof.node_stations)
+        c232 = read_conduit_profile(_HDF_FIXTURE, self.net, 'C232', 'Maximum')
+        self.assertAlmostEqual(st['J317'], c232.length, places=6)
+        self.assertAlmostEqual(st['J316'], c232.length + gap, places=6)
+        self.assertEqual(len(prof.node_stations), len(set(st)))
 
     def test_path_profile_rejects_a_foreign_network(self):
         path = trace_path(self.net, 'J321', 'J317')

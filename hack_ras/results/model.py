@@ -828,8 +828,15 @@ class PathProfile:
     invert, crown, wse, velocity, flow : np.ndarray, shape (F,), dtype float64
     conduit_of : np.ndarray, shape (F,), dtype object
         Conduit name each face belongs to.
-    node_at : dict[int, str]
-        Row index -> node name, for labelling junctions on a chart.
+    node_stations : list[tuple[str, float]]
+        (node, station) for every node on the path, in path order, at its TRUE
+        position: the summed conduit lengths (and bridged gaps) up to it, on the
+        same axis as ``station``. Both nodes of a bridged break are listed.
+        Never label a node at a face instead: faces sit about half a cell off
+        the node, and where two geometries split a conduit into different face
+        counts they land in different places. The face-based ``node_at`` this
+        replaced put Armour Rd's J314 at 44.58 ft in the gravity plans and
+        104.01 ft in the pumped ones, when it is at 0 in both.
     total_length : float
         Sum of conduit lengths plus bridged gaps.
     si_units : bool
@@ -849,9 +856,9 @@ class PathProfile:
     velocity: np.ndarray
     flow: np.ndarray
     conduit_of: np.ndarray
-    node_at: dict = field(default_factory=dict)
     total_length: float = 0.0
     si_units: bool = False
+    node_stations: list = field(default_factory=list)
     energy: np.ndarray | None = None
     times: dict = field(default_factory=dict)
     shape: np.ndarray | None = None
