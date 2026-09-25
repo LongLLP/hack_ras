@@ -10,6 +10,8 @@ import os
 import tempfile
 import unittest
 
+import numpy as np
+
 try:
     from hack_ras.results.reader import read_plan_metadata
     from hack_ras.results.model import PlanMetadata
@@ -78,3 +80,51 @@ class TestReadPlanMetadata(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+_P02 = os.path.join(os.path.dirname(__file__), 'data',
+                    '2D culvert bridge levee precip pipes', 'Model.p02.hdf')
+
+
+@unittest.skipUnless(HAS_RESULTS and os.path.exists(_P02),
+                     "hack_ras[results] extras or the p02 fixture missing")
+class TestReadWseTime(unittest.TestCase):
+    """When each 2D cell's maximum occurred -- the surface-WSE time of max."""
+
+    def setUp(self):
+        from hack_ras.results.reader import list_areas
+        self.area = list_areas(_P02)[0]
+
+    def _stamps(self):
+        import h5py
+        from datetime import datetime
+        base = ('Results/Unsteady/Output/Output Blocks/Base Output'
+                '/Unsteady Time Series')
+        with h5py.File(_P02, 'r') as hdf:
+            raw = [t.decode().strip() for t in hdf[f'{base}/Time Date Stamp'][()]]
+            ts = hdf[f'{base}/2D Flow Areas/{self.area}/Water Surface'][()]
+        return (np.array([datetime.strptime(s, '%d%b%Y %H:%M:%S') for s in raw],
+                         dtype='datetime64[ms]'), ts)
+
+    def test_summary_times_lie_inside_the_run(self):
+        """Days count from the 10:00 start, so none precede the first stamp."""
+        from hack_ras.results.reader import read_wse_time
+        stamps, _ = self._stamps()
+        t = read_wse_time(_P02, self.area, 'Maximum')
+        ok = ~np.isnat(t)
+        self.assertTrue(np.all((t[ok] >= stamps[0]) & (t[ok] <= stamps[-1])))
+
+    def test_time_series_time_is_the_stamp_of_read_wse_s_max(self):
+        from hack_ras.results.reader import read_wse, read_wse_time
+        stamps, ts = self._stamps()
+        t = read_wse_time(_P02, self.area, 'Maximum from Time Series')
+        wse = read_wse(_P02, self.area, 'Maximum from Time Series')
+        wet = ~np.isnat(t)
+        self.assertTrue(np.any(wet))
+        idx = np.searchsorted(stamps, t[wet])
+        np.testing.assert_array_equal(ts[idx, np.flatnonzero(wet)], wse[wet])
+
+    def test_time_stamp_is_refused(self):
+        from hack_ras.results.reader import read_wse_time
+        with self.assertRaises(ValueError):
+            read_wse_time(_P02, self.area, '01JAN2025 12:00:00')

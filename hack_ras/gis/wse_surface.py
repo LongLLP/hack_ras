@@ -712,6 +712,70 @@ def build_wse_surface(
 # Rasterisation
 # ---------------------------
 
+def sample_surface(surface: "WseSurface", xy) -> tuple[np.ndarray, np.ndarray]:
+    """Sample a surface at arbitrary points -- the same rule `rasterize_surface`
+    applies to pixel centres, so a point value and a raster value agree.
+
+    Parameters
+    ----------
+    surface : WseSurface
+    xy : (N, 2) array
+        Points in project coordinates.
+
+    Returns
+    -------
+    values : (N,) float64
+        Barycentric WSE of the triangle containing each point; NaN outside the
+        wet surface (a dry cell has no triangles).
+    cells : (N,) int64
+        The mesh cell that triangle was fanned from (`cell_of_triangle`); -1
+        where `values` is NaN. Use it to look up a per-cell quantity such as
+        time of maximum.
+
+    A point on an edge shared by two triangles takes the first one found. In
+    `horizontal` mode that decides which of two cells' levels a point exactly
+    on a cell boundary gets; anywhere else it makes no difference.
+    """
+    pts = np.asarray(xy, dtype=np.float64).reshape(-1, 2)
+    values = np.full(len(pts), np.nan)
+    cells = np.full(len(pts), -1, dtype=np.int64)
+    if len(surface.triangles) == 0 or len(pts) == 0:
+        return values, cells
+
+    tri = surface.points[surface.triangles]          # (T, 3, 2)
+    lo, hi = tri.min(axis=1), tri.max(axis=1)
+    # Keep only triangles whose box meets the points' box, then test per point.
+    box_lo, box_hi = pts.min(axis=0), pts.max(axis=0)
+    near = np.flatnonzero(np.all(hi >= box_lo, axis=1)
+                          & np.all(lo <= box_hi, axis=1))
+    tri, lo, hi = tri[near], lo[near], hi[near]
+    a, b, c = tri[:, 0], tri[:, 1], tri[:, 2]
+    det = (b[:, 1] - c[:, 1]) * (a[:, 0] - c[:, 0]) \
+        + (c[:, 0] - b[:, 0]) * (a[:, 1] - c[:, 1])
+    eps = 1e-9
+    for k, (x, y) in enumerate(pts):
+        cand = np.flatnonzero((lo[:, 0] <= x) & (x <= hi[:, 0])
+                              & (lo[:, 1] <= y) & (y <= hi[:, 1])
+                              & (det != 0))
+        if cand.size == 0:
+            continue
+        ac, bc, cc, d = a[cand], b[cand], c[cand], det[cand]
+        l1 = ((bc[:, 1] - cc[:, 1]) * (x - cc[:, 0])
+              + (cc[:, 0] - bc[:, 0]) * (y - cc[:, 1])) / d
+        l2 = ((cc[:, 1] - ac[:, 1]) * (x - cc[:, 0])
+              + (ac[:, 0] - cc[:, 0]) * (y - cc[:, 1])) / d
+        l3 = 1.0 - l1 - l2
+        inside = np.flatnonzero((l1 >= -eps) & (l2 >= -eps) & (l3 >= -eps))
+        if inside.size == 0:
+            continue
+        j = inside[0]
+        t = near[cand[j]]
+        v = surface.values[surface.triangles[t]]
+        values[k] = l1[j] * v[0] + l2[j] * v[1] + l3[j] * v[2]
+        cells[k] = surface.cell_of_triangle[t]
+    return values, cells
+
+
 def rasterize_surface(
     surface: "WseSurface",
     transform,

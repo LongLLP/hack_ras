@@ -70,6 +70,7 @@ try:
         export_wse_depth_per_source,
         rasterize_surface,
         same_mesh,
+        sample_surface,
         vrt_sources,
     )
     from hack_ras.results.reader import list_areas, read_area_geometry, read_wse
@@ -1064,3 +1065,61 @@ class TestGridMatchTolerance(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(HAS_GIS, "requires h5py / shapely / rasterio extras")
+@unittest.skipUnless(os.path.exists(FIXTURE), f"missing fixture {FIXTURE}")
+class TestSampleSurface(unittest.TestCase):
+    """`sample_surface` is the point version of `rasterize_surface`'s rule.
+
+    The pipe profile export samples a surface along conduit polylines with it, so
+    what matters is that a point gets exactly the value the triangulation
+    defines -- the cell's own WSE at its centre, the barycentric blend inside a
+    triangle -- and nothing where there is no wet surface.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        cls.areas = list_areas(FIXTURE)
+        cls.wse = {a: read_wse(FIXTURE, a, "Maximum") for a in cls.areas}
+        cls.surf = {(a, m): build_wse_surface(FIXTURE, a, cls.wse[a], mode=m)
+                    for a in cls.areas for m in ("horizontal", "interpolated")}
+
+    def test_cell_centre_returns_that_cell_and_its_wse(self):
+        for (area, mode), s in self.surf.items():
+            with self.subTest(area=area, mode=mode):
+                cells = np.unique(s.cell_of_triangle)
+                apex = {int(c): s.points[s.triangles[np.flatnonzero(
+                    s.cell_of_triangle == c)[0], 0]] for c in cells}
+                xy = np.array([apex[int(c)] for c in cells])
+                vals, got = sample_surface(s, xy)
+                np.testing.assert_array_equal(got, cells)
+                np.testing.assert_allclose(vals, self.wse[area][cells],
+                                           rtol=0, atol=1e-9)
+
+    def test_triangle_centroid_is_the_mean_of_its_vertices(self):
+        for (area, mode), s in self.surf.items():
+            with self.subTest(area=area, mode=mode):
+                pick = np.arange(0, len(s.triangles), max(1, len(s.triangles) // 25))
+                xy = s.points[s.triangles[pick]].mean(axis=1)
+                vals, cells = sample_surface(s, xy)
+                np.testing.assert_allclose(
+                    vals, s.values[s.triangles[pick]].mean(axis=1),
+                    rtol=0, atol=1e-6)
+                np.testing.assert_array_equal(cells, s.cell_of_triangle[pick])
+
+    def test_point_off_the_surface_is_nan_and_minus_one(self):
+        s = self.surf[(self.areas[0], "horizontal")]
+        x0, y0, x1, y1 = s.bounds
+        vals, cells = sample_surface(s, [[x1 + 1e4, y1 + 1e4], [x0 - 1e4, y0]])
+        self.assertTrue(np.all(np.isnan(vals)))
+        self.assertTrue(np.all(cells == -1))
+
+    def test_horizontal_is_flat_inside_a_cell(self):
+        """A point anywhere in a flat cell carries that cell's WSE -- to float
+        rounding, since the three barycentric weights sum to 1 only to ~1e-16."""
+        s = self.surf[(self.areas[0], "horizontal")]
+        xy = s.points[s.triangles[::7]].mean(axis=1)
+        vals, cells = sample_surface(s, xy)
+        np.testing.assert_allclose(vals, self.wse[self.areas[0]][cells],
+                                   rtol=0, atol=1e-9)

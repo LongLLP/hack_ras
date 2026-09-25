@@ -833,6 +833,12 @@ class PathProfile:
     total_length : float
         Sum of conduit lengths plus bridged gaps.
     si_units : bool
+    energy : np.ndarray or None
+        See ConduitProfile.energy; read it through ``energy_grade``.
+    times : dict[str, np.ndarray]
+        See ConduitProfile.times, chained along the path.
+    shape : np.ndarray, dtype object; rise, span : np.ndarray
+        Section of the conduit each face belongs to, for ``critical_wse``.
     """
     path: ConduitPath
     when: str
@@ -846,6 +852,35 @@ class PathProfile:
     node_at: dict = field(default_factory=dict)
     total_length: float = 0.0
     si_units: bool = False
+    energy: np.ndarray | None = None
+    times: dict = field(default_factory=dict)
+    shape: np.ndarray | None = None
+    rise: np.ndarray | None = None
+    span: np.ndarray | None = None
+
+    @property
+    def station_from_end(self) -> np.ndarray:
+        """
+        Distance from the path's END node, i.e. ``total_length - station``.
+
+        For a path traced downstream this is RAS Mapper's pipe-profile x-axis
+        (station 0 at the downstream end). It descends; reverse the arrays for
+        plot order.
+        """
+        return self.total_length - self.station
+
+    @property
+    def critical_wse(self) -> np.ndarray:
+        """Critical water surface per face, invert + critical depth for |flow|.
+        Computed the way RAS Mapper draws it -- in surcharged conduits too, where
+        it has no physical meaning. See hydraulics.critical_depth."""
+        from .hydraulics import critical_depth
+        yc = np.empty_like(self.flow)
+        for sh in set(self.shape):
+            m = self.shape == sh
+            yc[m] = critical_depth(self.flow[m], sh, self.rise[m],
+                                   self.span[m], self.si_units)
+        return self.invert + yc
 
     @property
     def depth(self) -> np.ndarray:
@@ -881,8 +916,45 @@ class PathProfile:
     @property
     def energy_grade(self) -> np.ndarray:
         """Energy grade line, wse + V^2 / 2g. See ConduitProfile.energy_grade."""
+        if self.energy is not None:
+            return self.energy
         g = 9.80665 if self.si_units else 32.174
         return self.wse + self.velocity ** 2 / (2.0 * g)
+
+
+@dataclass
+class PathTerrain:
+    """
+    The ground profile along a ConduitPath, as RAS Mapper's pipe profile draws it.
+
+    Read from ``Geometry/Pipe Conduits/Terrain Profiles``, which RAS samples along
+    each conduit's polyline when it computes the geometry. Stations are NOT the
+    face stations: this is a much denser axis (~3 ft on Hillside).
+
+    Attributes
+    ----------
+    path : ConduitPath
+    station : np.ndarray, float64
+        Distance from the path's start node, on the same axis as
+        PathProfile.station (bridged breaks advance it the same way).
+    elevation : np.ndarray, float64
+    conduit_of : np.ndarray, dtype object
+    xy : np.ndarray, shape (N, 2), float64
+        Plan position of each point along the conduit polylines, for sampling a
+        2D water surface at the same places.
+    total_length : float
+    """
+    path: ConduitPath
+    station: np.ndarray
+    elevation: np.ndarray
+    conduit_of: np.ndarray
+    xy: np.ndarray
+    total_length: float = 0.0
+
+    @property
+    def station_from_end(self) -> np.ndarray:
+        """Distance from the path's END node. See PathProfile.station_from_end."""
+        return self.total_length - self.station
 
 
 @dataclass
@@ -943,6 +1015,17 @@ class ConduitProfile:
         e.g. 'Circular', 'Box'.
     si_units : bool
         Unit system of the model, used by ``energy_grade``.
+    energy : np.ndarray or None
+        Energy grade stored by the reader when it cannot be derived from
+        ``wse`` and ``velocity`` -- only for 'Maximum from Time Series'. Read it
+        through ``energy_grade``.
+    times : dict[str, np.ndarray]
+        When each value occurred, as datetime64[ms] per face, keyed 'wse',
+        'velocity', 'flow' and (time-series maximum only) 'energy'. 'Maximum' /
+        'Minimum' take it from the Summary tables at computation-step resolution;
+        'Maximum from Time Series' at output-interval resolution. There is no
+        'energy' key for 'Maximum', because that EG is a sum of two envelopes that
+        peak at different times. Empty for a time stamp.
     """
     network: str
     conduit: str
@@ -962,6 +1045,8 @@ class ConduitProfile:
     span: float
     shape: str
     si_units: bool = False
+    energy: np.ndarray | None = None
+    times: dict = field(default_factory=dict)
 
     @property
     def depth(self) -> np.ndarray:
@@ -985,9 +1070,27 @@ class ConduitProfile:
 
         HEC-RAS does not store EG for pipe conduits; RAS Mapper derives it the
         same way. Uses g = 32.174 ft/s^2 or 9.80665 m/s^2 per ``si_units``.
+
+        For ``when='Maximum from Time Series'`` the reader stores the maximum of
+        the SUM over the output steps in ``energy``, and that is returned. It
+        cannot be rebuilt from ``wse`` and ``velocity``, which peak separately.
+        For ``'Maximum'`` it is the sum of the two envelopes, which is exactly
+        what RAS Mapper plots. That is usually an upper bound on the true peak,
+        but NOT where reverse flow is the faster: Summary's Maximum Face Velocity
+        is the signed max, so that velocity head is lost (see ai_context.md).
         """
+        if self.energy is not None:
+            return self.energy
         g = 9.80665 if self.si_units else 32.174
         return self.wse + self.velocity ** 2 / (2.0 * g)
+
+    @property
+    def critical_wse(self) -> np.ndarray:
+        """Critical water surface, invert + critical depth for |flow|. See
+        hydraulics.critical_depth."""
+        from .hydraulics import critical_depth
+        return self.invert + critical_depth(
+            self.flow, self.shape, self.rise, self.span, self.si_units)
 
     @property
     def station_from_ds(self) -> np.ndarray:

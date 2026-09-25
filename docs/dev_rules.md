@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 881 passing tests (plus any added in the current
+All tests must pass. The baseline is 913 passing tests (plus any added in the current
 session), and 1 skipped by design — a 5.0.3 fixture HDF that has no culvert table.
 If a new test is added, the new count becomes the baseline.
 

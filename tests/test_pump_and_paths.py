@@ -25,6 +25,7 @@ try:
         read_conduit_profile,
         read_node_points,
         read_path_profile,
+        read_path_terrain,
         read_pipe_network,
         read_pump_curves,
         read_pump_station,
@@ -34,7 +35,7 @@ try:
         verify_path,
     )
     from hack_ras.results.model import (
-        ConduitPath, PathProfile, PipeConduit, PipeNetwork, PumpCurve,
+        ConduitPath, PathProfile, PathTerrain, PipeConduit, PipeNetwork, PumpCurve,
         PumpStation,
     )
     HAS_RESULTS = True
@@ -443,6 +444,110 @@ class TestPathsOnRealFixture(unittest.TestCase):
         with self.assertRaises(ValueError) as cm:
             read_path_profile(_HDF_FIXTURE, self.net, bogus, 'Maximum')
         self.assertIn('__not_here__', str(cm.exception))
+
+    # -- time-series mode, critical WS, terrain -------------------------------
+
+    def _bridged(self):
+        pts = read_node_points(_HDF_FIXTURE)
+        return join_paths([trace_path(self.net, 'J322', 'J317'),
+                           trace_path(self.net, 'J316', 'J314')], pts)
+
+    def test_path_time_series_mode_chains_conduit_energy_and_times(self):
+        path = trace_path(self.net, 'J321', 'J317')
+        prof = read_path_profile(_HDF_FIXTURE, self.net, path,
+                                 'Maximum from Time Series')
+        want_eg, want_t = [], []
+        for c in path.conduits:
+            cp = read_conduit_profile(_HDF_FIXTURE, self.net, c,
+                                      'Maximum from Time Series')
+            want_eg.extend(cp.energy)
+            want_t.append(cp.times['energy'])
+        np.testing.assert_array_equal(prof.energy_grade, want_eg)
+        np.testing.assert_array_equal(prof.times['energy'], np.concatenate(want_t))
+        for key, t in prof.times.items():
+            self.assertEqual(len(t), len(prof.station), key)
+
+    def test_path_maximum_mode_eg_is_the_envelope_sum(self):
+        """RAS Mapper's "EG Pipe Max": no stored energy, and no EG time."""
+        path = trace_path(self.net, 'J321', 'J317')
+        prof = read_path_profile(_HDF_FIXTURE, self.net, path, 'Maximum')
+        self.assertIsNone(prof.energy)
+        self.assertNotIn('energy', prof.times)
+        ts = read_path_profile(_HDF_FIXTURE, self.net, path,
+                               'Maximum from Time Series')
+        mn = read_path_profile(_HDF_FIXTURE, self.net, path, 'Minimum')
+        # The envelope is an upper bound EXCEPT where reverse flow is the faster
+        # one: Summary's Maximum Face Velocity is the signed max, so the envelope
+        # EG drops that velocity head. This fixture has such a reach (24 of 46
+        # faces on J321 -> J317, min V -5.8 vs max +3.7 ft/s).
+        above = ts.energy_grade > prof.energy_grade + 1e-3
+        self.assertTrue(np.any(above), 'fixture lost its reverse-flow reach')
+        self.assertTrue(np.all(np.abs(mn.velocity[above])
+                               > prof.velocity[above]))
+
+    def test_path_critical_wse_matches_each_conduit(self):
+        path = trace_path(self.net, 'J321', 'J317')
+        prof = read_path_profile(_HDF_FIXTURE, self.net, path, 'Maximum')
+        want = np.concatenate([
+            read_conduit_profile(_HDF_FIXTURE, self.net, c, 'Maximum').critical_wse
+            for c in path.conduits])
+        np.testing.assert_allclose(prof.critical_wse, want, rtol=0, atol=1e-12)
+        np.testing.assert_allclose(prof.station_from_end,
+                                   prof.total_length - prof.station)
+
+    def test_terrain_shares_the_profile_axis(self):
+        path = trace_path(self.net, 'J321', 'J317')
+        ter = read_path_terrain(_HDF_FIXTURE, self.net, path)
+        prof = read_path_profile(_HDF_FIXTURE, self.net, path, 'Maximum')
+        self.assertIsInstance(ter, PathTerrain)
+        self.assertAlmostEqual(ter.total_length, prof.total_length, places=6)
+        # A conduit's last terrain station can overshoot its Conduit Length by
+        # ~1e-5 ft, so the next conduit's first point is a hair earlier.
+        self.assertTrue(np.all(np.diff(ter.station) >= -1e-3))
+        self.assertAlmostEqual(ter.station[0], 0.0, places=6)
+        self.assertAlmostEqual(ter.station[-1], ter.total_length, places=2)
+        self.assertEqual(set(ter.conduit_of), set(path.conduits))
+        self.assertTrue(np.all(np.isfinite(ter.elevation)))
+        self.assertEqual(ter.xy.shape, (len(ter.station), 2))
+
+    def test_terrain_xy_runs_from_the_start_node_to_the_end_node(self):
+        pts = read_node_points(_HDF_FIXTURE)
+        path = trace_path(self.net, 'J321', 'J317')
+        ter = read_path_terrain(_HDF_FIXTURE, self.net, path)
+        self.assertLess(np.hypot(*(ter.xy[0] - pts['J321'])), 1.0)
+        self.assertLess(np.hypot(*(ter.xy[-1] - pts['J317'])), 1.0)
+
+    def test_terrain_matches_the_stored_profile_of_each_conduit(self):
+        path = trace_path(self.net, 'J321', 'J317')
+        ter = read_path_terrain(_HDF_FIXTURE, self.net, path)
+        with h5py.File(_HDF_FIXTURE, 'r') as hdf:
+            g = hdf['Geometry/Pipe Conduits']
+            names = [n.decode().strip() for n in g['Attributes']['Name']]
+            info, vals = g['Terrain Profiles Info'][()], g['Terrain Profiles Values'][()]
+        want = np.concatenate([vals[info[names.index(c)][0]:
+                                    info[names.index(c)][0] + info[names.index(c)][1], 1]
+                               for c in path.conduits])
+        np.testing.assert_array_equal(ter.elevation, want.astype(np.float64))
+
+    def test_terrain_skips_a_bridged_break_but_advances_across_it(self):
+        joined = self._bridged()
+        gap = joined.bridges[0][2]
+        ter = read_path_terrain(_HDF_FIXTURE, self.net, joined)
+        c232 = read_conduit_profile(_HDF_FIXTURE, self.net, 'C232', 'Maximum')
+        first = ter.station[ter.conduit_of == 'C179'][0]
+        self.assertAlmostEqual(first, c232.length + gap, places=5)
+        self.assertFalse(np.any((ter.station > c232.length + 1e-6)
+                                & (ter.station < c232.length + gap - 1e-6)))
+
+    def test_terrain_rejects_a_foreign_network_and_absent_conduits(self):
+        path = trace_path(self.net, 'J321', 'J317')
+        with self.assertRaises(ValueError):
+            read_path_terrain(_HDF_FIXTURE, self.net, ConduitPath(
+                network='__other__', conduits=path.conduits, nodes=path.nodes))
+        with self.assertRaises(ValueError):
+            read_path_terrain(_HDF_FIXTURE, self.net, ConduitPath(
+                network=self.net.name, conduits=['C326', '__not_here__'],
+                nodes=['J321', 'J287', '?']))
 
     def test_peak_flow_resolver_returns_choice_and_note(self):
         resolver = peak_flow_resolver(_HDF_FIXTURE, self.net)

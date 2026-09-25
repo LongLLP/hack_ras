@@ -3,7 +3,7 @@
 from __future__ import annotations
 import logging
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 
 import h5py
@@ -22,6 +22,7 @@ from .model import (
     NodeMaxWse,
     NodeRims,
     PathProfile,
+    PathTerrain,
     Pump,
     PumpCurve,
     PumpGroup,
@@ -542,6 +543,45 @@ def read_wse(
                     f"  Expected format example: '01Jan2025 00:30:00'"
                 )
             return hdf[f"{TS}/Water Surface"][matches[0], :].astype(np.float64)
+
+
+def read_wse_time(hdf_path: str, area: str, wse_type: str) -> np.ndarray:
+    """
+    When each cell's read_wse value occurred, as datetime64[ms] (N_cells).
+
+    Parameters
+    ----------
+    wse_type : str
+        'Maximum' -- Summary row 1, at computation-step resolution (decimal
+        days from the simulation start time).
+        'Maximum from Time Series' -- the output step of the per-cell maximum,
+        matching read_wse's NaN handling (values <= 0 ignored).
+
+    Raises
+    ------
+    ValueError
+        For a time stamp: its values all occurred at that stamp, so there is
+        nothing to read.
+    KeyError
+        If the area's results are absent.
+
+    Cells that are never wet in 'Maximum from Time Series' (all values <= 0)
+    get NaT.
+    """
+    with h5py.File(hdf_path, "r") as hdf:
+        if wse_type == "Maximum":
+            days = hdf[f"{_SUM_BASE.format(area=area)}/Maximum Water Surface"][1, :]
+            return _summary_days_dt64(hdf, days)
+        if wse_type == "Maximum from Time Series":
+            ts = hdf[f"{_TS_BASE.format(area=area)}/Water Surface"][:].astype(np.float64)
+            stamps = _stamps_dt64(hdf)
+            ts[ts <= 0] = -np.inf
+            out = stamps[np.argmax(ts, axis=0)]
+            out[np.all(np.isneginf(ts), axis=0)] = np.datetime64('NaT')
+            return out
+    raise ValueError(
+        f"read_wse_time takes 'Maximum' or 'Maximum from Time Series', not "
+        f"{wse_type!r}: a time-stamp read has no time of maximum.")
 
 
 # ---------------------------
@@ -1423,6 +1463,42 @@ def read_plan_breach_data(hdf_path: str) -> list:
     return rows
 
 
+def _stamp_to_datetime(stamp: str) -> datetime:
+    """Parse a HEC-RAS time stamp, allowing the '24:00:00' spelling of midnight."""
+    s = stamp.strip()
+    if s.endswith('24:00:00'):
+        return (datetime.strptime(s[:-8] + '00:00:00', "%d%b%Y %H:%M:%S")
+                + timedelta(days=1))
+    return datetime.strptime(s, "%d%b%Y %H:%M:%S")
+
+
+def _stamps_dt64(hdf) -> np.ndarray:
+    """The output time stamps of an open plan HDF as datetime64[ms]."""
+    return np.array([_stamp_to_datetime(_decode(t)) for t in hdf[_TS_DATES][()]],
+                    dtype='datetime64[ms]')
+
+
+def _summary_days_dt64(hdf, days) -> np.ndarray:
+    """
+    Summary Output time-of-max values as datetime64[ms].
+
+    Those rows are decimal days from the SIMULATION START TIME. The test fixture
+    starts at 10:00 and every plan's largest value is exactly its run length
+    (0.1667 d for a 4 h run), so it is not midnight of the start date -- an
+    older note said so, and Hillside's 00:00 start could not tell them apart.
+
+    Rounded to the whole second: the rows are float32, whose spacing is already
+    ~5 ms at half a day and grows with run length, so the digits below a
+    second are storage noise (Hillside p05 gave 12:05:14.001, :13.002, ...).
+    """
+    start = datetime.strptime(
+        _decode(hdf["Plan Data/Plan Information"].attrs["Simulation Start Time"]),
+        "%d%b%Y %H:%M:%S")
+    origin = np.datetime64(start, 'ms')
+    ms = np.round(np.asarray(days, dtype=np.float64) * 86_400.0) * 1000.0
+    return origin + ms.astype('timedelta64[ms]')
+
+
 def read_simulation_start_time(hdf_path: str) -> datetime:
     """
     Read simulation start time from Plan Data/Plan Information.
@@ -1463,7 +1539,8 @@ def read_summary_max(
     -------
     dict[int, tuple[float, float]]
         {cell_idx: (max_wse, time_days)} where time_days is decimal days
-        from midnight of the simulation start date (sub-step resolution).
+        from the simulation start time (sub-step resolution) -- not midnight;
+        see _summary_days_dt64.
 
     Raises
     ------
@@ -1740,12 +1817,24 @@ def read_conduit_profile(
     conduit_name : str
         Conduit name as it appears in Geometry/Pipe Conduits/Attributes.
     when : str, default 'Maximum'
-        'Maximum' or 'Minimum' for the per-face envelope from Summary Output, or
-        a time-stamp string (e.g. '01JAN2025 09:00:00') for an instant.
+        'Maximum' or 'Minimum' for the per-face envelope from Summary Output;
+        'Maximum from Time Series' for the per-face maximum over the output
+        steps, the same vocabulary as read_wse; or a time-stamp string (e.g.
+        '01JAN2025 09:00:00') for an instant.
 
     Returns
     -------
     ConduitProfile
+        ``times`` says when each value occurred (see ConduitProfile). Only
+        'Maximum from Time Series' fills ``energy``: the maximum of WS + V^2/2g
+        taken per output step, which is the true peak EG to within the output
+        interval. The 'Maximum' EG is the sum of two envelopes that peak apart
+        -- RAS Mapper's "EG Pipe Max". On Hillside p05 26th Ave it exceeds the
+        time-series EG by median 0.145 ft, max 0.315 ft. It is NOT a strict
+        upper bound: the Summary velocity is the signed max, so on a face whose
+        faster flow runs backward the envelope EG misses that velocity head and
+        can sit BELOW the time-series EG (up to 0.19 ft on 23-26 faces per
+        Hillside plan; 0.31 ft on the test fixture).
 
     Raises
     ------
@@ -1819,12 +1908,38 @@ def read_conduit_profile(
 
         ts_base = _PIPE_TS_BASE.format(network=net_name)
         sum_base = _PIPE_SUM_BASE.format(network=net_name)
+        energy, times = None, {}
 
         if when in ('Maximum', 'Minimum'):
             # Summary datasets are (2, N_faces): row 0 = value, row 1 = time in days.
-            wse = hdf[f'{sum_base}/{when} Face Water Surface'][0, :][sel]
-            velocity = hdf[f'{sum_base}/{when} Face Velocity'][0, :][sel]
-            flow = hdf[f'{sum_base}/{when} Face Flow'][0, :][sel]
+            got = {}
+            for key, ds in (('wse', 'Water Surface'), ('velocity', 'Velocity'),
+                            ('flow', 'Flow')):
+                arr = hdf[f'{sum_base}/{when} Face {ds}'][()]
+                got[key] = arr[0, sel]
+                if arr.shape[0] > 1:
+                    times[key] = _summary_days_dt64(hdf, arr[1, sel])
+            wse, velocity, flow = got['wse'], got['velocity'], got['flow']
+        elif when == 'Maximum from Time Series':
+            # Signed max, as Summary's Maximum Face Velocity/Flow are: on faces
+            # where reverse flow has the larger magnitude, Summary matches the
+            # most positive value, not |min| (Hillside p05/p10/p13, 2026-09-24).
+            stamps = _stamps_dt64(hdf)
+            g = 9.80665 if si_units else 32.174
+            series = {key: hdf[f'{ts_base}/Face {ds}'][()][:, sel].astype(np.float64)
+                      for key, ds in (('wse', 'Water Surface'),
+                                      ('velocity', 'Velocity'),
+                                      ('flow', 'Flow'))}
+            series['energy'] = (series['wse']
+                                + series['velocity'] ** 2 / (2.0 * g))
+            cols = np.arange(sel.size)
+            got = {}
+            for key, arr in series.items():
+                i = np.argmax(arr, axis=0)
+                got[key] = arr[i, cols]
+                times[key] = stamps[i]
+            wse, velocity, flow = got['wse'], got['velocity'], got['flow']
+            energy = got['energy']
         else:
             stamps = [_decode(t) for t in hdf[_TS_DATES][()]]
             try:
@@ -1832,8 +1947,9 @@ def read_conduit_profile(
             except ValueError:
                 raise ValueError(
                     f"Time stamp '{when}' not found in {hdf_path}. "
-                    f"Expected 'Maximum', 'Minimum', or one of {len(stamps)} "
-                    f"stamps from '{stamps[0]}' to '{stamps[-1]}'."
+                    f"Expected 'Maximum', 'Minimum', 'Maximum from Time "
+                    f"Series', or one of {len(stamps)} stamps from "
+                    f"'{stamps[0]}' to '{stamps[-1]}'."
                 ) from None
             wse = hdf[f'{ts_base}/Face Water Surface'][t_idx, :][sel]
             velocity = hdf[f'{ts_base}/Face Velocity'][t_idx, :][sel]
@@ -1858,6 +1974,8 @@ def read_conduit_profile(
         span=float(row['Span']),
         shape=_decode(row['Shape']),
         si_units=si_units,
+        energy=None if energy is None else np.asarray(energy, dtype=np.float64),
+        times=times,
     )
 
 
@@ -2385,8 +2503,9 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         Must be the network the path was traced in, read from THIS plan.
     path : ConduitPath
     when : str, default 'Maximum'
-        'Maximum', 'Minimum', or a time-stamp string. See read_conduit_profile
-        for the envelope caveats, which apply here unchanged.
+        'Maximum', 'Minimum', 'Maximum from Time Series', or a time-stamp
+        string. See read_conduit_profile for the envelope caveats and the two
+        EG definitions, which apply here unchanged.
 
     Returns
     -------
@@ -2414,6 +2533,8 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
 
     bridge_at = {a: (b, gap) for a, b, gap in path.bridges}
     station, invert, crown, wse, vel, flow, owner = [], [], [], [], [], [], []
+    energy, shape, rise, span = [], [], [], []
+    times = {}
     node_at = {}
     offset = 0.0
     prev_ds = None
@@ -2422,6 +2543,7 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         pr = read_conduit_profile(hdf_path, network, cname, when)
         if prev_ds is not None and prev_ds in bridge_at:
             offset += bridge_at[prev_ds][1]
+        n = len(pr.station)
         node_at[len(station)] = pr.us_node
         station.extend(offset + pr.station)
         invert.extend(pr.invert)
@@ -2429,10 +2551,17 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         wse.extend(pr.wse)
         vel.extend(pr.velocity)
         flow.extend(pr.flow)
-        owner.extend([cname] * len(pr.station))
+        energy.extend(pr.energy_grade)
+        owner.extend([cname] * n)
+        shape.extend([pr.shape] * n)
+        rise.extend([pr.rise] * n)
+        span.extend([pr.span] * n)
+        for key, t in pr.times.items():
+            times.setdefault(key, []).append(t)
         offset += pr.length
         prev_ds = pr.ds_node
         si = pr.si_units
+        stored_energy = pr.energy is not None
 
     if station:
         node_at[len(station) - 1] = path.nodes[-1]
@@ -2450,6 +2579,117 @@ def read_path_profile(hdf_path: str, network: PipeNetwork, path: ConduitPath,
         node_at=node_at,
         total_length=offset,
         si_units=bool(si) if station else False,
+        energy=(np.asarray(energy, dtype=np.float64)
+                if station and stored_energy else None),
+        times={k: np.concatenate(v) for k, v in times.items()},
+        shape=np.asarray(shape, dtype=object),
+        rise=np.asarray(rise, dtype=np.float64),
+        span=np.asarray(span, dtype=np.float64),
+    )
+
+
+def _polyline_at(xy: np.ndarray, frac: np.ndarray) -> np.ndarray:
+    """Points at fractions 0..1 of a polyline's length, by arc length."""
+    seg = np.hypot(*np.diff(xy, axis=0).T)
+    cum = np.concatenate([[0.0], np.cumsum(seg)])
+    s = np.clip(frac, 0.0, 1.0) * cum[-1]
+    return np.column_stack([np.interp(s, cum, xy[:, 0]),
+                            np.interp(s, cum, xy[:, 1])])
+
+
+def read_path_terrain(hdf_path: str, network: PipeNetwork,
+                      path: ConduitPath) -> PathTerrain:
+    """
+    Read the ground profile along a ConduitPath -- RAS Mapper's "Ground" line.
+
+    Parameters
+    ----------
+    hdf_path : str
+        A .p##.hdf (or the .g##.hdf it was computed from).
+    network : PipeNetwork
+        The network the path was traced in, read from THIS plan.
+    path : ConduitPath
+
+    Returns
+    -------
+    PathTerrain
+        Stations on the PathProfile axis: conduit by conduit, each advancing by
+        its Conduit Length, and by the measured gap at a bridged break (no
+        terrain there -- nothing is sampled across the gap).
+
+    Raises
+    ------
+    ValueError
+        Same checks as read_path_profile: a foreign network, or a conduit on the
+        path absent from this plan.
+    KeyError
+        If the file has no Terrain Profiles (a geometry never computed).
+
+    Notes
+    -----
+    ``Geometry/Pipe Conduits/Terrain Profiles Info`` is ``[start, count]`` per
+    conduit into ``Terrain Profiles Values`` ``(station, elevation)``. The
+    station runs 0 -> Conduit Length from the US node (every conduit on Hillside
+    and the test fixture, to within 1e-4 ft), and the lower edge of RAS Mapper's
+    surface-water fill lies on it (Hillside p05 26th Ave, 2026-09-24).
+
+    ``xy`` places each point along the conduit polyline at the same FRACTION of
+    its length, so a Conduit Length that differs from the drawn length still
+    lands on the drawn line. A polyline drawn DS -> US is reversed first, judged
+    by which end is nearer the US node.
+    """
+    if path.network != network.name:
+        raise ValueError(
+            f"Path was traced in network '{path.network}' but was given "
+            f"network '{network.name}'")
+    missing = [c for c in path.conduits if c not in network.conduit_index]
+    if missing:
+        raise ValueError(
+            f"{len(missing)} conduit(s) on the path are absent from this "
+            f"plan's geometry: {missing[:5]}")
+
+    nodes = read_node_points(hdf_path)
+    with h5py.File(hdf_path, 'r') as hdf:
+        grp = hdf['Geometry/Pipe Conduits']
+        attrs = grp['Attributes'][()]
+        info = grp['Polyline Info'][()]
+        points = grp['Polyline Points'][()]
+        t_info = grp['Terrain Profiles Info'][()]
+        t_vals = grp['Terrain Profiles Values'][()]
+    index = {_decode(r['Name']): i for i, r in enumerate(attrs)}
+
+    bridge_at = {a: gap for a, _, gap in path.bridges}
+    station, elev, owner, xy = [], [], [], []
+    offset, prev_ds = 0.0, None
+    for cname in path.conduits:
+        i = index[cname]
+        row = attrs[i]
+        length = float(row['Conduit Length'])
+        if prev_ds is not None and prev_ds in bridge_at:
+            offset += bridge_at[prev_ds]
+        start, count = int(t_info[i][0]), int(t_info[i][1])
+        tv = t_vals[start:start + count].astype(np.float64)
+
+        p0, n = int(info[i][0]), int(info[i][1])
+        line = points[p0:p0 + n].astype(np.float64)
+        us = np.asarray(nodes[_decode(row['US Node'])])
+        if np.hypot(*(line[-1] - us)) < np.hypot(*(line[0] - us)):
+            line = line[::-1]
+
+        station.extend(offset + tv[:, 0])
+        elev.extend(tv[:, 1])
+        owner.extend([cname] * count)
+        xy.append(_polyline_at(line, tv[:, 0] / length))
+        offset += length
+        prev_ds = _decode(row['DS Node'])
+
+    return PathTerrain(
+        path=path,
+        station=np.asarray(station, dtype=np.float64),
+        elevation=np.asarray(elev, dtype=np.float64),
+        conduit_of=np.asarray(owner, dtype=object),
+        xy=np.vstack(xy) if xy else np.empty((0, 2)),
+        total_length=offset,
     )
 
 

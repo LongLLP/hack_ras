@@ -1293,7 +1293,7 @@ Base path used throughout: `Results/Unsteady/Output/Output Blocks/Base Output/`
 
 | Path (relative to base) | Shape | Notes |
 |--------------------------|-------|-------|
-| `Summary Output/2D Flow Areas/{area}/Maximum Water Surface` | (2, N) | Row 0 = max WSE (sub-step accuracy, may exceed any time-series value); row 1 = time of maximum as **decimal days from midnight** of the simulation start date |
+| `Summary Output/2D Flow Areas/{area}/Maximum Water Surface` | (2, N) | Row 0 = max WSE (sub-step accuracy, may exceed any time-series value); row 1 = time of maximum as **decimal days from the simulation start time** (NOT midnight: the 10:00-start test fixture's largest value equals its run length; an earlier note said midnight, which Hillside's 00:00 start could not refute) |
 | `Unsteady Time Series/2D Flow Areas/{area}/Water Surface` | (T, N) | WSE at every output time step |
 | `Unsteady Time Series/SA 2D Area Conn/Time Date Stamp` | (T,) | Timestamp strings: `b'01JAN2025 00:30:00'` (upper-case, bytes) |
 
@@ -1397,7 +1397,7 @@ Path: `Plan Data/Plan Information` — HDF5 group with scalar **attributes** (no
 
 | Attribute | Example value | Notes |
 |-----------|---------------|-------|
-| `Simulation Start Time` | `b'01Jan2025 00:00:00'` | Reference midnight for Summary Output decimal-days times |
+| `Simulation Start Time` | `b'01Jan2025 00:00:00'` | Origin of Summary Output decimal-days times (the start time itself, not its midnight) |
 | `Simulation End Time` | `b'02Jan2025 00:00:00'` | |
 | `Time Window` | `b'01Jan2025 00:00:00 to 02Jan2025 00:00:00'` | Human-readable window |
 | `Plan Title` | `b'FC 050year'` | Same as `.p##` sidecar `Plan Title=` line |
@@ -1682,6 +1682,46 @@ always holds. Treat `Minimum` as indicative only.
 and the conduit section. Only WS is in the file; when the conduit is surcharged
 that stored WS *is* the HGL.
 
+#### What the RAS Mapper pipe profile plot draws (measured 2026-09-24, Hillside p05, 26th Ave trunk, 113 faces)
+
+| Plot series | Source | Evidence |
+|---|---|---|
+| HGL Pipe Max | stored `Maximum Face Water Surface` | — |
+| EG Pipe Max | **computed**: `max WS + (max V)²/2g`, per face, from the two Summary envelopes | all 113 faces within 0.005 ft of `PathProfile.energy_grade` with `when='Maximum'` |
+| Crit WS Pipe Max | **computed**: critical depth from `Maximum Face Flow` and the conduit section (circular: `Q²/g = A³/T`) | follows the plotted line over the whole route by eye; drawn even in surcharged conduits, where it is meaningless |
+| Ground | stored: `Geometry/Pipe Conduits/Terrain Profiles Info` `[start, count]` per conduit → `Terrain Profiles Values` `(station, elev)`, station measured US→DS | the lower edge of the plot's surface-water fill lies exactly on it |
+| WS Max (surface water) | 2D mesh max WSE along the conduit polyline, drawn only where it is above Ground, **in RAS Mapper's current render mode** | switching RAS Mapper to Horizontal turns the line into flat per-cell steps; `build_wse_surface(mode='horizontal')` sampled along the route reproduces the wet reaches and step levels by eye. The sloping-mode line runs ~0.1–0.2 ft above hack_ras's `interpolated` mode, so the two sloping rules differ |
+
+**The envelope EG usually overstates the peak EG, but not always.** Face max WS and
+max V do not coincide (26th Ave p05: WS peaks at ~0.508 d, V at ~0.533 d). The
+maximum over the time series of `WS + V²/2g` (`Face Water Surface`/`Face Velocity`,
+5-min output) is lower than the plotted envelope EG by median 0.145 ft, max
+0.315 ft. Output sampling is not what causes this: the time-series max WS is only
+median 0.014 ft / max 0.063 ft below Summary max WS, and on no face does the
+time-series EG fall below the Summary max WS.
+
+**Exception: reverse flow.** `Maximum Face Velocity`/`Flow` are the SIGNED maximum
+(the most positive value), not max |V|. Across all faces where reverse flow has the
+larger magnitude, Summary matches the signed max: 57–81 of 67–82 such faces in
+Hillside p05/p10/p13, with the rest small-value ties. So on a face whose faster flow
+runs backward, the envelope EG drops that velocity head and falls BELOW the true
+peak. Network-wide that is 23–26 faces per Hillside plan, worst 0.19 ft (none on
+26th Ave). On the test fixture it is 24 of 46 faces on J321→J317, 0.31 ft, with
+min V −5.8 vs max +3.7 ft/s. RAS Mapper's "EG Pipe Max" carries the same defect.
+`read_conduit_profile(when='Maximum from Time Series')` squares the signed
+velocity at each step, so it has no such gap. Its reported velocity and flow stay
+the signed max, to stay consistent with Summary.
+
+**Ignore RAS Mapper's "view tabular output" for the pipe profile — it is buggy.**
+Only the EG column is right. The other columns carry the wrong series under the right
+labels. "WS Max" is the closed outline of the surface-water fill (WS on top, ground
+on the bottom, so its stations reverse). "HGL Pipe Max" is the surface-water line
+again, not the pipe HGL. "Crit WS Pipe Max" is the outline of the in-pipe water
+fill: WS clipped at the crown, plus node boxes, returning along the invert. The pipe
+HGL, critical WS, ground, velocity and flow are absent. This looks like the first
+four drawn objects (fills count as objects) given the first four legend names.
+Read the HDF instead.
+
 ### Pump Stations
 ```
 Geometry/Pump Stations/Attributes            # struct, one row per station
@@ -1878,8 +1918,9 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `NodeMaxWse` | `network`, `names`, `wse (N,)`, `time_index (N,)`, `timestamps`; `as_dict()`, `time_of_max(node)` | Max over the run per node; Summary Output's equivalent is per CELL and cannot be used |
 | `VolumeAccounting` | `kind`, `name`, `vol_starting`, `vol_ending`, `cum_inflow`, `cum_outflow`, `error`, `error_percent`, `precip_excess`, `precip_excess_depth`, `units` | RAS's own mass balance, stored as group ATTRIBUTES. `vol_ending` is END-of-run, not the peak |
 | `ConduitPath` | `network`, `conduits`, `nodes`, `segments`, `via`, `bridges`, `forks`; properties `start`, `end`; `to_dict()` / `from_dict()` | ROUTE ONLY, no results — trace once and reuse across every plan compared. `via` is PARALLEL to `segments` (`via[i]` belongs to `segments[i]`), so a path records the recipe as well as the answer and `verify_path` can re-run it. `to_dict()` is canonical — JSON/YAML-native, no derivable values, no provenance |
-| `PathProfile` | `path`, `when`, `station`, `invert`, `crown`, `wse`, `velocity`, `flow`, `conduit_of`, `node_at`, `total_length`; properties `depth`, `is_surcharged`, `surcharge_margin`, `energy_grade` | One continuous profile chained along a ConduitPath, station accumulated across conduits and bridged gaps |
-| `ConduitProfile` | `station`, `invert`, `wse`, `velocity`, `flow`, `face_indices` — all `(F,)`; plus `us_node`/`ds_node`, `us_invert`/`ds_invert`, `length`, `rise`, `span`, `shape`, `si_units` | Along-conduit profile at FACE resolution — the RAS Mapper profile plot. Properties: `depth`, `crown`, `is_surcharged`, `energy_grade` (`wse + V²/2g`), `station_from_ds` (RAS Mapper x-axis). `station` ascends US→DS |
+| `PathProfile` | `path`, `when`, `station`, `invert`, `crown`, `wse`, `velocity`, `flow`, `conduit_of`, `node_at`, `total_length`, `energy`, `times`, per-face `shape`/`rise`/`span`; properties `depth`, `is_surcharged`, `surcharge_margin`, `energy_grade`, `critical_wse`, `station_from_end` | One continuous profile chained along a ConduitPath, station accumulated across conduits and bridged gaps. `station_from_end` is RAS Mapper's pipe-profile x-axis for a downstream-traced path |
+| `ConduitProfile` | `station`, `invert`, `wse`, `velocity`, `flow`, `face_indices` — all `(F,)`; plus `us_node`/`ds_node`, `us_invert`/`ds_invert`, `length`, `rise`, `span`, `shape`, `si_units`, `energy`, `times` | Along-conduit profile at FACE resolution — the RAS Mapper profile plot. Properties: `depth`, `crown`, `is_surcharged`, `energy_grade`, `critical_wse`, `station_from_ds` (RAS Mapper x-axis). `station` ascends US→DS. `energy` is filled only by `'Maximum from Time Series'` (max of the per-step sum); otherwise `energy_grade` = `wse + V²/2g` of whatever `wse`/`velocity` hold. `times` = `{variable: datetime64[ms] (F,)}`: 'wse'/'velocity'/'flow' for Max/Min (Summary row 1, rounded to the second), plus 'energy' for the time-series max; empty for a stamp |
+| `PathTerrain` | `path`, `station`, `elevation`, `conduit_of`, `xy (N,2)`, `total_length`; property `station_from_end` | RAS Mapper's "Ground" line along a path, from `Geometry/Pipe Conduits/Terrain Profiles`. Its OWN, denser axis (~3 ft on Hillside) on the PathProfile station scale; `xy` places each point on the conduit polylines for sampling a 2D surface |
 
 ### `reader.py` — public functions
 
@@ -1907,7 +1948,8 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `read_wse(hdf_path, area, wse_type)` | `np.ndarray (N,) float64` | `wse_type` = `"Maximum"`, `"Maximum from Time Series"`, or a timestamp string |
 | `read_timestamps(hdf_path)` | `np.ndarray (T,) str` | All output-interval time stamps from the HDF |
 | `read_simulation_start_time(hdf_path)` | `datetime` | Parses `Plan Data/Plan Information` attr `Simulation Start Time`; format `%d%b%Y %H:%M:%S` |
-| `read_summary_max(hdf_path, area, cell_indices)` | `dict[int, tuple[float, float]]` | Returns `{cell_idx: (max_wse, time_days)}` where `time_days` is decimal days at sub-step accuracy |
+| `read_summary_max(hdf_path, area, cell_indices)` | `dict[int, tuple[float, float]]` | Returns `{cell_idx: (max_wse, time_days)}` where `time_days` is decimal days at sub-step accuracy, counted from the simulation START TIME |
+| `read_wse_time(hdf_path, area, wse_type)` | `np.ndarray (N,) datetime64[ms]` | When each cell's `read_wse` value occurred. `'Maximum'` → Summary row 1; `'Maximum from Time Series'` → stamp of the per-cell max (NaT if never wet). A time stamp raises `ValueError` |
 
 #### SA 2D Area Conn
 | Function | Returns | Notes |
@@ -1990,7 +2032,14 @@ alignment.
 | `list_volume_accounting(hdf_path)` | `dict[str, list[str]]` | `{kind: [names]}`; empty when the plan has none |
 | `read_volume_accounting(hdf_path, name, kind='2D')` | `VolumeAccounting` | RAS's mass-balance totals for one area / pipe network / reach |
 | `read_path_profile(hdf_path, network, path, when='Maximum')` | `PathProfile` | Chain conduit profiles onto one station axis. Raises if a path conduit is absent from this plan's geometry |
-| `read_conduit_profile(hdf_path, network, conduit_name, when='Maximum')` | `ConduitProfile` | Along-conduit profile at every face. `network` accepts a `PipeNetwork` **or** a bare network name. `when` = `'Maximum'`, `'Minimum'`, or a time-stamp string. Max/Min are PER-FACE ENVELOPES, not snapshots — pass a stamp for a physically consistent profile |
+| `read_conduit_profile(hdf_path, network, conduit_name, when='Maximum')` | `ConduitProfile` | Along-conduit profile at every face. `network` accepts a `PipeNetwork` **or** a bare network name. `when` = `'Maximum'`, `'Minimum'`, `'Maximum from Time Series'` (read_wse's vocabulary), or a time-stamp string. Max/Min are PER-FACE ENVELOPES, not snapshots — pass a stamp for a physically consistent profile. The time-series max is the SIGNED max for velocity/flow, like Summary, and its EG is the max of the per-step sum — see **What the RAS Mapper pipe profile plot draws** |
+| `read_path_terrain(hdf_path, network, path)` | `PathTerrain` | Ground profile along a path; same foreign-network / absent-conduit checks as `read_path_profile`. Polylines drawn DS→US are reversed by nearest-node test |
+
+`hydraulics.critical_depth(flow, shape, rise, span=None, si_units=False)` — critical
+depth for |flow|, `'Circular'` (bisection on `A³/T = Q²/g`) or `'Box'` (closed form,
+capped at the rise); any other shape raises `ValueError`. Behind
+`PathProfile.critical_wse` / `ConduitProfile.critical_wse`, which reproduce RAS
+Mapper's "Crit WS Pipe Max" and, like it, are drawn in surcharged conduits too.
 
 ## Line-in-polygon measurement (`hack_ras/gis/clip.py`)
 
@@ -2194,6 +2243,7 @@ difference_rasters(a_wse,   b_wse,   out, treat_dry_as_zero=False)  # WSE change
 |----------|---------|-------|
 | `build_wse_surface(hdf, area, wse, dry_tol=0.01, mode="interpolated")` | `WseSurface` | Fans each wet cell from its centre to its own outline. `mode="horizontal"` gives every vertex the cell's own WSE and skips the face work entirely. `KeyError` on a pre-7.0 HDF — there is no approximate fallback, because an outline that does not follow the mesh boundary throws triangles outside the mesh |
 | `barrier_faces(hdf, area)` | `set[int]` | Faces carrying a structure, from `Structures/Default Weir Connectivity` |
+| `sample_surface(surface, xy)` | `(values, cells)` | Point version of `rasterize_surface`'s rule — barycentric in the containing triangle. NaN / -1 off the wet surface. Used to sample the surface WSE along pipe conduits |
 | `rasterize_surface(surface, transform, row_off, col_off, h, w, out=, cells_out=)` | `(values, cells)` | Barycentric scan-conversion, one triangle at a time. `transform` is the **output grid's**, so the offsets are output-grid pixels — not the terrain's |
 | `export_wse_depth(...)` | dict | WSE + depth GeoTIFFs on **one** grid, tiled; `wse_path`, `depth_path`, `surfaces`, `wse`, `mapped_volumes`, `bounds`, `shape`, `mode`. Refuses a terrain whose CRS differs from the model's — `allow_crs_mismatch=True` overrides |
 | `export_wse_depth_per_source(...)` | dict | One WSE + depth raster **per terrain source** at its native resolution, plus a `.vrt`. `wse_path`/`depth_path` are the `.vrt`s; `wse_paths`/`depth_paths` are `{source: tif}`; also `shapes`, and the rest as above. No `bounds` — each output is its source's full extent. `mode` defaults to `"horizontal"` |

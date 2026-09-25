@@ -10,6 +10,7 @@ real .p##.hdf fixture and are skipped when none is available.
 import os
 import tempfile
 import unittest
+from datetime import datetime
 
 try:
     import h5py
@@ -362,6 +363,86 @@ class TestReadConduitProfile(unittest.TestCase):
         g = 9.80665 if pr.si_units else 32.174
         np.testing.assert_allclose(
             pr.energy_grade - pr.wse, pr.velocity ** 2 / (2.0 * g))
+
+    # -- 'Maximum from Time Series' and times ---------------------------------
+
+    def _series(self, name):
+        base = ("Results/Unsteady/Output/Output Blocks/Base Output"
+                "/Unsteady Time Series")
+        with h5py.File(_HDF_FIXTURE, 'r') as hdf:
+            stamps = [t.decode().strip()
+                      for t in hdf[f'{base}/Time Date Stamp'][()]]
+            raw = hdf[f'{base}/Pipe Networks/{self.net_name}/Face {name}'][()]
+        return stamps, raw
+
+    def test_time_series_max_is_the_column_max_of_every_variable(self):
+        pr = self._profile('Maximum from Time Series')
+        for attr, name in (('wse', 'Water Surface'), ('velocity', 'Velocity'),
+                           ('flow', 'Flow')):
+            _, raw = self._series(name)
+            with self.subTest(variable=attr):
+                np.testing.assert_array_equal(
+                    getattr(pr, attr), raw[:, pr.face_indices].max(axis=0))
+
+    def test_time_series_eg_is_the_max_of_the_sum_not_the_sum_of_maxes(self):
+        """The whole point of the mode: EG peaks once, not twice."""
+        pr = self._profile('Maximum from Time Series')
+        self.assertIsNotNone(pr.energy)
+        g = 9.80665 if pr.si_units else 32.174
+        _, ws = self._series('Water Surface')
+        _, v = self._series('Velocity')
+        eg = ws[:, pr.face_indices] + v[:, pr.face_indices].astype(np.float64) ** 2 / (2 * g)
+        np.testing.assert_allclose(pr.energy_grade, eg.max(axis=0), rtol=0, atol=1e-9)
+        # never above the sum of the two time-series maxima it replaces
+        self.assertTrue(np.all(pr.energy_grade
+                               <= pr.wse + pr.velocity ** 2 / (2 * g) + 1e-9))
+
+    def test_time_series_times_are_the_stamps_of_the_maxima(self):
+        pr = self._profile('Maximum from Time Series')
+        stamps, raw = self._series('Water Surface')
+        want = np.array([datetime.strptime(stamps[i], '%d%b%Y %H:%M:%S')
+                         for i in raw[:, pr.face_indices].argmax(axis=0)],
+                        dtype='datetime64[ms]')
+        np.testing.assert_array_equal(pr.times['wse'], want)
+        self.assertEqual(set(pr.times), {'wse', 'velocity', 'flow', 'energy'})
+
+    def test_summary_times_fall_inside_the_run(self):
+        """Maximum times come from Summary row 1, days from the START TIME.
+
+        The fixture starts at 10:00, so a midnight origin would put every time
+        ten hours before the run began -- this is the test that tells them apart.
+        """
+        pr = self._profile('Maximum')
+        self.assertEqual(set(pr.times), {'wse', 'velocity', 'flow'})
+        stamps, _ = self._series('Water Surface')
+        first = np.datetime64(datetime.strptime(stamps[0], '%d%b%Y %H:%M:%S'), 'ms')
+        last = np.datetime64(datetime.strptime(stamps[-1], '%d%b%Y %H:%M:%S'), 'ms')
+        for key, t in pr.times.items():
+            with self.subTest(variable=key):
+                self.assertEqual(t.dtype, np.dtype('datetime64[ms]'))
+                self.assertTrue(np.all((t >= first) & (t <= last)))
+                self.assertTrue(np.all(t.astype('int64') % 1000 == 0),
+                                'summary times are rounded to the second')
+
+    def test_summary_max_bounds_the_time_series_max(self):
+        """Summary is kept at every computation step, so it is never lower
+        than the output-step maximum (float32 storage aside)."""
+        mx = self._profile('Maximum')
+        ts = self._profile('Maximum from Time Series')
+        tol = 8.0 * np.spacing(np.float32(np.abs(mx.wse).max()))
+        self.assertTrue(np.all(ts.wse <= mx.wse + tol))
+        self.assertIsNone(mx.energy)
+
+    def test_time_stamp_read_has_no_times_and_no_stored_energy(self):
+        stamps, _ = self._series('Water Surface')
+        pr = self._profile(stamps[1])
+        self.assertEqual(pr.times, {})
+        self.assertIsNone(pr.energy)
+
+    def test_critical_wse_sits_between_invert_and_crown(self):
+        pr = self._profile('Maximum')
+        self.assertTrue(np.all(pr.critical_wse >= pr.invert))
+        self.assertTrue(np.all(pr.critical_wse <= pr.crown))
 
     def test_us_ds_nodes_match_pipe_network(self):
         pr = self._profile()
