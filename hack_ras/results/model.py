@@ -1,6 +1,7 @@
 # hack_ras/results/model.py
 from __future__ import annotations
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import numpy as np
 
@@ -238,7 +239,7 @@ class CulvertGroupResults:
     ----------
     name : str
         Culvert group name.
-    timestamps : np.ndarray, shape (T,)
+    timestamps : np.ndarray, shape (T,), dtype datetime64[ms]; see results/times.py
         Output-interval time stamps.
     columns : tuple[str, ...]
         Column names as RAS labelled them, from the dataset's ``Variable_Unit``.
@@ -342,8 +343,7 @@ class NodeTimeSeries:
 
     Attributes
     ----------
-    timestamps : np.ndarray, shape (T,), dtype str
-        HEC-RAS time-date stamp strings, e.g. '01Jan2025 00:30:00'.
+    timestamps : np.ndarray, shape (T,), dtype datetime64[ms]; see results/times.py
     depth : np.ndarray, shape (T,), dtype float64
     wse : np.ndarray, shape (T,), dtype float64
     inlet_flow : np.ndarray, shape (T,), dtype float64
@@ -368,7 +368,7 @@ class ConduitTimeSeries:
 
     Attributes
     ----------
-    timestamps : np.ndarray, shape (T,), dtype str
+    timestamps : np.ndarray, shape (T,), dtype datetime64[ms]; see results/times.py
     flow_us : np.ndarray, shape (T,), dtype float64
     flow_ds : np.ndarray, shape (T,), dtype float64
     vel_us : np.ndarray, shape (T,), dtype float64
@@ -426,7 +426,7 @@ class PumpStation:
     Attributes
     ----------
     name : str
-    timestamps : np.ndarray, shape (T,), dtype str
+    timestamps : np.ndarray, shape (T,), dtype datetime64[ms]; see results/times.py
     flow : np.ndarray, shape (T,), dtype float64
         Total station flow.
     stage_hw, stage_tw : np.ndarray, shape (T,), dtype float64
@@ -586,7 +586,7 @@ class NodeMaxWse:
     wse : np.ndarray, shape (N,), dtype float64
     time_index : np.ndarray, shape (N,), dtype int64
         Index into `timestamps` at which each node peaked.
-    timestamps : np.ndarray, shape (T,), dtype str
+    timestamps : np.ndarray, shape (T,), dtype datetime64[ms]; see results/times.py
     """
     network: str
     names: list
@@ -598,14 +598,14 @@ class NodeMaxWse:
         """{node name: maximum WSE}."""
         return {n: float(v) for n, v in zip(self.names, self.wse)}
 
-    def time_of_max(self, node: str) -> str:
-        """Time stamp at which `node` reached its maximum."""
+    def time_of_max(self, node: str) -> datetime:
+        """When `node` reached its maximum (to the output interval)."""
         try:
             i = self.names.index(node)
         except ValueError:
             raise KeyError(
                 f"Node '{node}' not in pipe network '{self.network}'") from None
-        return str(self.timestamps[self.time_index[i]])
+        return self.timestamps[self.time_index[i]].astype('datetime64[ms]').item()
 
 
 @dataclass
@@ -1143,8 +1143,7 @@ class Sa2dConnection:
     ----------
     name : str
         Connection name (HDF group key).
-    timestamps : np.ndarray, shape (T,), dtype str
-        HEC-RAS time-date stamp strings, e.g. '01JAN2025 00:30:00'.
+    timestamps : np.ndarray, shape (T,), dtype datetime64[ms]; see results/times.py
     hw_cells : list[Sa2dCell]
         Cells on the headwater/upstream side, sorted by station ascending.
     tw_cells : list[Sa2dCell]
@@ -1184,10 +1183,13 @@ class BreachState:
         Which parent held the data: ``'SA 2D Area Conn'`` or ``'2D Hyd Conn'``.
     center_station : float or None
         ``Centerline Breach`` group attribute — the station RAS breached at.
-    breach_at : str
-        ``Breach at`` group attribute, e.g. ``'01JAN2025 12:37:00'``.
+    breach_at : datetime or None
+        ``Breach at`` group attribute (stored as ``'01JAN2025 12:37:00'``);
+        None when the attribute is blank.
     breach_at_days : float or None
-        ``Breach at Time (Days)`` group attribute, decimal days from sim start.
+        ``Breach at Time (Days)`` group attribute, decimal days from the
+        simulation START TIME (not midnight) -- the same instant as
+        ``breach_at``, kept as RAS stored it.
     bottom_width, bottom_elev : float or None
         Widest bottom width and lowest invert reached.
     left_slope, right_slope : float or None
@@ -1196,8 +1198,8 @@ class BreachState:
         Widest opening reached at the crest; None when no crest was supplied.
     max_flow, max_velocity, max_flow_area : float or None
         Peaks over the breached time steps.
-    time_of_max_top_width : str
-        Time stamp of the widest opening.
+    time_of_max_top_width : datetime or None
+        When the widest opening was reached, to the output interval.
     columns : tuple[str, ...]
         Column names as the HDF itself declared them (see
         :func:`hack_ras.results.reader.read_structure_timeseries`).
@@ -1206,7 +1208,7 @@ class BreachState:
     fired: bool
     hdf_path_kind: str = ""
     center_station: float = None
-    breach_at: str = ""
+    breach_at: datetime = None
     breach_at_days: float = None
     bottom_width: float = None
     bottom_elev: float = None
@@ -1216,7 +1218,7 @@ class BreachState:
     max_flow: float = None
     max_velocity: float = None
     max_flow_area: float = None
-    time_of_max_top_width: str = ""
+    time_of_max_top_width: datetime = None
     columns: tuple = ()
 
 

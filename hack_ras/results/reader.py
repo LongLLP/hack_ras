@@ -3,13 +3,17 @@
 from __future__ import annotations
 import logging
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 import h5py
 import numpy as np
 
 from ..version import RasVersion
+from .times import (
+    DRY_TOL, hdf_stamps, hdf_start_time,
+    hdf_summary_times, parse_stamp, stamp_index,
+)
 from .model import (
     AreaGeometry,
     BridgeCells,
@@ -470,10 +474,6 @@ _TS_BASE = (
     "Results/Unsteady/Output/Output Blocks/Base Output"
     "/Unsteady Time Series/2D Flow Areas/{area}"
 )
-_TS_DATES = (
-    "Results/Unsteady/Output/Output Blocks/Base Output"
-    "/Unsteady Time Series/Time Date Stamp"
-)
 
 
 def read_wse(
@@ -529,20 +529,29 @@ def read_wse(
             return np.nanmax(ts, axis=0)
 
         else:
-            # Treat wse_type (or explicit timestamp) as a time stamp string
-            target = (timestamp or wse_type).strip().upper()
-            stamps = [
-                s.decode("utf-8").strip() if isinstance(s, bytes) else str(s).strip()
-                for s in hdf[_TS_DATES][:]
-            ]
-            matches = [i for i, s in enumerate(stamps) if s.upper() == target]
-            if not matches:
-                raise ValueError(
-                    f"Timestamp '{target}' not found in {hdf_path}.\n"
-                    f"  Available (first 5): {stamps[:5]}\n"
-                    f"  Expected format example: '01Jan2025 00:30:00'"
-                )
-            return hdf[f"{TS}/Water Surface"][matches[0], :].astype(np.float64)
+            # Treat wse_type (or explicit timestamp) as a time stamp, in any
+            # spelling times.parse_stamp accepts.
+            i = stamp_index(hdf, timestamp or wse_type, hdf_path)
+            return hdf[f"{TS}/Water Surface"][i, :].astype(np.float64)
+
+
+def _never_wet(hdf, area: str, peak) -> np.ndarray:
+    """
+    True for 2D cells whose time-of-max means nothing.
+
+    A cell whose peak WSE never clears its minimum by DRY_TOL still gets a
+    stored time (0, or the first computation step) -- see "Never-wet cells" in
+    results/times.py. So does every perimeter dummy cell (NaN minimum), which
+    has no result at all: on PCA GMF_DFA p01 those are the 1,043 cells of
+    13,055 that keep time 0 once the dry ones are removed.
+    """
+    mn = hdf[f"Geometry/2D Flow Areas/{area}/Cells Minimum Elevation"][()]
+    full = np.full(len(peak), np.nan)
+    n = min(len(mn), len(peak))
+    full[:n] = mn[:n]
+    with np.errstate(invalid="ignore"):
+        return ~np.isfinite(full) | (np.asarray(peak, dtype=np.float64)
+                                     <= full + DRY_TOL)
 
 
 def read_wse_time(hdf_path: str, area: str, wse_type: str) -> np.ndarray:
@@ -565,19 +574,23 @@ def read_wse_time(hdf_path: str, area: str, wse_type: str) -> np.ndarray:
     KeyError
         If the area's results are absent.
 
-    Cells that are never wet in 'Maximum from Time Series' (all values <= 0)
-    get NaT.
+    A cell that is never wet gets NaT in both modes: its peak does not clear
+    its minimum elevation by DRY_TOL (see "Never-wet cells" in
+    results/times.py), or every time-series value is <= 0.
     """
     with h5py.File(hdf_path, "r") as hdf:
         if wse_type == "Maximum":
-            days = hdf[f"{_SUM_BASE.format(area=area)}/Maximum Water Surface"][1, :]
-            return _summary_days_dt64(hdf, days)
+            peak = hdf[f"{_SUM_BASE.format(area=area)}/Maximum Water Surface"][()]
+            out = hdf_summary_times(hdf, peak[1, :])
+            out[_never_wet(hdf, area, peak[0, :])] = np.datetime64('NaT')
+            return out
         if wse_type == "Maximum from Time Series":
             ts = hdf[f"{_TS_BASE.format(area=area)}/Water Surface"][:].astype(np.float64)
-            stamps = _stamps_dt64(hdf)
             ts[ts <= 0] = -np.inf
-            out = stamps[np.argmax(ts, axis=0)]
-            out[np.all(np.isneginf(ts), axis=0)] = np.datetime64('NaT')
+            i = np.argmax(ts, axis=0)
+            out = hdf_stamps(hdf)[i]
+            peak = ts[i, np.arange(ts.shape[1])]
+            out[np.isneginf(peak) | _never_wet(hdf, area, peak)] = np.datetime64('NaT')
             return out
     raise ValueError(
         f"read_wse_time takes 'Maximum' or 'Maximum from Time Series', not "
@@ -594,8 +607,8 @@ def read_timestamps(hdf_path: str) -> np.ndarray:
 
     Returns
     -------
-    np.ndarray, shape (T,), dtype str
-        HEC-RAS time-date stamp strings, e.g. '01Jan2025 00:30:00'.
+    np.ndarray, shape (T,), dtype datetime64[ms]
+        Use times.format_stamp for RAS's own spelling.
 
     Raises
     ------
@@ -603,7 +616,7 @@ def read_timestamps(hdf_path: str) -> np.ndarray:
         If the Time Date Stamp dataset is absent.
     """
     with h5py.File(hdf_path, 'r') as hdf:
-        return np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        return hdf_stamps(hdf)
 
 
 # ---------------------------
@@ -724,7 +737,7 @@ def read_sa2d_connection(hdf_path: str, connection: str) -> Sa2dConnection:
     bridge = False
 
     with h5py.File(hdf_path, "r") as hdf:
-        timestamps   = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps   = hdf_stamps(hdf)
         hw_indices   = hdf[f"{base}/Headwater Cells"][()]
         tw_indices   = hdf[f"{base}/Tailwater Cells"][()]
         if f"{base}/HW TW Cells" in hdf:
@@ -1202,7 +1215,7 @@ def read_structure_timeseries(hdf_path: str, connection: str) -> dict:
     dict with keys:
 
     ``'timestamps'``
-        np.ndarray, shape (T,), str — HEC-RAS time-date stamp strings,
+        np.ndarray, shape (T,), datetime64[ms] — the output time stamps,
         e.g. ``'01JAN2025 00:30:00'``.
 
     ``'kind'``
@@ -1240,7 +1253,7 @@ def read_structure_timeseries(hdf_path: str, connection: str) -> dict:
                 f"No SA 2D Area Conn or 2D Hyd Conn results for connection "
                 f"{connection!r} in {hdf_path}"
             )
-        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps = hdf_stamps(hdf)
 
         # Structure Variables — always present for any connection with results
         sv_ds = group["Structure Variables"]
@@ -1305,7 +1318,7 @@ def read_culvert_group_results(hdf_path: str, connection: str) -> dict:
                 f"No SA 2D Area Conn or 2D Hyd Conn results for connection "
                 f"{connection!r} in {hdf_path}"
             )
-        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps = hdf_stamps(hdf)
         out: dict = {}
         if "Culvert Groups" not in group:
             return out
@@ -1389,7 +1402,8 @@ def read_breach_state(hdf_path: str, connection: str,
         fired=False,
         hdf_path_kind=ts["kind"],
         center_station=None if center is None else float(center),
-        breach_at=_decode(attrs.get("Breach at", b"")),
+        breach_at=(parse_stamp(attrs["Breach at"])
+                   if _decode(attrs.get("Breach at", b"")) else None),
         breach_at_days=(float(attrs["Breach at Time (Days)"])
                         if "Breach at Time (Days)" in attrs else None),
         columns=tuple(br.keys()),
@@ -1422,7 +1436,8 @@ def read_breach_state(hdf_path: str, connection: str,
     state.max_velocity = float(np.nanmax(br["Breach Velocity"][fired]))
     state.max_flow_area = float(np.nanmax(br["Breach Flow Area"][fired]))
     stamps = ts["timestamps"]
-    state.time_of_max_top_width = str(stamps[k]) if k < len(stamps) else ""
+    state.time_of_max_top_width = (stamps[k].astype('datetime64[ms]').item()
+                                   if k < len(stamps) else None)
     return state
 
 
@@ -1463,42 +1478,6 @@ def read_plan_breach_data(hdf_path: str) -> list:
     return rows
 
 
-def _stamp_to_datetime(stamp: str) -> datetime:
-    """Parse a HEC-RAS time stamp, allowing the '24:00:00' spelling of midnight."""
-    s = stamp.strip()
-    if s.endswith('24:00:00'):
-        return (datetime.strptime(s[:-8] + '00:00:00', "%d%b%Y %H:%M:%S")
-                + timedelta(days=1))
-    return datetime.strptime(s, "%d%b%Y %H:%M:%S")
-
-
-def _stamps_dt64(hdf) -> np.ndarray:
-    """The output time stamps of an open plan HDF as datetime64[ms]."""
-    return np.array([_stamp_to_datetime(_decode(t)) for t in hdf[_TS_DATES][()]],
-                    dtype='datetime64[ms]')
-
-
-def _summary_days_dt64(hdf, days) -> np.ndarray:
-    """
-    Summary Output time-of-max values as datetime64[ms].
-
-    Those rows are decimal days from the SIMULATION START TIME. The test fixture
-    starts at 10:00 and every plan's largest value is exactly its run length
-    (0.1667 d for a 4 h run), so it is not midnight of the start date -- an
-    older note said so, and Hillside's 00:00 start could not tell them apart.
-
-    Rounded to the whole second: the rows are float32, whose spacing is already
-    ~5 ms at half a day and grows with run length, so the digits below a
-    second are storage noise (Hillside p05 gave 12:05:14.001, :13.002, ...).
-    """
-    start = datetime.strptime(
-        _decode(hdf["Plan Data/Plan Information"].attrs["Simulation Start Time"]),
-        "%d%b%Y %H:%M:%S")
-    origin = np.datetime64(start, 'ms')
-    ms = np.round(np.asarray(days, dtype=np.float64) * 86_400.0) * 1000.0
-    return origin + ms.astype('timedelta64[ms]')
-
-
 def read_simulation_start_time(hdf_path: str) -> datetime:
     """
     Read simulation start time from Plan Data/Plan Information.
@@ -1514,15 +1493,14 @@ def read_simulation_start_time(hdf_path: str) -> datetime:
         If Plan Data/Plan Information is absent.
     """
     with h5py.File(hdf_path, "r") as hdf:
-        raw = hdf["Plan Data/Plan Information"].attrs["Simulation Start Time"]
-    return datetime.strptime(_decode(raw), "%d%b%Y %H:%M:%S")
+        return hdf_start_time(hdf)
 
 
 def read_summary_max(
     hdf_path: str,
     area: str,
     cell_indices,
-) -> dict[int, tuple[float, float]]:
+) -> dict[int, tuple[float, datetime | None]]:
     """
     Read max WSE and time of max from Summary Output for specific cells.
 
@@ -1537,10 +1515,11 @@ def read_summary_max(
 
     Returns
     -------
-    dict[int, tuple[float, float]]
-        {cell_idx: (max_wse, time_days)} where time_days is decimal days
-        from the simulation start time (sub-step resolution) -- not midnight;
-        see _summary_days_dt64.
+    dict[int, tuple[float, datetime | None]]
+        {cell_idx: (max_wse, time_of_max)}. The time is at computation-step
+        resolution, counted from the simulation start time (see
+        results/times.py), and None for a cell that is never wet -- RAS stores
+        a meaningless time for those.
 
     Raises
     ------
@@ -1550,7 +1529,11 @@ def read_summary_max(
     SUM = _SUM_BASE.format(area=area)
     with h5py.File(hdf_path, "r") as hdf:
         data = hdf[f"{SUM}/Maximum Water Surface"][()]   # shape (2, N_cells)
-    return {idx: (float(data[0, idx]), float(data[1, idx])) for idx in cell_indices}
+        when = hdf_summary_times(hdf, data[1, :])
+        dry = _never_wet(hdf, area, data[0, :])
+    return {idx: (float(data[0, idx]),
+                  None if dry[idx] else when[idx].astype('datetime64[ms]').item())
+            for idx in cell_indices}
 
 
 # ---------------------------
@@ -1694,7 +1677,7 @@ def read_node_timeseries(
     nidx = network.nodes[node_name]
 
     with h5py.File(hdf_path, 'r') as hdf:
-        timestamps   = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps   = hdf_stamps(hdf)
         depth        = hdf[f'{base}/Nodes/Depth'][:, nidx].astype(np.float64)
         wse          = hdf[f'{base}/Nodes/Water Surface'][:, nidx].astype(np.float64)
         inlet_flow   = hdf[f'{base}/Nodes/Top + Side Inlet Flow'][:, nidx].astype(np.float64)
@@ -1757,7 +1740,7 @@ def read_conduit_timeseries(
     cidx = network.conduit_index[conduit_name]
 
     with h5py.File(hdf_path, 'r') as hdf:
-        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps = hdf_stamps(hdf)
         flow_us    = hdf[f'{base}/Pipes/Pipe Flow US'][:, cidx].astype(np.float64)
         flow_ds    = hdf[f'{base}/Pipes/Pipe Flow DS'][:, cidx].astype(np.float64)
         vel_us     = hdf[f'{base}/Pipes/Vel US'][:, cidx].astype(np.float64)
@@ -1918,13 +1901,13 @@ def read_conduit_profile(
                 arr = hdf[f'{sum_base}/{when} Face {ds}'][()]
                 got[key] = arr[0, sel]
                 if arr.shape[0] > 1:
-                    times[key] = _summary_days_dt64(hdf, arr[1, sel])
+                    times[key] = hdf_summary_times(hdf, arr[1, sel])
             wse, velocity, flow = got['wse'], got['velocity'], got['flow']
         elif when == 'Maximum from Time Series':
             # Signed max, as Summary's Maximum Face Velocity/Flow are: on faces
             # where reverse flow has the larger magnitude, Summary matches the
             # most positive value, not |min| (Hillside p05/p10/p13, 2026-09-24).
-            stamps = _stamps_dt64(hdf)
+            stamps = hdf_stamps(hdf)
             g = 9.80665 if si_units else 32.174
             series = {key: hdf[f'{ts_base}/Face {ds}'][()][:, sel].astype(np.float64)
                       for key, ds in (('wse', 'Water Surface'),
@@ -1941,16 +1924,9 @@ def read_conduit_profile(
             wse, velocity, flow = got['wse'], got['velocity'], got['flow']
             energy = got['energy']
         else:
-            stamps = [_decode(t) for t in hdf[_TS_DATES][()]]
-            try:
-                t_idx = stamps.index(when)
-            except ValueError:
-                raise ValueError(
-                    f"Time stamp '{when}' not found in {hdf_path}. "
-                    f"Expected 'Maximum', 'Minimum', 'Maximum from Time "
-                    f"Series', or one of {len(stamps)} stamps from "
-                    f"'{stamps[0]}' to '{stamps[-1]}'."
-                ) from None
+            t_idx = stamp_index(hdf, when, f"{hdf_path} (expected 'Maximum', "
+                                "'Minimum', 'Maximum from Time Series' or a "
+                                "time stamp)")
             wse = hdf[f'{ts_base}/Face Water Surface'][t_idx, :][sel]
             velocity = hdf[f'{ts_base}/Face Velocity'][t_idx, :][sel]
             flow = hdf[f'{ts_base}/Face Flow'][t_idx, :][sel]
@@ -2081,7 +2057,7 @@ def read_pump_station(hdf_path: str, station: str) -> PumpStation:
             )
         cols = [(_decode(v[0]), _decode(v[1])) for v in var_unit]
 
-        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps = hdf_stamps(hdf)
 
         # Group geometry: which groups belong to this station, and their pumps.
         groups_meta, pumps_meta = [], []
@@ -2940,7 +2916,7 @@ def read_node_max_wse(hdf_path: str, network) -> NodeMaxWse:
         if ws_path not in hdf:
             raise KeyError(f'Node water surface results missing: {ws_path}')
         values = hdf[ws_path][()].astype(np.float64)
-        timestamps = np.array([_decode(t) for t in hdf[_TS_DATES][()]])
+        timestamps = hdf_stamps(hdf)
 
     order = sorted(net.nodes.items(), key=lambda kv: kv[1])
     names = [name for name, _ in order]

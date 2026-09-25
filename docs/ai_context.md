@@ -1300,7 +1300,8 @@ Base path used throughout: `Results/Unsteady/Output/Output Blocks/Base Output/`
 WSE type options (used throughout `results.reader`):
 - `"Maximum"` — reads Summary Output row 0 (sub-step accuracy, may exceed any single time step)
 - `"Maximum from Time Series"` — `nanmax` across the full time series
-- `"<timestamp>"` — match against Time Date Stamp array (case-insensitive)
+- `"<timestamp>"` — matched as a TIME, not as text (`times.stamp_index`): any case,
+  and `24:00:00` for midnight, all find the same step
 
 ### Summary Output — 2D Flow Areas (per area)
 Path: `Summary Output/2D Flow Areas/{area}/`
@@ -1403,7 +1404,7 @@ Path: `Plan Data/Plan Information` — HDF5 group with scalar **attributes** (no
 | `Plan Title` | `b'FC 050year'` | Same as `.p##` sidecar `Plan Title=` line |
 | `Plan Name` / `Plan ShortID` | same as title | |
 | `Geometry Title` | `b'FC gravity flow'` | |
-| `Base Output Interval` | `b'30MIN'` | Output time-step interval |
+| `Base Output Interval` | `b'30MIN'` | The time-series interval, which is the plan's **`Mapping Interval=`**, NOT its `Output Interval=` (PCA GMF_DFA p01: Mapping 30MIN, Output 10MIN, 97 stamps over 2 d). Hillside and the test fixture set all three equal, so they cannot show it |
 | `Computation Time Step Base` | `b'1SEC'` | Computational sub-step |
 | `Plan Filename` | `b'GMF_DFA.p01'` | Basename of the .p## the run used (RAS 7.0; verified live) |
 | `Flow Filename` / `Geometry Filename` | `b'GMF_DFA.u01'` / `b'GMF_DFA.g01'` | Same, for the flow/geometry files |
@@ -1530,9 +1531,11 @@ of the connected 2D area, which has sub-step accuracy:
 ```
 Summary Output/2D Flow Areas/{hw_area}/Maximum Water Surface[1, cell_idx]  # decimal days
 ```
-Convert to datetime: `simulation_start + timedelta(days=decimal_days)`. Use
-`read_sa2d_areas()` to get area names, `read_summary_max()` for the lookup, and
-`read_simulation_start_time()` for the reference datetime — all in `hack_ras.results.reader`.
+Use `read_sa2d_areas()` to get area names and `read_summary_max()` for the lookup; it returns
+the time itself (a `datetime`, rounded to the second, None for a never-wet cell), so there is
+no `start + timedelta` step left to get wrong. Do not truncate: the stored float32 days sit
+just BELOW the whole second on ~65% of Hillside cells, so `strftime` on `start + timedelta`
+reported those a second early (the SA2D time-of-max script did, until 2026-09-25).
 
 Station assignment: segment j spans `station[j]` to `station[j+1]`; its midpoint =
 `(station[j] + station[j+1]) / 2`. Each unique cell's representative station (`Sa2dCell.station`) =
@@ -1902,8 +1905,8 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `Sa2dCell` | `cell_idx: int`, `station: float`, `wse (T,) float64`, `station_start: float`, `station_end: float` | `station` = mean of segment midpoint stations (center); `station_start`/`station_end` = min/max face-point stations bounding the cell's segments; default `nan`. In BRIDGE mode these come from `2DBR US/DS Cells` instead — midpoint of the cell's station range |
 | `BridgeCells` | `connection`, `footprint`, `us`, `ds` (RAS structured arrays); properties `cells`, `high_chord`, `low_chord`; method `stations('us'\|'ds')` | One `Bridge Opening` connection's slice of the flat `2DBR *` tables. `stations()` → `{cell: (start, center, end)}` |
 | `CulvertGroupResults` | `name`, `timestamps (T,)`, `columns`, `values dict[str,(T,)]`; properties `flow`, `stage_hw`, `stage_tw` | ONE culvert group's time series. `name` is RAS's key (`'Culvert #1'`), byte-identical to the geometry side's `Name`, so it joins onto `read_culverts()` |
-| `Sa2dConnection` | `name: str`, `timestamps (T,) str`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
-| `BreachState` | `connection`, `fired: bool`, `hdf_path_kind`, `center_station`, `breach_at`, `breach_at_days`, `bottom_width`, `bottom_elev`, `left_slope`, `right_slope`, `top_width`, `max_flow`, `max_velocity`, `max_flow_area`, `time_of_max_top_width`, `columns` | The widest state REACHED, not the plan's terminal geometry. `fired=False` = defined but never triggered. `top_width` is None unless a crest elevation was supplied |
+| `Sa2dConnection` | `name: str`, `timestamps (T,) datetime64[ms]`, `hw_cells list[Sa2dCell]`, `tw_cells list[Sa2dCell]` | Both cell lists sorted by station ascending |
+| `BreachState` | `connection`, `fired: bool`, `hdf_path_kind`, `center_station`, `breach_at`, `breach_at_days`, `bottom_width`, `bottom_elev`, `left_slope`, `right_slope`, `top_width`, `max_flow`, `max_velocity`, `max_flow_area`, `time_of_max_top_width`, `columns` | The widest state REACHED, not the plan's terminal geometry. `fired=False` = defined but never triggered. `top_width` is None unless a crest elevation was supplied. `breach_at` and `time_of_max_top_width` are `datetime` (None when absent); `breach_at_days` is the raw attribute, days from the start time |
 | `ConnectionCenterline` | `name`, `points (N,2)`, `profile (M,2)`, `us_area`, `ds_area`, `mode`, `snn_id`, `parts` | HDF twin of the ASCII `Connection Line=` / `Conn Weir SE=` blocks |
 | `PipeNode` | `name: str`, `system_name: str` | From `Geometry/Pipe Nodes/Attributes` |
 | `PipeConduit` | `name: str`, `us_node: str`, `ds_node: str`, `length: float` | From `Geometry/Pipe Conduits/Attributes`; `length` is its `Conduit Length`, carried so `PipeNetwork.fingerprint()` costs no extra read. `nan` if that column is absent |
@@ -1915,12 +1918,44 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | `PumpStation` | `name`, `timestamps`, `flow`, `stage_hw`, `stage_tw`, `groups`, `inlet_network`/`inlet_node`, `outlet_network`/`outlet_node`, `inlet_area`/`outlet_area`, `highest_pump_line_elev`; properties `n_pumps`, `pumps_on` | Node fields parsed from RAS's `'Base [J314]'` form; `None` when the station is tied to a 2D area instead |
 | `PumpCurve` | `group`, `head (P,)`, `flow (P,)`, `n_pumps`; methods `capacity(head)`, `group_capacity(head)`, `in_range(head)` | Flow is PER PUMP; `capacity` clamps outside the tabulated range rather than extrapolating |
 | `NodeRims` | `names`, `node_types`, `invert`, `depth`, `terrain`, `override`, `rim`, `source`; `has_override`, `as_dict()` | `rim` follows the selected source; `invert + depth` reproduces the OVERRIDE rim |
-| `NodeMaxWse` | `network`, `names`, `wse (N,)`, `time_index (N,)`, `timestamps`; `as_dict()`, `time_of_max(node)` | Max over the run per node; Summary Output's equivalent is per CELL and cannot be used |
+| `NodeMaxWse` | `network`, `names`, `wse (N,)`, `time_index (N,)`, `timestamps`; `as_dict()`, `time_of_max(node)` → `datetime` | Max over the run per node; Summary Output's equivalent is per CELL and cannot be used |
 | `VolumeAccounting` | `kind`, `name`, `vol_starting`, `vol_ending`, `cum_inflow`, `cum_outflow`, `error`, `error_percent`, `precip_excess`, `precip_excess_depth`, `units` | RAS's own mass balance, stored as group ATTRIBUTES. `vol_ending` is END-of-run, not the peak |
 | `ConduitPath` | `network`, `conduits`, `nodes`, `segments`, `via`, `bridges`, `forks`; properties `start`, `end`; `to_dict()` / `from_dict()` | ROUTE ONLY, no results — trace once and reuse across every plan compared. `via` is PARALLEL to `segments` (`via[i]` belongs to `segments[i]`), so a path records the recipe as well as the answer and `verify_path` can re-run it. `to_dict()` is canonical — JSON/YAML-native, no derivable values, no provenance |
 | `PathProfile` | `path`, `when`, `station`, `invert`, `crown`, `wse`, `velocity`, `flow`, `conduit_of`, `node_at`, `total_length`, `energy`, `times`, per-face `shape`/`rise`/`span`; properties `depth`, `is_surcharged`, `surcharge_margin`, `energy_grade`, `critical_wse`, `station_from_end` | One continuous profile chained along a ConduitPath, station accumulated across conduits and bridged gaps. `station_from_end` is RAS Mapper's pipe-profile x-axis for a downstream-traced path |
 | `ConduitProfile` | `station`, `invert`, `wse`, `velocity`, `flow`, `face_indices` — all `(F,)`; plus `us_node`/`ds_node`, `us_invert`/`ds_invert`, `length`, `rise`, `span`, `shape`, `si_units`, `energy`, `times` | Along-conduit profile at FACE resolution — the RAS Mapper profile plot. Properties: `depth`, `crown`, `is_surcharged`, `energy_grade`, `critical_wse`, `station_from_ds` (RAS Mapper x-axis). `station` ascends US→DS. `energy` is filled only by `'Maximum from Time Series'` (max of the per-step sum); otherwise `energy_grade` = `wse + V²/2g` of whatever `wse`/`velocity` hold. `times` = `{variable: datetime64[ms] (F,)}`: 'wse'/'velocity'/'flow' for Max/Min (Summary row 1, rounded to the second), plus 'energy' for the time-series max; empty for a stamp |
 | `PathTerrain` | `path`, `station`, `elevation`, `conduit_of`, `xy (N,2)`, `total_length`; property `station_from_end` | RAS Mapper's "Ground" line along a path, from `Geometry/Pipe Conduits/Terrain Profiles`. Its OWN, denser axis (~3 ft on Hillside) on the PathProfile station scale; `xy` places each point on the conduit polylines for sampling a 2D surface |
+
+### `times.py` — time conventions (one place for every rule)
+
+Every `timestamps` array in `results` is **`datetime64[ms]`**. Single times (`BreachState`,
+`NodeMaxWse.time_of_max`, `read_summary_max`) are `datetime`. Strings exist only to talk to RAS.
+The rules, each measured, with the evidence in the module docstring:
+
+- **Origin:** Summary time-of-max rows, `Breach at Time (Days)`, the computation clock and the
+  time-series `Time` count decimal days from the plan's own **Simulation Start Time**, not
+  midnight. A plan started from a restart counts from its OWN start (PCA p07 from p06's restart).
+- **Midnight:** plan files write it both ways (`01JAN2025,2400` and `03JAN2026,0000`). Restart
+  FILE NAMES always use `2400` (`GMF_DFA.p01.02JAN2026 2400.rst` for a plan ending `03JAN2026,0000`),
+  so never text-match a restart name to its plan. HDF stamps have always been `00:00:00`.
+- **Interval:** the time series is at the plan's MAPPING interval (see `Base Output Interval`).
+- **Ramp-up:** the 2D initial-conditions ramp-up (`UNET D2 TotalICTime`, per area) runs before
+  the clock and leaves nothing in the output. `HDF Write Warmup=-1` added nothing on a 2D-only
+  plan (PCA p17). Its effect on 1D warm-up steps is unverified.
+- **Precision:** Summary times are float32 days, so they are rounded to the second.
+- **Never-wet cells:** a 2D cell whose maximum does not clear its minimum elevation by
+  `DRY_TOL` (0.01 ft, same as `wse_surface.DRY_TOL`) still has a stored time (0, or the first
+  computation step). So does every perimeter dummy cell. Readers return NaT / None for both.
+  Time 0 alone is NOT the test: 285 cells in 99 plan HDFs are wet at t = 0 and keep a real time.
+- **Unverified:** pre-7.0 unsteady output; written 1D warm-up steps.
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `parse_stamp(raw)` | `datetime` | bytes or str, any case, `24:00:00` accepted; `ValueError` otherwise |
+| `parse_stamps(raw)` | `datetime64[ms]` array | |
+| `format_stamp(t)` | `str` | RAS spelling `'01JAN2025 12:37:00'`; `''` for None/NaT. Use it to keep a text output unchanged |
+| `to_datetimes(arr)` | `list[datetime \| None]` | For openpyxl, which does not take `datetime64` |
+| `days_to_datetime64(days, start)` | `datetime64[ms]` | Days from the start time, rounded to the second |
+| `hdf_start_time(hdf)`, `hdf_stamps(hdf)`, `hdf_summary_times(hdf, days)`, `stamp_index(hdf, when)` | | Same, on an OPEN h5py file — for reader internals |
 
 ### `reader.py` — public functions
 
@@ -1946,10 +1981,10 @@ sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{ne
 | Function | Returns | Notes |
 |----------|---------|-------|
 | `read_wse(hdf_path, area, wse_type)` | `np.ndarray (N,) float64` | `wse_type` = `"Maximum"`, `"Maximum from Time Series"`, or a timestamp string |
-| `read_timestamps(hdf_path)` | `np.ndarray (T,) str` | All output-interval time stamps from the HDF |
+| `read_timestamps(hdf_path)` | `np.ndarray (T,) datetime64[ms]` | All output time stamps (at the Mapping interval). `times.format_stamp` gives RAS's spelling |
 | `read_simulation_start_time(hdf_path)` | `datetime` | Parses `Plan Data/Plan Information` attr `Simulation Start Time`; format `%d%b%Y %H:%M:%S` |
-| `read_summary_max(hdf_path, area, cell_indices)` | `dict[int, tuple[float, float]]` | Returns `{cell_idx: (max_wse, time_days)}` where `time_days` is decimal days at sub-step accuracy, counted from the simulation START TIME |
-| `read_wse_time(hdf_path, area, wse_type)` | `np.ndarray (N,) datetime64[ms]` | When each cell's `read_wse` value occurred. `'Maximum'` → Summary row 1; `'Maximum from Time Series'` → stamp of the per-cell max (NaT if never wet). A time stamp raises `ValueError` |
+| `read_summary_max(hdf_path, area, cell_indices)` | `dict[int, tuple[float, datetime \| None]]` | `{cell_idx: (max_wse, time_of_max)}` at sub-step accuracy, rounded to the second; None for a never-wet or perimeter dummy cell |
+| `read_wse_time(hdf_path, area, wse_type)` | `np.ndarray (N,) datetime64[ms]` | When each cell's `read_wse` value occurred. `'Maximum'` → Summary row 1; `'Maximum from Time Series'` → stamp of the per-cell max. NaT in both modes for a never-wet cell or a perimeter dummy cell (see `times.py`). A time stamp raises `ValueError` |
 
 #### SA 2D Area Conn
 | Function | Returns | Notes |

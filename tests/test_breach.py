@@ -17,6 +17,7 @@ GUI values for p06 (Breach Field Fingerprint):
 """
 
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from hack_ras.geometry import conn_interp as CI
@@ -337,7 +338,12 @@ class TestRealisedBreach(unittest.TestCase):
                                        crest_elev=self.crest)
         self.assertTrue(state.fired)
         self.assertEqual(state.center_station, 1234.0)
-        self.assertEqual(state.breach_at, "01JAN2025 12:37:00")
+        # the GUI's Set Time trigger, 12:37, parsed; and Breach at Time (Days)
+        # is the same instant counted from the 10:00 START, not from midnight
+        self.assertEqual(state.breach_at, datetime(2025, 1, 1, 12, 37))
+        from_start = (datetime(2025, 1, 1, 10, 0)
+                      + timedelta(days=state.breach_at_days))
+        self.assertLess(abs((from_start - state.breach_at).total_seconds()), 1.0)
         self.assertEqual(state.hdf_path_kind, "SA 2D Area Conn")
         # the run ends before the breach finishes forming, so the realised
         # geometry falls short of the plan's terminal geometry
