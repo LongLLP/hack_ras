@@ -1472,8 +1472,20 @@ NOT the bare bridge name.
 | `Tailwater Cells` | (N_tw,) int32 | Downstream face cells |
 | `Cell WS US` | (T, N_hw) | WSE on the upstream side of each bridge cell |
 | `Cell WS DS` | (T, N_tw) | WSE on the downstream side |
-| `Face Flow` | (T, N_faces) | Flow through each bridge face |
-| `Structure Variables` | (T, 6) | Flow (cfs), Stage HW, Stage TW, Head loss, Drag Factor, Error HW |
+| `Face Flow` | (T, N_faces) | **Not a flow hydrograph — do not use.** Constant in time (see below). Columns follow the dataset's `Faces` attribute |
+| `Structure Variables` | (T, 6) | Flow (cfs), Stage HW, Stage TW, Head loss, Drag Factor, Error HW. **`Flow` is the bridge's total flow** — the one to report |
+
+**`Face Flow` holds no usable flow** (surveyed 2026-09-29 over 22 bridge groups: Hillside
+p05/p06 `C3 Vernon Street`, LAX_River_2D p19's 15 bridges, fixture p02/p04–p07
+`Watershed Bridge`; all RAS 7.0). In every one, each column is the **same value at every
+time step**: 0 in most, ~−6.5e27 or ~−9.2e27 (uninitialized float32) in the first column
+of 7 LAX bridges, a stray 2.0 on one LAX face, and 12.57 cfs on Hillside's single face while
+`Structure Variables` `Flow` peaks at 380 (p05) and 1364 cfs (p06). Its sum never tracks
+`Flow`. The `Faces` attribute is always a **subset** of the structure's `2DBR Faces` (Hillside
+1 of 1, LAX 5–27 of 19–293, fixture p07 3 of 8; fixture p02–p06 list face `0`), and matches
+neither `2DBR BU Faces` nor `BU ∪ BD` consistently — so it is not "every bridge face" either.
+There is also no mesh-level cross-check in these plans: none writes `Face Flow` under
+`2D Flow Areas/`, and Summary Output carries only `Maximum/Minimum Face Velocity`.
 
 `Cell WS US` / `Cell WS DS` map **positionally** onto `Headwater Cells` / `Tailwater Cells`:
 column *i* is the cell at index *i*. Verified against Summary Output per cell on
@@ -1556,7 +1568,7 @@ and only the dataset read fails.
 | per-cell WSE | `HW TW Cells/Water Surface HW Cells` / `…TW Cells` | `Cell WS US` / `Cell WS DS` |
 | weir stationing | `HW TW Segments/HW TW Station` + per-segment cell labels | **absent** |
 | face points | `Geometric Info/…Face Points[ Stations]` | **absent** |
-| flow | `Weir Variables`, `HW TW Segments/Flow` | `Face Flow` |
+| flow | `Weir Variables`, `HW TW Segments/Flow` | `Structure Variables` `Flow` only (`Face Flow` is constant junk — see **2D Bridges**) |
 | `Structure Variables` | (T, 4) Total Flow, Weir Flow, Stage HW, Stage TW | (T, 6) Flow, Stage HW, Stage TW, Head loss, Drag Factor, Error HW |
 | `Node Pointer` group attr | present | **absent** |
 
