@@ -12,6 +12,9 @@ import os
 import tempfile
 import unittest
 
+import h5py
+import numpy as np
+
 from hack_ras import RasProject
 from hack_ras.project.geoms import (
     DuplicateGeomTitle,
@@ -59,6 +62,9 @@ _RASMAP = [
 ]
 
 _TITLES = {"g01": "Geom One", "g02": "Geom Two", "g03": "Geom Three"}
+# Stand-in for the pipe network, which lives only in the .g##.hdf.
+_PIPE_NODES = np.array([(b"J1", 726.27), (b"J2", 727.41)],
+                       dtype=[("Name", "S8"), ("Invert Elevation", "<f4")])
 _PLAN_GEOM = {"p01": "g01", "p02": "g01", "p03": "g02", "p04": "g02"}
 
 
@@ -86,8 +92,12 @@ class GeomProjectBase(unittest.TestCase):
         for pid, gid in _PLAN_GEOM.items():
             _write(self.path(f"Mini.{pid}"),
                    [f"Plan Title={pid}", f"Geom File={gid}", "Flow File=u01"])
-        for name in ("Mini.g01.hdf", "Mini.g02.hdf", "Mini.g03.hdf",
-                     "Mini.x01", "Mini.x02", "Mini.x03"):
+        for gid, title in _TITLES.items():
+            # Real HDFs: clone_geom copies the file and retitles the copy.
+            with h5py.File(self.path(f"Mini.{gid}.hdf"), "w") as h:
+                h.create_group("Geometry").attrs["Title"] = np.bytes_(title)
+                h["Geometry/Pipe Nodes/Attributes"] = _PIPE_NODES
+        for name in ("Mini.x01", "Mini.x02", "Mini.x03"):
             with open(self.path(name), "wb") as f:
                 f.write(b"x")
         _write(self.path("Mini.rasmap"), _RASMAP)
@@ -251,6 +261,33 @@ class TestCloneGeom(GeomProjectBase):
     def test_clone_duplicate_title_raises(self):
         with self.assertRaises(DuplicateGeomTitle):
             clone_geom(self.project, "g01", "Geom Two")
+
+    def test_clone_copies_hdf_and_retitles_it(self):
+        # The pipe network exists only in the HDF, so a text-only clone loses it.
+        clone_geom(self.project, "g01", "Cloned Geom", new_id="g07")
+        with h5py.File(self.path("Mini.g07.hdf"), "r") as h:
+            self.assertEqual(h["Geometry"].attrs["Title"], b"Cloned Geom")
+            self.assertEqual(h["Geometry/Pipe Nodes/Attributes"][()].tobytes(),
+                             _PIPE_NODES.tobytes())
+        with h5py.File(self.path("Mini.g01.hdf"), "r") as h:
+            self.assertEqual(h["Geometry"].attrs["Title"], b"Geom One")
+        # .x## is preprocessor output, rebuilt on the run.
+        self.assertFalse(os.path.exists(self.path("Mini.x07")))
+
+    def test_clone_without_source_hdf_is_text_only(self):
+        os.remove(self.path("Mini.g01.hdf"))
+        clone_geom(self.project, "g01", "Cloned Geom", new_id="g07")
+        self.assertTrue(os.path.exists(self.path("Mini.g07")))
+        self.assertFalse(os.path.exists(self.path("Mini.g07.hdf")))
+
+    def test_clone_bad_hdf_leaves_nothing_behind(self):
+        with open(self.path("Mini.g01.hdf"), "wb") as f:
+            f.write(b"not an hdf")
+        with self.assertRaises(OSError):
+            clone_geom(self.project, "g01", "Cloned Geom", new_id="g07")
+        self.assertFalse(os.path.exists(self.path("Mini.g07")))
+        self.assertFalse(os.path.exists(self.path("Mini.g07.hdf")))
+        self.assertNotIn("Geom File=g07", _read(self.prj_path))
 
 
 class TestDeleteGeom(GeomProjectBase):

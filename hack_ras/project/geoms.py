@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import logging
 import os
+import shutil
 
 from hack_ras.project.plans import (
     _invalidate_model,
@@ -474,10 +475,38 @@ def clone_geom(
 ) -> str:
     """Create a new geometry file as a copy of source_id with a new title.
 
-    Copies only the .g## text file (RAS regenerates the .g##.hdf preprocessor
-    output on the next run); the 'Geom Title=' line is replaced with new_title,
-    and a `Geom File=` entry is inserted in the .prj keeping geometry entries in
-    ascending order. new_id defaults to the next free geometry number.
+    Copies the .g## text file with its 'Geom Title=' line replaced by new_title,
+    and the .g##.hdf byte-for-byte when the source has one, with `Geometry/Title`
+    inside the copy set to new_title (see `hdf_titles.py` — RAS Mapper names the
+    `<Geometries>` layer from it). A `Geom File=` entry is inserted in the .prj
+    keeping geometry entries in ascending order. new_id defaults to the next free
+    geometry number. The .x## preprocessor file is NOT copied.
+
+    **Why the HDF is copied (it used to be text-only).** The old assumption was
+    that RAS regenerates the .g##.hdf from the text on the next run. It cannot:
+    a pipe network exists ONLY in the geometry HDF (`Geometry/Pipe Nodes`,
+    `Geometry/Pipe Conduits`, `Geometry/Pipe Networks`) — nothing in the .g##
+    text describes it — so a text-only clone of a pipe-network geometry silently
+    loses every pipe. Found 2026-10-02 cloning the Model_Hillside pump-station
+    geometries.
+
+    **Editing the clone's text afterwards is safe.** The copied HDF keeps the
+    source's `Geometry Time` stamp, so the clone's text is newer than its HDF,
+    and RAS rebuilds the text-defined data from the text when a plan using the
+    geometry is run. Measured on Model_Hillside 2026-10-02: a clone whose
+    `Pump Station Group=` startup/shutdown times were edited in the text only
+    ran with the edited times (the plan HDF's `Geometry/Pump Stations/Pump
+    Groups/Attributes` recorded them), and the pipe node and conduit tables in
+    the rebuilt .g##.hdf were byte-identical to the source's. The HEC-RAS GUI
+    writes those times to both files, so before the run the text and HDF of a
+    text-edited clone disagree; the run resolves it.
+
+    **Why the .x## is not copied.** It is preprocessor output, rebuilt on the
+    run. Measured on Model_Hillside 2026-10-02: `.x08` deleted and p32 re-run in
+    a copy of the model — the rebuilt `.x08` was byte-identical to the deleted
+    one, and the p32 results matched dataset for dataset except the run's
+    timestamps, project path, and the `Calibration Regions` series, which differ
+    between any two runs of the same plan.
 
     Returns the new geometry ID. Raises DuplicateGeomTitle if new_title matches
     any listed geometry's title (HEC-RAS requires unique titles), GeomIdInUse if
@@ -522,7 +551,19 @@ def clone_geom(
         if content_of(line).startswith("Geom Title="):
             lines[i] = f"Geom Title={new_title}{eol}"
             break
-    write_lines(geom_path(project, new), lines)
+    new_path = geom_path(project, new)
+    write_lines(new_path, lines)
+    if os.path.isfile(src_path + ".hdf"):
+        from hack_ras.project.hdf_titles import retitle_geom_hdf
+        try:
+            shutil.copy2(src_path + ".hdf", new_path + ".hdf")
+            retitle_geom_hdf(new_path + ".hdf", new_title)
+        except Exception:
+            # Leave nothing half-made: the .prj has not been touched yet.
+            for p in (new_path, new_path + ".hdf"):
+                if os.path.isfile(p):
+                    os.remove(p)
+            raise
 
     prj_lines = read_lines(project.prj_path)
     prj_eol = eol_of(prj_lines)

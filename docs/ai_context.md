@@ -574,7 +574,7 @@ insert_geom_gap(project, "g02", 1)                     # shift g>=02 up by 1
 compact_geoms(project)                                 # g01,g03,g05 -> g01,g02,g03
 reorder_geoms(project, ["g01", "g03", "g02"])           # complete list, as g01..gN
 retitle_geom(project, "g01", "New Geom Title")          # rename g01 in place (no new file)
-clone_geom(project, "g01", "New Geom Title", new_id="g07")  # copy .g## + new title
+clone_geom(project, "g01", "New Geom Title", new_id="g07")  # copy .g## + .g##.hdf, new title
 delete_geom(project, "g04")                            # refuses if a plan uses it
 delete_geom(project, "g04", force=True)                # deletes anyway (+warns)
 delete_geoms(project, "g04-g06", force=True)           # bulk delete by id-spec
@@ -614,9 +614,20 @@ stale plan title on `.x##` line 3. ONE carve-out, added with `retitle_geom`:
   whole call with `GeomInUse` if ANY target is still referenced — so nothing is
   deleted on a bad spec. Consolidated report: `deleted_geoms`, `deleted`,
   `prj_removed`, `referencing_plans` (per gid), `warnings`, `rasmap_removed`.
-- `clone_geom` copies only the `.g##` text with a new (unique) `Geom Title=`
-  (`DuplicateGeomTitle` otherwise) and inserts the `Geom File=` entry ascending;
-  RAS regenerates the `.g##.hdf` on the next run (mirrors `clone_plan`).
+- `clone_geom` copies the `.g##` text with a new (unique) `Geom Title=`
+  (`DuplicateGeomTitle` otherwise), copies the `.g##.hdf` byte-for-byte when the
+  source has one and sets `Geometry/Title` in the copy, and inserts the
+  `Geom File=` entry ascending. It does NOT copy the `.x##`. It used to copy the
+  text only, on the assumption that RAS regenerates the HDF — wrong for any
+  geometry with a pipe network, which exists ONLY in the HDF (see Pipe Network
+  Geometry & Results), so the clone lost every pipe. Two things measured on
+  Model_Hillside 2026-10-02 make the copy safe to edit afterwards: (1) the copied
+  HDF keeps the source's `Geometry Time`, the clone's text is newer, and RAS
+  rebuilds the text-defined data from the text on the next run — text-only
+  edits to `Pump Station Group=` startup/shutdown times ran as edited, with the
+  pipe tables byte-identical; (2) a deleted `.x##` is rebuilt byte-identical and
+  the plan's results match except the run-to-run noise (timestamps, project path,
+  `Calibration Regions`). Evidence in detail is in the `clone_geom` docstring.
 - Typed exceptions: `GeomFileNotFound`, `GeomIdInUse`, `GeomInUse`,
   `DuplicateGeomTitle`, `GeomRunActive` (a plan using the geometry is mid-run —
   a `.p##.tmp.hdf` exists). Orphan geometries (on disk but not in the `.prj`) are
@@ -685,7 +696,9 @@ What the kinds share and don't:
 - `clone_flow` copies only the text file with a new unique `Flow Title=`
   (`DuplicateFlowTitle`, scoped to the same kind since RAS lists the two kinds
   separately) and inserts the `.prj` entry ascending under the right key; RAS
-  regenerates the `.u##.hdf`. An unsteady clone inherits the source's
+  regenerates the `.u##.hdf` (as of RAS 7.0 it holds nothing RAS cannot
+  rebuild — user-confirmed 2026-10-02, which is why `clone_flow` was not given
+  `clone_geom`'s HDF copy). An unsteady clone inherits the source's
   `Restart Filename=` line if it has one.
 - Left alone, same policy as plans/geoms: `.u##.hdf` internals, the `Flow Filename`
   attr in each `.p##.hdf` (stale provenance until RAS recomputes), and `.b##`/`.O##`
@@ -1606,7 +1619,8 @@ geometry text files for `pipe|conduit|manhole|junction|inlet|network` returns
 **zero hits** — the `.g##` text carries only Storage Area / 2D, Connection and
 culvert blocks. Nothing in it can rebuild the network, so never delete a
 `.g##.hdf` to force a mesh regen; bump `Storage Area 2D PointsPerimeterTime=`
-instead (see the mesh-snapper notes). The definition lives in three groups:
+instead (see the mesh-snapper notes) — and never copy a geometry as text alone;
+`clone_geom` copies the `.g##.hdf` for this reason. The definition lives in three groups:
 `Geometry/Pipe Nodes/`, `Geometry/Pipe Conduits/`, and
 `Geometry/Pipe Networks/{net}/` (the computed mesh).
 
