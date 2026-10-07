@@ -26,7 +26,7 @@ except ImportError:
     HAS_H5PY = False
 
 DATA = Path(__file__).parent / "data"
-FIXTURE = DATA / "2D culvert bridge levee precip pipes"
+FIXTURE = DATA / "2D_culvert_bridge_levee_precip_pipes"
 MODEL_G02 = FIXTURE / "Model.g02"
 MODEL_P06_HDF = FIXTURE / "Model.p06.hdf"
 MODEL_P02_HDF = FIXTURE / "Model.p02.hdf"

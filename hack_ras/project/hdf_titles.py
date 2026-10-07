@@ -35,7 +35,7 @@ best-effort-if-present and the caller gets back the list of what was touched:
 | `Geometry`                   | `Title`        | title     | 5.0.3, 7.0 |
 
 `Results/Steady` carries no title attributes at all (checked against the
-Wisconsin Floodway 5.0.3 and 7.0 fixtures), so a steady plan's results tree is
+Wisconsin_Floodway 5.0.3 and 7.0 fixtures), so a steady plan's results tree is
 named from `Plan Data/Plan Information` alone.
 
 **String type fidelity.** RAS writes these as fixed-length ASCII sized exactly

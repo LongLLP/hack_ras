@@ -7,11 +7,13 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Three items are open as whole pieces of work. In rough priority:
+Four items are open as whole pieces of work. In rough priority:
 
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
 2. **Interior flood-volume peak (E2)** — §E below.
 3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+4. **Run plans from the command line, RAS 7.0 first** (added 2026-10-07, not yet
+   scheduled) — §H below.
 
 Two more are half-built and easy to miss, because they are not on that list:
 **E1** and **E3b** each have all their readers and none of the metric on top
@@ -402,6 +404,50 @@ evidence of a mismatch.
 A companion guard comparing the terrain path against the geometry's own
 `Terrain Filename` attribute was **considered and declined by the user** — pointing
 the tool at a deliberately different terrain is a legitimate workflow.
+
+### H. Run plans from the command line — OPEN (added 2026-10-07)
+
+Goal: tell HEC-RAS to compute one plan or several from Python / a command prompt,
+headless, instead of clicking Compute in the GUI. **First target: RAS 7.0**, because
+it has a real batch interface. Older versions come later, if at all.
+
+**What RAS 7.0 offers** — read out of `Ras.exe`'s own built-in help text (`-h`), not
+yet exercised:
+
+    Ras.exe -c "<project.prj>" ["<plan.p##>"]   open the project, run the current
+                                                (or the named) plan
+    Ras.exe -a "<project.prj>"                  run ALL plans
+    -hideCompute                                hide the compute window
+    -test                                       copy to a "[Test]" folder, run every
+                                                plan, close RAS (+ -MaxCores,
+                                                -CleanIBTables, -Clean2DTables)
+
+Unverified, and the first things to test: whether `-c` returns only when the run
+finishes (so a caller can wait on the process), whether it writes anything besides
+the normal plan outputs, and the "There is already an instance of HEC-RAS running"
+prompt the binary contains — a modal dialog would hang an unattended batch while the
+user has RAS open, which is the normal state (see the "HEC-RAS may be running"
+rule in the project `CLAUDE.md`).
+
+**Choosing the executable.** Resolve it when a compute is requested, NOT when
+`RasProject` opens — nearly all of hack_ras never needs RAS installed. Accept a
+version (`"7.0"` -> `C:\Program Files (x86)\HEC\HEC-RAS\7.0\Ras.exe`) or an explicit
+exe path. **Do not default to the plan's `Program Version=`**: it records the version
+that last SAVED the plan, not the one that ran it (Model_DCRA/00_Old_4.1 p04-p06 say
+`6.00` but were run in 4.1 on 2026-10-07). Running a model in a newer RAS than it was
+built in upgrades its files, which for a regulatory model (a LOMR) is a decision, not
+a default — refuse a mismatch unless forced.
+
+**Older versions, for the record** (verified 2026-10-07, RAS 4.1.0 on a scratch copy
+of Model_TID1): 4.1's `ras.exe` has no batch mode. Its steady engine does —
+`Steady.exe <name>.r##`, run in the project folder, rebuilt `.O06` byte-identical in
+~33 s (a visible progress window that closes itself). But the `.r##` deck is written
+by the GUI / COM controller from the plan, geometry and flow, so this only REPLAYS
+the last run; after an edit the deck is stale. The `RAS41.HECRASController` COM
+object can regenerate and compute (`Compute_CurrentPlan` returned True on five HEC
+example projects), with quirks: no `QuitRas` / `Project_Close`, and
+`Plan_SetCurrent` does not refresh the output it serves, so set `Current Plan=` in
+the `.prj` and open a fresh controller per plan.
 
 ---
 

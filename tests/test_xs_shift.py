@@ -226,7 +226,7 @@ def test_shift_xs_cutlines_roundtrip(tmp_path):
 # ---------------------------------------------------------------------------
 
 STRESS = (
-    Path(__file__).parent / "data" / "XSCutLines stress test"
+    Path(__file__).parent / "data" / "XSCutLines_stress_test"
     / "XSCut_stress_test.g01"
 )
 

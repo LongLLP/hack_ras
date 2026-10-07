@@ -407,12 +407,12 @@ def test_write_bank_sta_line_precision():
     assert write_bank_sta((112421.75, 112421.75)) == "Bank Sta=112421.8,112421.8\n"
 
 
-MASSIVE_G01 = Path(__file__).parent / "data" / "Massive XS stations" / "Massive.g01"
+MASSIVE_G01 = Path(__file__).parent / "data" / "Massive_XS_stations" / "Massive.g01"
 
 
 def test_bank_sta_matches_block_station_stretched_xs(tmp_path):
     """
-    End-to-end on the RAS-authored 'Massive XS stations' fixture, RS 500
+    End-to-end on the RAS-authored 'Massive_XS_stations' fixture, RS 500
     (LOB/Channel/ROB scaled x1000 in the RAS GUI: stations -350 .. 1127361,
     banks 451530.8 / 474140.8).  RAS itself never writes a station that needs
     more than 8 characters — it rounds to fit the field (the user entered

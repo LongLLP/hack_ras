@@ -25,9 +25,9 @@ except ImportError:
     HAS_H5PY = False
 
 DATA = Path(__file__).parent / "data"
-STERP_G03 = DATA / "Wisconsin Floodway" / "SterpCreek.g03"
-MODEL_G02 = DATA / "2D culvert bridge levee precip pipes" / "Model.g02"
-MODEL_G04 = DATA / "2D culvert bridge levee precip pipes" / "Model.g04"
+STERP_G03 = DATA / "Wisconsin_Floodway" / "SterpCreek.g03"
+MODEL_G02 = DATA / "2D_culvert_bridge_levee_precip_pipes" / "Model.g02"
+MODEL_G04 = DATA / "2D_culvert_bridge_levee_precip_pipes" / "Model.g04"
 
 
 def by_key(groups):
@@ -236,7 +236,7 @@ COMPARED_FIELDS = (
 def _hdf_pairs():
     """Fixture geometries that have both an ASCII file and a culvert HDF table."""
     out = []
-    for folder in ("Wisconsin Floodway", "2D culvert bridge levee precip pipes"):
+    for folder in ("Wisconsin_Floodway", "2D_culvert_bridge_levee_precip_pipes"):
         for ascii_path in sorted((DATA / folder).glob("*.g[0-9][0-9]")):
             hdf_path = Path(str(ascii_path) + ".hdf")
             if hdf_path.is_file():
@@ -328,7 +328,7 @@ def test_prefer_hdf_falls_back_when_the_hdf_predates_the_culvert_table():
     7.0-era addition (g02 is the same model re-saved by 7.0 and does have it).
     So prefer_hdf must fall through to the ASCII rather than report nothing.
     """
-    sterp_g01 = DATA / "Wisconsin Floodway" / "SterpCreek.g01"
+    sterp_g01 = DATA / "Wisconsin_Floodway" / "SterpCreek.g01"
     assert (Path(str(sterp_g01) + ".hdf")).is_file()
     with pytest.raises(KeyError):
         read_culverts_hdf(str(sterp_g01) + ".hdf")

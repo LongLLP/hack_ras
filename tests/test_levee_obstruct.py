@@ -2,7 +2,7 @@
 Levee and blocked-obstruction parsing, lossless roundtrip, and an end-to-end
 active-flow check against real HEC-RAS output.
 
-Fixture: tests/data/Wisconsin Floodway/SterpCreek.g01 (+ .p01.hdf) — a RAS 5.0.3
+Fixture: tests/data/Wisconsin_Floodway/SterpCreek.g01 (+ .p01.hdf) — a RAS 5.0.3
 steady model whose 'Sterp West / Upper' reach carries hand-placed levees,
 "normal" and "multiple-block" blocked obstructions, and IFAs, documented in
 Model_DCRA/Images.  The plan HDF's Additional Variables/Top Width Total is the
@@ -14,7 +14,7 @@ from pathlib import Path
 from hack_ras.geometry.parser import GeometryParser
 from hack_ras.geometry.writer import GeometryWriter
 
-DATA = Path(__file__).parent / "data" / "Wisconsin Floodway"
+DATA = Path(__file__).parent / "data" / "Wisconsin_Floodway"
 G01 = DATA / "SterpCreek.g01"
 P01_HDF = DATA / "SterpCreek.p01.hdf"
 # g02/p02 are a carbon copy of g01/p01, run in RAS 7.0 -> a real 7.0 steady

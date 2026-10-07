@@ -143,11 +143,11 @@ class TestUnhealthyProject(unittest.TestCase):
 @unittest.skipUnless(
     HAS_H5PY and os.path.isfile(os.path.join(
         os.path.dirname(__file__), "data",
-        "2D culvert bridge levee precip pipes", "Model.p04.hdf")),
+        "2D_culvert_bridge_levee_precip_pipes", "Model.p04.hdf")),
     "2D culvert fixture / h5py not available")
 class TestHealthOnRealFixture(unittest.TestCase):
     _FIXTURE = os.path.join(os.path.dirname(__file__), "data",
-                            "2D culvert bridge levee precip pipes")
+                            "2D_culvert_bridge_levee_precip_pipes")
 
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

@@ -11,7 +11,7 @@ from hack_ras.geometry.blocks.storage_area_2d import (
 )
 
 DATA = Path(__file__).parent / "data"
-MODEL_2D = DATA / "2D culvert bridge levee precip pipes" / "Model.g02"
+MODEL_2D = DATA / "2D_culvert_bridge_levee_precip_pipes" / "Model.g02"
 BAXTER_1D = DATA / "Baxter" / "Baxter.g02"
 
 

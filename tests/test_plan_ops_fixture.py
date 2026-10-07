@@ -1,6 +1,6 @@
 # tests/test_plan_ops_fixture.py
 """Integration test: the full plan-ops sequence on a real HEC-RAS-authored
-model — tests/data/'2D culvert bridge levee precip pipes' (rebuilt by the user
+model — tests/data/'2D_culvert_bridge_levee_precip_pipes' (rebuilt by the user
 in the RAS 7.0 GUI on 2026-07-17).
 
 Fixture contents (load-bearing for these tests — see dev_rules.md):
@@ -38,7 +38,7 @@ from hack_ras.project.rasmap import remove_plans_from_rasmap
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "data",
-                        "2D culvert bridge levee precip pipes")
+                        "2D_culvert_bridge_levee_precip_pipes")
 HAS_FIXTURE = os.path.isfile(os.path.join(_FIXTURE, "Model.b02"))
 
 P02_RST = "Model.p02.01JAN2025 1400.rst"   # written by the breach plan

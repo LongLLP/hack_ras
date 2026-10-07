@@ -1,7 +1,7 @@
 """
 Tests for hack_ras.results.reader.read_steady_xs_results
 
-The real fixtures are the two Wisconsin Floodway plans: SterpCreek.p01.hdf
+The real fixtures are the two Wisconsin_Floodway plans: SterpCreek.p01.hdf
 (RAS 5.0.3, flat geometry name arrays, four Additional Variables) and
 SterpCreek.p02.hdf (RAS 7.0, compound Cross Sections/Attributes, ~50 Additional
 Variables including 'Velocity Total').  They are the same model run in two
@@ -25,7 +25,7 @@ try:
 except ImportError:
     HAS_H5PY = False
 
-DATA = Path(__file__).parent / "data" / "Wisconsin Floodway"
+DATA = Path(__file__).parent / "data" / "Wisconsin_Floodway"
 HDF_503 = DATA / "SterpCreek.p01.hdf"
 HDF_70 = DATA / "SterpCreek.p02.hdf"
 HAS_FIXTURES = HDF_503.exists() and HDF_70.exists()

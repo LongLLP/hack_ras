@@ -15,7 +15,7 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 937 passing tests (plus any added in the current
+All tests must pass. The baseline is 955 passing tests (plus any added in the current
 session), and 1 skipped by design — a 5.0.3 fixture HDF that has no culvert table.
 If a new test is added, the new count becomes the baseline.
 
@@ -194,7 +194,7 @@ All HDF5 reader functions live in `hack_ras/results/reader.py`. Follow this patt
 5. Use `KeyError` for missing HDF paths, `ValueError` for bad argument values (e.g.,
    unknown timestamp). Never silently return None.
 6. Add a test in `tests/` using the real HDF fixture at
-   `tests/data/2D culvert bridge levee precip pipes/Model.p02.hdf`.
+   `tests/data/2D_culvert_bridge_levee_precip_pipes/Model.p02.hdf`.
    Use `@unittest.skipUnless(HAS_HDF, "…")` so CI without the fixture still passes.
 
 ## Test Fixtures
@@ -208,7 +208,7 @@ tests/data/
     Baxter.g02                          ← XS GIS cut line shifting tests (georeferenced 1D model,
                                            Baxter River / Upper Reach / Tule Creek / Lower Reach,
                                            167 cut lines with projected coordinates)
-  2D culvert bridge levee precip pipes/
+  2D_culvert_bridge_levee_precip_pipes/
     Model.prj / .p02 .p04 .p05 / .g02-.g03 / .u02 .u04   ← full runnable mini model, rebuilt by
                                            the user in the RAS 7.0 GUI (2026-07-17): p02 has a
                                            LEVEE BREACH (WS Elev trigger with blank inactive
@@ -300,7 +300,7 @@ tests/data/
                                            ESRI-prj-rejection test)
     Features/
       Profile Lines.shp  (.dbf .shx .prj)  ← GIS profile line tests; line extends beyond mesh by design
-  XSCutLines stress test/
+  XSCutLines_stress_test/
     XSCut_stress_test.g01               ← HEC-RAS-authored cut line format fixture: three XS
                                            (11/9/12-point cut lines at 7-digit, 5-digit, and
                                            2-digit coordinates), incl. fully packed 16-char
@@ -311,7 +311,7 @@ tests/data/
     XS_Cutline_input.csv                ← the exact values typed into the RAS GUI (some with
                                            more decimals than a field holds — documents RAS's
                                            truncate-to-fit behavior)
-  Massive XS stations/
+  Massive_XS_stations/
     Massive.g01                         ← HEC-RAS-authored stretched-stationing fixture:
                                            RS 1000 (normal, -350..777.71) and RS 500 (same XS
                                            with LOB/Ch/ROB scaled x1000 in RAS: -350..1127361,
@@ -321,7 +321,7 @@ tests/data/
                                            entered as 451530.795/474140.825 — RAS ROUNDED them
                                            to fit the 8-char field, unlike the 16-char cut
                                            line fields where it truncates)
-  Wisconsin Floodway/
+  Wisconsin_Floodway/
     SterpCreek.g02 / .p02 / .p02.hdf     ← carbon copy of g01/p01 built in RAS 5.0.3, then
                                            run in RAS 7.0 -> a real 7.0 steady results fixture
                                            (compound geometry layout: Cross Sections/Attributes,
@@ -366,8 +366,39 @@ tests/data/
     SterpCreek.O01 / .O02 / .r01 / .r02  ← the STEADY run artifacts RAS wrote for p01/p02.
                                            LOAD-BEARING: test_steady_flow.py uses this model
                                            (on a temp copy) as the only steady fixture that
-                                           exercises delete/renumber of .O##/.r##. Do not
-                                           delete them as "just outputs".
+                                           exercises delete/renumber of .O##/.r##, AND the
+                                           .O## reader's cross-version answer key (each .O##
+                                           matches its same-run .p##.hdf bit for bit,
+                                           test_steady_output.py). Do not delete them as
+                                           "just outputs".
+  HEC_Critical_Creek_4.1/
+    CRITCREK.prj / .p01 .p02 / .g01 .g02 / .F01 .F02 / .S01 .S02  ← HEC example
+                                           (Applications Guide ch. 1), stripped to RAS 4.1
+                                           files and run in the RAS 4.1 GUI by the user
+                                           (2026-10-07). Old UPPERCASE .F##/.S## extensions.
+    CRITCREK.O01 / .O02 / .r01 / .r02 / .p0#.comp_msgs.txt  ← that run's output. .O02 is
+                                           LOAD-BEARING for the .O## reader: 51 interpolated
+                                           (*) XS, and 10 of 63 XS where the +16 decoy differs
+                                           from the real WSE at +128.
+    CRITCREK.O01.wse.csv / .O02.wse.csv  ← ANSWER KEYS: river,reach,rs,profile,wse dumped
+                                           from the RAS 4.1 COM controller (Output_NodeOutput,
+                                           var 2) on a scratch copy; each wse is the shortest
+                                           string that round-trips its float32, so tests
+                                           compare exactly. Regenerate if the plans are re-run.
+  HEC_ConSpan_4.1/
+    ConSpan.prj / .p01 .p02 / .g01 .g02 / .f01  ← HEC example (ConSpan Culvert), stripped
+                                           and run in the RAS 4.1 GUI like Critical Creek.
+                                           g01 was then given a 16-char Node Name on XS
+                                           20.535 ('This is a test f', the GUI maximum) and
+                                           re-run — it carries HEC's "River mile ..." node
+                                           descriptions too, which RAS does NOT write to the
+                                           .O##.
+    ConSpan.O01 / .O02 (+ .r## / comp_msgs)  ← 4 profiles (the only multi-profile .O##
+                                           fixture — exercises the per-profile stride), a
+                                           culvert node, 4 interpolated XS. O01 is the only
+                                           fixture with a NAMED CROSS SECTION, which is what
+                                           pins the 16-byte river / 16-byte name split.
+    ConSpan.O01.wse.csv / .O02.wse.csv  ← answer keys, made as above.
 ```
 
 Geometry merge tests reference fixtures from the sibling `RAS_xsedit` repo via a

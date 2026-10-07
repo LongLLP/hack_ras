@@ -23,7 +23,7 @@ from hack_ras.project.rasmap import (
 )
 
 _FIXTURE = os.path.join(os.path.dirname(__file__), "data",
-                        "2D culvert bridge levee precip pipes", "Model.rasmap")
+                        "2D_culvert_bridge_levee_precip_pipes", "Model.rasmap")
 HAS_FIXTURE = os.path.isfile(_FIXTURE)
 
 # Minimal synthetic .rasmap: three source layers, one no-subfolder geometry

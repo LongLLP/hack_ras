@@ -8,7 +8,7 @@ from hack_ras.resolve import (
     read_crs_wkt,
 )
 
-DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "2D culvert bridge levee precip pipes")
+DATA_DIR = os.path.join(os.path.dirname(__file__), "data", "2D_culvert_bridge_levee_precip_pipes")
 RASMAP_PRJ = os.path.join(DATA_DIR, "Terrain",
                           "_ESRI projection StatePlane.prj")
 HAS_FIXTURE = os.path.isfile(RASMAP_PRJ)

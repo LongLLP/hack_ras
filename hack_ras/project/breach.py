@@ -34,7 +34,7 @@ Entered Data breach with asymmetric side slopes 1/1.1, and a Simplified Physical
 one with 3.1/3.2 — the GUI was screenshotted, and the fields matched position by
 position.  Both plans were then run, and RAS's own realised geometry came back
 with exactly those slopes.  A third, independent fingerprint plan
-(``tests/data/2D culvert bridge levee precip pipes/Model.p06``) reproduces the
+(``tests/data/2D_culvert_bridge_levee_precip_pipes/Model.p06``) reproduces the
 same order, and the first five fields are corroborated by the results HDF (see
 :func:`hack_ras.results.reader.read_breach_state`).
 

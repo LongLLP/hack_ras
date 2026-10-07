@@ -2,12 +2,12 @@
 """Plan settings API — intervals, simulation time window, title/short ID.
 
 Runs on a temp copy of the HEC-RAS-authored fixture model
-tests/data/'2D culvert bridge levee precip pipes' (see dev_rules.md), so the
+tests/data/'2D_culvert_bridge_levee_precip_pipes' (see dev_rules.md), so the
 key names, the `Simulation Date=` layout and the `Short Identifier=` padding
 are RAS's own rather than something a test invented. Its p02/p04/p05/p06 all
 sit at 10SEC computation / 1HOUR output.
 
-The steady fixture (Wisconsin Floodway) covers the other real-world shape: a
+The steady fixture (Wisconsin_Floodway) covers the other real-world shape: a
 plan that carries all four interval lines but a blank `Simulation Date=,,,`.
 """
 import os
@@ -26,8 +26,8 @@ from hack_ras.project.plans import PlanFileNotFound, PlanRunActive
 from hack_ras.utils.lines import read_lines
 
 _DATA = os.path.join(os.path.dirname(__file__), "data")
-_FIXTURE = os.path.join(_DATA, "2D culvert bridge levee precip pipes")
-_STEADY = os.path.join(_DATA, "Wisconsin Floodway")
+_FIXTURE = os.path.join(_DATA, "2D_culvert_bridge_levee_precip_pipes")
+_STEADY = os.path.join(_DATA, "Wisconsin_Floodway")
 HAS_FIXTURE = os.path.isfile(os.path.join(_FIXTURE, "Model.p02"))
 HAS_STEADY = os.path.isfile(os.path.join(_STEADY, "SterpCreek.p01"))
 
@@ -343,7 +343,7 @@ class TestPlanSettings(unittest.TestCase):
         self.assertEqual(self.raw_bytes("p02"), before)
 
 
-@unittest.skipUnless(HAS_STEADY, "Wisconsin Floodway fixture not present")
+@unittest.skipUnless(HAS_STEADY, "Wisconsin_Floodway fixture not present")
 class TestSteadyPlanSettings(unittest.TestCase):
     """A steady plan carries the interval lines but a blank time window."""
 

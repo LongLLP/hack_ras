@@ -44,7 +44,7 @@ except ImportError:
 
 _HDF_FIXTURE = os.path.join(
     os.path.dirname(__file__), 'data',
-    '2D culvert bridge levee precip pipes', 'Model.p02.hdf'
+    '2D_culvert_bridge_levee_precip_pipes', 'Model.p02.hdf'
 )
 HAS_HDF_FIXTURE = os.path.exists(_HDF_FIXTURE)
 

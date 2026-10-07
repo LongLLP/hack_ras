@@ -12,7 +12,7 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
 | `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`); `associations.py` — terrain / Manning's n / infiltration layer per geometry and plan |
 | `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
-| `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks |
+| `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks — and the steady binary output `.O##` (`steady_output.py`) |
 | `hack_ras/gis/` | GIS operations — profile line sampling, station computation, line-in-polygon measurement, 2D mesh cell attribute export |
 | `hack_ras/utils/` | Shared utilities (logging, line helpers) |
 | `hack_ras/resolve.py` | File discovery and ID resolution (lower-level module) |
@@ -77,7 +77,7 @@ HEC-RAS uses a base name plus a typed numeric suffix:
 | `.b##` | UNET run/boundary input, regenerated each run; text; embeds plan/project TITLES but not the plan number — the suffix is the only plan link | plan |
 | `.bco##` | Unsteady computation log (text; 0 bytes until flushed at run end) | plan |
 | `.ic.o##` | Binary initial-conditions output; embeds the plan title, not the number | plan |
-| `.O##` | STEADY output file (uppercase O) — the steady counterpart of `.b##`/`.bco##` | plan |
+| `.O##` | STEADY output file (uppercase O) — the steady counterpart of `.b##`/`.bco##`; binary, read by `results/steady_output.py` (the ONLY results a RAS 4.x plan has) | plan |
 | `.r##` | STEADY run file | plan |
 | `.x##` | Preprocessor run file — keyed to GEOMETRY `g##`, NOT the plan (user-confirmed; line 3 carries the title of the last plan run with that geometry, which misleads) | geometry |
 | `.u##` | Unsteady flow file | — |
@@ -548,7 +548,7 @@ fine, but `'Output Interval' in line` would not.
   solver — but only the unsteady solver reads them, and a steady plan's window
   is typically `Simulation Date=,,,` (reads back as `start=None`/`end=None`,
   and `missing_keys == []` because the LINE is present). Verified on
-  `tests/data/Wisconsin Floodway/SterpCreek.p01`.
+  `tests/data/Wisconsin_Floodway/SterpCreek.p01`.
 - Scope: these four groups only. Other plan settings (the rest of Computation
   Settings, the 2D solver tolerances, output options) are not implemented —
   extend `_INTERVAL_KEYS` / add a keyword here rather than starting a new
@@ -713,7 +713,7 @@ Tests: `tests/test_flow_ops.py` (47, synthetic mixed-kind project — f01 shared
 two steady plans, u01 by two unsteady, plus an unused f03/u04 and a deliberate gap
 in each namespace) and `tests/test_flow_ops_fixture.py` (8, real models — the
 2D-culvert model for unsteady incl. its genuine stale `u03` prj entry + stale EC
-layer, and Wisconsin Floodway for steady, where `f01` is shared by both plans and
+layer, and Wisconsin_Floodway for steady, where `f01` is shared by both plans and
 there is no `.rasmap` at all).
 
 ## Retitling — `retitle_plan` / `retitle_geom` / `retitle_flow`
@@ -799,7 +799,7 @@ best-effort-if-present and the report lists what was touched:
 | `Results/Unsteady` | `Short ID` | short ID | unsteady runs |
 | `Geometry` | `Title` | title | 5.0.3, 7.0 |
 
-`Results/Steady` carries no title attributes (checked on the Wisconsin Floodway
+`Results/Steady` carries no title attributes (checked on the Wisconsin_Floodway
 5.0.3 and 7.0 fixtures), and a `.u##.hdf` carries none either — a flow's name
 lives only in its text file and the `.rasmap`, which is why `retitle_flow` has no
 `update_hdf`. The `Results/Summary/Compute Messages (rtf)` / `(text)` datasets
@@ -1151,6 +1151,8 @@ text parsers do not need it.
 `"HEC-RAS 7.0 April 2026"`). Do **not** use the plan text `Program Version=` line (not
 updated consistently — a model re-run in 7.0 can still read `5.03`) or the HDF
 `File Type` attr (a 7.0 geometry HDF was observed mislabelled `"HEC-RAS Results"`).
+`Program Version=` records the version that last SAVED the plan, not the one that ran
+it: Model_DCRA/00_Old_4.1 p04-p06 read `6.00` and were run in RAS 4.1 (2026-10-07).
 
 ```python
 from hack_ras.version import RasVersion
@@ -1586,7 +1588,7 @@ and only the dataset read fails.
 | `Node Pointer` group attr | present | **absent** |
 
 Consequences, all verified on LAX_River_2D p19 (24 weir-mode + 15 bridge-mode connections)
-and on the `2D culvert bridge levee precip pipes` fixture (`Watershed Bridge`):
+and on the `2D_culvert_bridge_levee_precip_pipes` fixture (`Watershed Bridge`):
 
 - `read_sa2d_connection()` reads **both**. The bridge results group has no stationing, so it
   takes stations from the geometry's `2DBR US Cells` / `2DBR DS Cells`, which station the very
@@ -1919,6 +1921,93 @@ Volume accounting totals are nested in `Results/Summary/Volume Accounting/` and 
 sub-groups (`Volume Accounting 2D/{area}/`, `Volume Accounting Pipe Networks/{network}/`):
 `Cum Inflow`, `Cum Outflow`, `Error`, `Error Percent`, `Vol Ending` — all float32, acre-ft.
 
+## Steady Binary Output (`.O##`) — `hack_ras/results/steady_output.py`
+
+RAS 4.x writes **no results HDF**, so for a steady plan run in 4.1 the `.O##` is the
+only place the computed WSE lives. RAS 5.0.3 through 7.0 still write the `.O##` on
+every steady run, next to the `.p##.hdf` and **in the same layout** — so coexistence
+is normal and says nothing about staleness. Built 2026-10-07 so
+`hack_ras_scripts/Results_FPM/export_xs_gis.py` can map active flow on a 4.1 LOMR
+model (Model_TID1).
+
+```python
+from hack_ras.results.steady_output import (
+    read_plan_steady_wse, read_steady_output, steady_output_path, steady_output_short_id)
+
+steady, source = read_plan_steady_wse(plan_path)   # .p##.hdf if present, else .O##
+steady.get_wse(river, reach, station, profile)     # same SteadyProfileResults as the HDF reader
+```
+
+| Function | Returns | Notes |
+|----------|---------|-------|
+| `read_plan_steady_wse(plan_path)` | `(SteadyProfileResults, source_path)` | HDF first, NO cross-check against the `.O##`. On the `.O##` route: refuses an SI project (`ValueError`), and logs a staleness WARNING when the plan's Short Identifier no longer matches the one stored in the `.O##`. `FileNotFoundError` when the plan has neither |
+| `read_steady_output(o_path)` | `SteadyProfileResults` | Every profile; structure nodes left out; interpolated stations keep their `*`, exactly as `GeometryParser` spells them. Units as stored — see SI below. `ValueError` on a header or pointer that does not fit the file |
+| `steady_output_short_id(o_path)` | `str` | The plan Short Identifier at RUN time |
+| `steady_output_path(plan_path)` | `str` | Exactly `<base>.O##`; `FileNotFoundError` if absent |
+
+No h5py needed on the `.O##` route (the HDF reader is imported lazily).
+
+### Layout (little-endian, 64-byte blocks)
+
+| Offset | Content |
+|--------|---------|
+| 0-15 | int32 `n_nodes`, `n_profiles`, `n_reaches` (unverified — 1/3/12 matches the models), `blocks_per_profile` |
+| 16-63 | mostly blank; a float32 at 28 reads **4.1 / 5.0 / 6.7** for 4.1 / 5.0.3 / 7.0 runs — looks like the steady engine version. Observed, not used |
+| 64-127 | plan Short Identifier at run time (64 chars, the plan file's own padded width) |
+| 128 | node table, `n_nodes` x 64 B: int32 record pointer, RS (8), reach (16), int32 node type, river (16), node name (16) |
+| after the table | profile names, 16 B each |
+| `(ptr - 1) * 64` | the node's record; **WSE = float32 at +128**; profile *p* adds `p * 64 * blocks_per_profile` |
+
+Node types: 1 XS, 2 culvert, 3 bridge, 4 multiple opening, 6 lateral structure.
+Structure records hold the 3.4e38 sentinel and are larger (a bridge is 1792 B), which
+is why WSE is located through the pointer, never by a fixed stride.
+
+### Two decoding traps — each passed one model and failed the next
+
+* **+16 (and +12) are decoys.** They equal the WSE on most cross sections, and on
+  all of TID1 — so a decoder reading +16 passed 3,016 of 3,016 values there. On
+  Model_DCRA p01 they differ by up to 4.4 ft on 27 values; also in supercritical /
+  mixed-regime runs (`HEC_Critical_Creek_4.1/CRITCREK.O02` 10 of 63, HEC example
+  MIXED 12 of 38). Index 6 of the record is the 1-based profile number.
+* **The river field is 16 bytes, not 32.** The next 16 are the geometry's
+  `Node Name=` (`"Atwood Avenue"`, `"RR Tracks"` on DCRA), blank in most models.
+  Read as one field, any named node silently drops out of the key lookup. The RAS
+  4.1 GUI's Node Name Table caps names at 16 characters, so the field is never
+  truncated. The multi-line node DESCRIPTION (`BEGIN DESCRIPTION:` block, the
+  Node Descriptions Table) is NOT stored in the `.O##` — ConSpan's "River mile ..."
+  descriptions appear nowhere in its output (user-confirmed in the GUI 2026-10-07).
+  Fixture: `HEC_ConSpan_4.1` g01 names XS 20.535 `This is a test f`.
+
+### Evidence — every value bit-exact
+
+| Answer key | Files | Values |
+|------------|-------|--------|
+| RAS 4.1 COM controller `Output_NodeOutput` (var 2) | Model_TID1 p01/p02/p06/p09/p10, Model_DCRA/00_Old_4.1 p01-p06, HEC examples CRITCREK, ConSpan, MIXED, EX1, TWINPIPE | 3,016 + 11,805 + 283 |
+| Plan HDF from the same run | `tests/data/Wisconsin_Floodway/SterpCreek.O01` (5.0.3) / `.O02` (7.0) | 73 + 73 |
+
+### Edge cases
+
+* **SI projects store FEET.** The RAS 6.0 HEC example WaterQualityExamp (`SI Units`)
+  holds WSE in ft while its HDF holds m; x0.3048 agrees on 17 of 18, the last 1
+  float32 step off. SI is out of scope by the user's decision (2026-10-07):
+  `read_plan_steady_wse` reads the `.prj` unit line and refuses; `read_steady_output`
+  cannot know, because the `.O##` carries no unit flag.
+* **`.IC.O##`** (unsteady initial conditions) has the same header layout — match the
+  exact name `<base>.O##`, never a `*.o##` pattern.
+* **Old uppercase extensions** (`CRITCREK.F01`, `MIXED.PRJ`) — exact names, case-
+  tolerant lookup.
+* **Staleness:** TID1's `.O10` says `LOMR_CorrEff` while p10 now says `CorrEff` — the
+  only mismatch seen; every freshly run plan matched.
+
+### How it was decoded (for the next unknown field)
+
+The RAS 4.1 COM controller (`RAS41.HECRASController`, needs RAS 4.1 installed) gives
+RAS's own values to search for. Quirks: no `QuitRas` / `Project_Close` /
+`Output_VariableName`; `Geometry_GetNodes` misbehaves through pywin32 (use
+`Output_GetNodes`); and `Plan_SetCurrent` does NOT refresh the output it serves — set
+`Current Plan=` in a COPY's `.prj` and open a fresh controller per plan. Opening a
+project wrote nothing. Running plans headlessly is TODO §H.
+
 ## Results Package API (`hack_ras/results/`)
 
 ### `model.py` — dataclasses
@@ -2028,7 +2117,7 @@ The rules, each measured, with the evidence in the module docstring:
 #### 1D steady-flow cross-section results
 | Function | Returns | Notes |
 |----------|---------|-------|
-| `read_steady_profile_wse(hdf_path)` | `SteadyProfileResults` | WSE only; the original narrow reader, still used by `export_xs_gis.py` |
+| `read_steady_profile_wse(hdf_path)` | `SteadyProfileResults` | WSE only; the original narrow reader. `export_xs_gis.py` reaches it through `steady_output.read_plan_steady_wse`, which falls back to the `.O##` |
 | `read_steady_xs_results(hdf_path)` | `SteadyXsResults` | **Every** `(n_profiles, n_xs)` dataset under `Steady Profiles/Cross Sections` + its `Additional Variables` subgroup, keyed by HDF dataset name |
 
 `SteadyXsResults` carries `profile_names`, `keys` (`(river, reach, station)` in
@@ -2928,7 +3017,7 @@ groups = read_culverts(geom_path, prefer_hdf=True)   # HDF when a sibling exists
    default.
 2. **RAS 5.0.3 wrote no culvert table into the geometry HDF whatsoever**, even
    for a geometry whose ASCII has culverts — `Culvert Groups` is a 7.0-era
-   addition (`tests/data/Wisconsin Floodway/SterpCreek.g01` is 5.0.3 and has
+   addition (`tests/data/Wisconsin_Floodway/SterpCreek.g01` is 5.0.3 and has
    none; `g02`, the same model re-saved by 7.0, does). 4.1 and older wrote no
    HDF at all. `prefer_hdf=True` therefore falls through to the ASCII on
    `KeyError`.
@@ -3353,7 +3442,7 @@ orphaned. Root cause across three sites: the package assumed **flow == unsteady*
   but do not trust a renumbered results HDF's embedded provenance until it is re-run.
   Note `strings` does NOT surface these — they live in HDF object headers; read them
   with h5py.
-- New `tests/test_steady_flow.py` (17 tests) uses the real `Wisconsin Floodway`
+- New `tests/test_steady_flow.py` (17 tests) uses the real `Wisconsin_Floodway`
   (SterpCreek) steady fixture on a temp copy for the artifact/delete/renumber cases,
   small synthetic projects for parser/sync/health. Verified non-vacuous: 15 of the 17
   fail against the pre-fix code. The 2 that pass either way are deliberate guards that
@@ -3434,7 +3523,7 @@ into `GeometryFile.storage_areas_2d: List[StorageArea2D]` (name, points, and
 `_header_line`/`_data_start`/`_data_end` raw-line span). XS parsing and the
 lossless roundtrip are untouched (these lines previously fell through). New
 `tests/test_storage_area_2d.py` (6 tests) uses the two-area
-`2D culvert bridge levee precip pipes/Model.g02` (Interior=32, Watershed=29)
+`2D_culvert_bridge_levee_precip_pipes/Model.g02` (Interior=32, Watershed=29)
 and the zero-point `Baxter/Baxter.g02`. Baseline 241 → **247**.
 
 Consumer: `Scripts/Mesh_Health/snap_cell_centers.py` (+ `config.yaml`) —
@@ -3609,7 +3698,7 @@ entries ascending, moving only those lines. Stale rasmap layers after
 delete-then-reuse of a plan number are out of scope per the user — RAS Mapper
 was observed self-healing them.
 
-The user then rebuilt the '2D culvert bridge levee precip pipes' fixture in the
+The user then rebuilt the '2D_culvert_bridge_levee_precip_pipes' fixture in the
 RAS 7.0 GUI as a full runnable mini model — final shape: 3 plans (p02 with a
 real levee breach, WS Elev trigger; p04 writing the restart u04 consumes; p05),
 2 geometries, all run artifacts, PLUS deliberately-kept stale .prj entries
@@ -3708,7 +3797,7 @@ used by both `shift.py` (whose broken `_format_xs_gis_lines` is deleted) and
 figures, losing precision HEC-RAS itself keeps).
 
 **HEC-RAS native cut line format — confirmed against an organic fixture.** The user
-built `tests/data/XSCutLines stress test/XSCut_stress_test.g01` entirely in the RAS
+built `tests/data/XSCutLines_stress_test/XSCut_stress_test.g01` entirely in the RAS
 GUI (input values recorded in `XS_Cutline_input.csv`, some with more decimals than a
 field can hold; three XS with 11/9/12-point cut lines at 7-digit, 5-digit, and
 2-digit coordinate magnitudes):
@@ -3738,7 +3827,7 @@ slides the line toward its own end point, i.e. toward the RIGHT bank (facing
 downstream) — which can be screen-LEFT in a north-up plan view.
 
 **Stretched-stationing fixture + 8-char station rounding (same day).** The user built
-`tests/data/Massive XS stations/Massive.g01` in the RAS GUI (input recorded in
+`tests/data/Massive_XS_stations/Massive.g01` in the RAS GUI (input recorded in
 `RS_input_to_RAS.xlsx`): RS 1000 is a normal 219-point XS (−350..777.71); RS 500 is
 the same XS with LOB/Channel/ROB scaled ×1000 in RAS (−350..1127361, organically
 packed 8-char `#Sta/Elev=` fields like `870.9768549.99`).  Key finding: the user
@@ -4019,7 +4108,7 @@ As of 2026-07-21 `#Block Obstruct=` and `Levee=` are parsed into the model
 `blocks/xs_levee.py` → `CrossSection.levee`) for the active-flow work.  Parsing is
 read-only (on top of `raw_lines`, so the lossless roundtrip is unchanged); **no writer /
 `merge.py` support yet**.  Verified against real 5.0.3 output
-(`tests/data/Wisconsin Floodway/SterpCreek.g01`): blocked obstructions use the same 8-char
+(`tests/data/Wisconsin_Floodway/SterpCreek.g01`): blocked obstructions use the same 8-char
 `[start, end, elevation]` triplet layout as IFAs, with `normal` (flag 0, left/right +
 0.0-edge sentinels) vs `multiple_block` (flag -1, literal stations) — but with **no**
 `Permanent` follower line (obstructions are always solid).  If merge/write support is

@@ -28,7 +28,7 @@ except ImportError:
     HAS_RESULTS = False
 
 _P02 = os.path.join(os.path.dirname(__file__), 'data',
-                    '2D culvert bridge levee precip pipes', 'Model.p02.hdf')
+                    '2D_culvert_bridge_levee_precip_pipes', 'Model.p02.hdf')
 _SUM = ('Results/Unsteady/Output/Output Blocks/Base Output/Summary Output'
         '/2D Flow Areas/{area}/Maximum Water Surface')
 

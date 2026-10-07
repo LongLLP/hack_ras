@@ -14,7 +14,7 @@ flow == unsteady:
    key that RAS never writes, so steady entries silently fell through as
    unrecognised lines and the parser did not track them at all.
 
-The real-model tests use tests/data/'Wisconsin Floodway' (SterpCreek), a
+The real-model tests use tests/data/'Wisconsin_Floodway' (SterpCreek), a
 RAS 5.0.3/7.0 steady project with two run plans, so .O01/.O02 and .r01/.r02
 are genuine RAS output rather than touched-up placeholders. It is copied to a
 temp dir per test because these operations mutate the project.
@@ -37,7 +37,7 @@ from hack_ras.project.plans import (
 from hack_ras.project.sync import sort_prj_entries, sync_prj
 from hack_ras.utils.lines import content_of, read_lines
 
-_FIXTURE = os.path.join(os.path.dirname(__file__), "data", "Wisconsin Floodway")
+_FIXTURE = os.path.join(os.path.dirname(__file__), "data", "Wisconsin_Floodway")
 HAS_FIXTURE = os.path.isfile(os.path.join(_FIXTURE, "SterpCreek.O01"))
 
 CRLF = "\r\n"
@@ -57,7 +57,7 @@ def _prj_entries(path, key):
 # Steady run artifacts (.O## / .r##) — real steady model
 # ---------------------------------------------------------------------------
 
-@unittest.skipUnless(HAS_FIXTURE, "Wisconsin Floodway fixture not present")
+@unittest.skipUnless(HAS_FIXTURE, "Wisconsin_Floodway fixture not present")
 class TestSteadyRunArtifacts(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

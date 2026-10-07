@@ -1,9 +1,9 @@
 # tests/test_layer_associations.py
 """Tests for read_layer_associations / RasProject.layer_associations.
 
-Read-only, so the real fixtures are used directly: '2D culvert bridge levee
-precip pipes' has all three associations (Terrain, LandCover, Infiltration),
-Baxter has terrain only, and Beaver is a 5.0.3 geometry with none. One
+Read-only, so the real fixtures are used directly:
+'2D_culvert_bridge_levee_precip_pipes' has all three associations (Terrain,
+LandCover, Infiltration), Baxter has terrain only, and Beaver is a 5.0.3 geometry with none. One
 synthetic HDF covers the missing-/Geometry error.
 """
 import os
@@ -16,7 +16,7 @@ from hack_ras import RasProject
 from hack_ras.project.associations import read_layer_associations
 
 DATA = os.path.join(os.path.dirname(__file__), "data")
-FULL = os.path.join(DATA, "2D culvert bridge levee precip pipes")
+FULL = os.path.join(DATA, "2D_culvert_bridge_levee_precip_pipes")
 
 
 class TestReadLayerAssociations(unittest.TestCase):

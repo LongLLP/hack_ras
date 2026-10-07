@@ -4,7 +4,7 @@
 Two fixtures, one per flow kind, because the two kinds differ in exactly the
 places a synthetic mock would let us get wrong:
 
-- UNSTEADY — tests/data/'2D culvert bridge levee precip pipes' (built by the
+- UNSTEADY — tests/data/'2D_culvert_bridge_levee_precip_pipes' (built by the
   user in the RAS 7.0 GUI). u02 is shared by plans p02 and p04, u04 by p05, and
   the .prj deliberately still lists 'Unsteady File=u03' whose file the user
   deleted in the GUI — with a matching stale RASEventConditions layer left in
@@ -14,7 +14,7 @@ places a synthetic mock would let us get wrong:
   results-nested RASEventConditions layers naming Base.p##.hdf, which the
   Base.u## token keying must never touch.
 
-- STEADY — tests/data/'Wisconsin Floodway' (RAS 5.0.3). f01 is shared by BOTH
+- STEADY — tests/data/'Wisconsin_Floodway' (RAS 5.0.3). f01 is shared by BOTH
   plans, and the model has NO .rasmap and NO .f01.hdf, so it exercises the
   single-file family, the .prj's 'Flow File=' key, and the no-rasmap path.
 
@@ -40,9 +40,9 @@ from hack_ras.project.sync import sync_prj
 from hack_ras.utils.lines import content_of, read_lines
 
 _UNSTEADY_FIXTURE = os.path.join(os.path.dirname(__file__), "data",
-                                 "2D culvert bridge levee precip pipes")
+                                 "2D_culvert_bridge_levee_precip_pipes")
 _STEADY_FIXTURE = os.path.join(os.path.dirname(__file__), "data",
-                               "Wisconsin Floodway")
+                               "Wisconsin_Floodway")
 HAS_UNSTEADY = os.path.isfile(os.path.join(_UNSTEADY_FIXTURE, "Model.u02"))
 HAS_STEADY = os.path.isfile(os.path.join(_STEADY_FIXTURE, "SterpCreek.f01"))
 
@@ -146,7 +146,7 @@ class TestUnsteadyFlowOpsOnRealModel(unittest.TestCase):
         self.assertEqual(_plan_flow(self.folder, "Model.p05"), "u02")
 
 
-@unittest.skipUnless(HAS_STEADY, "Wisconsin Floodway fixture not present")
+@unittest.skipUnless(HAS_STEADY, "Wisconsin_Floodway fixture not present")
 class TestSteadyFlowOpsOnRealModel(unittest.TestCase):
     def setUp(self):
         self._tmp = tempfile.TemporaryDirectory()

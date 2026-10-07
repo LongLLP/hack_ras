@@ -81,7 +81,7 @@ except ImportError:
 FIXTURE = os.path.join(
     os.path.dirname(__file__),
     "data",
-    "2D culvert bridge levee precip pipes",
+    "2D_culvert_bridge_levee_precip_pipes",
     "Model.p05.hdf",
 )
 
@@ -326,7 +326,7 @@ class TestWseSurface(unittest.TestCase):
 
 
 FIXTURE_DIR = os.path.join(
-    os.path.dirname(__file__), "data", "2D culvert bridge levee precip pipes")
+    os.path.dirname(__file__), "data", "2D_culvert_bridge_levee_precip_pipes")
 P02 = os.path.join(FIXTURE_DIR, "Model.p02.hdf")      # g02 — 59 + 59 cells
 P05 = os.path.join(FIXTURE_DIR, "Model.p05.hdf")      # g03 — same mesh as g02
 P07 = os.path.join(FIXTURE_DIR, "Model.p07.hdf")      # g05 — refined + extended

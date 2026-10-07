@@ -83,7 +83,7 @@ if __name__ == "__main__":
 
 
 _P02 = os.path.join(os.path.dirname(__file__), 'data',
-                    '2D culvert bridge levee precip pipes', 'Model.p02.hdf')
+                    '2D_culvert_bridge_levee_precip_pipes', 'Model.p02.hdf')
 
 
 @unittest.skipUnless(HAS_RESULTS and os.path.exists(_P02),

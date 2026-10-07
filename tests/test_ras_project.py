@@ -5,7 +5,7 @@ from hack_ras import RasProject
 
 _DATA = os.path.join(os.path.dirname(__file__), "data")
 _BEAVER_PRJ = os.path.join(_DATA, "Beaver", "beaver.prj")
-_ESRI_PRJ   = os.path.join(_DATA, "2D culvert bridge levee precip pipes",
+_ESRI_PRJ   = os.path.join(_DATA, "2D_culvert_bridge_levee_precip_pipes",
                             "Terrain", "_ESRI projection StatePlane.prj")
 
 

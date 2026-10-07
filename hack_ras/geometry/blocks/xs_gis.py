@@ -42,7 +42,7 @@ def write_cutline(cutline: XSGISCutLine) -> List[str]:
     """Write an XS GIS Cut Line= block in HEC-RAS native format.
 
     Format confirmed against the RAS-authored fixture
-    tests/data/XSCutLines stress test/XSCut_stress_test.g01 (coordinates
+    tests/data/XSCutLines_stress_test/XSCut_stress_test.g01 (coordinates
     entered in the RAS GUI with more digits than a field can hold), which
     this writer reproduces byte-for-byte:
 
