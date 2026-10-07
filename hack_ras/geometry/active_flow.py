@@ -82,6 +82,16 @@ def wetted_segments(
     The water's edge is linearly interpolated onto each ground segment that
     crosses the WSE.  Disconnected wetted areas yield multiple segments.
 
+    A vertex exactly at *wse* counts as wet and is itself the water's edge.
+    This matters on the rising bank: there is no strict sign change on the
+    segment leaving that vertex, so the edge must be taken at the vertex.
+    2-decimal WSEs (profile tables) against 2-decimal ground hit this often;
+    float32 HDF WSEs rarely do.  A range with no ground strictly below *wse*
+    holds zero depth and is dropped: a tangent touch (one vertex at the WSE)
+    or a flat run lying exactly on it.  RAS leaves both out of Top Width
+    (Model_TID1 Trib P / b / RS 4072: two such flats, 4.9 ft, counted wet
+    put the section 7.1 ft over RAS's 520.6 ft).
+
     Parameters
     ----------
     sta_elev : sequence of (station, elevation)
@@ -100,36 +110,42 @@ def wetted_segments(
 
     segs: List[Segment] = []
     cur: Optional[float] = None
+    deep = False          # open range has ground strictly below the WSE
+
+    def edge(s0, e0, s1, e1):
+        # Station where the ground segment meets the WSE; a vertex exactly at
+        # the WSE is the edge itself.
+        if e0 == wse:
+            return s0
+        if e1 == wse:
+            return s1
+        return s0 + (wse - e0) / (e1 - e0) * (s1 - s0)
 
     for i in range(len(pts) - 1):
         s0, e0 = pts[i]
         s1, e1 = pts[i + 1]
+        wet0 = e0 <= wse
+        wet1 = e1 <= wse
 
         # Open a segment when the current vertex is at/below the water surface.
-        if e0 <= wse and cur is None:
+        if wet0 and cur is None:
             cur = s0
+        if e0 < wse:
+            deep = True
 
-        # A strict sign change means the WSE crosses this ground segment.
-        if (e0 - wse) * (e1 - wse) < 0:
-            t = (wse - e0) / (e1 - e0)
-            x = s0 + t * (s1 - s0)
-            if cur is None:
-                cur = x          # entering the water
-            else:
-                segs.append((cur, x))   # leaving the water
-                cur = None
+        if wet0 and not wet1:
+            if deep:
+                segs.append((cur, edge(s0, e0, s1, e1)))   # leaving the water
+            cur, deep = None, False
+        elif wet1 and not wet0:
+            cur = edge(s0, e0, s1, e1)                      # entering the water
 
-    # Close a segment that runs to the last vertex.
-    if cur is not None:
-        last_sta, last_el = pts[-1]
-        if last_el <= wse:
-            segs.append((cur, last_sta))
-        else:
-            # Degenerate: open segment but last point above water and no
-            # crossing captured; ignore rather than emit a bogus endpoint.
-            pass
+    # Close a segment that runs to the last vertex (it is wet: every
+    # wet -> dry step above closes the open segment).
+    if cur is not None and (deep or pts[-1][1] < wse):
+        segs.append((cur, pts[-1][0]))
 
-    return segs
+    return [(a, b) for a, b in segs if b - a >= _MIN_WIDTH]
 
 
 # ---------------------------------------------------------------------------

@@ -64,6 +64,36 @@ class WettedSegmentsTests(unittest.TestCase):
         stae = [(0, 0), (10, 0)]
         self.assertEqual(_round(wetted_segments(stae, 5.0)), [(0.0, 10.0)])
 
+    # A vertex exactly at the WSE is the water's edge.  2-decimal WSEs from a
+    # profile table against 2-decimal ground hit this (Model_TID1, RAS 4.1:
+    # Trib P / a / RS 7559, WSE 632.3, vertex (185.73, 632.30)); before the fix
+    # the rising-bank case returned [] because no strict sign change closed it.
+    def test_vertex_at_wse_rising_bank(self):
+        stae = [(0, 10), (10, 0), (20, 5), (30, 10), (40, 12)]
+        self.assertEqual(_round(wetted_segments(stae, 5.0)), [(5.0, 20.0)])
+
+    def test_vertex_at_wse_falling_bank(self):
+        stae = [(0, 12), (10, 10), (20, 5), (30, 0), (40, 10)]
+        self.assertEqual(_round(wetted_segments(stae, 5.0)), [(20.0, 35.0)])
+
+    def test_vertex_at_wse_then_later_crossing(self):
+        # The rising-bank vertex must close its pool, not pair with the next
+        # pool's entering crossing into one segment spanning the dry ridge.
+        stae = [(0, 10), (10, 0), (20, 5), (30, 10), (40, 10), (50, 0), (60, 10)]
+        self.assertEqual(_round(wetted_segments(stae, 5.0)),
+                         [(5.0, 20.0), (45.0, 55.0)])
+
+    def test_tangent_touch_is_not_a_segment(self):
+        # Ground meets the WSE at one vertex and rises again: zero width, dropped.
+        stae = [(0, 10), (10, 0), (20, 10), (30, 5), (40, 10), (50, 5)]
+        self.assertEqual(_round(wetted_segments(stae, 5.0)), [(5.0, 15.0)])
+
+    def test_flat_run_at_wse_is_not_a_segment(self):
+        # A flat stretch lying exactly on the WSE holds zero depth; RAS leaves
+        # it out of Top Width (Model_TID1 Trib P / b / RS 4072).
+        stae = [(0, 10), (10, 0), (20, 10), (30, 5), (35, 5), (40, 10)]
+        self.assertEqual(_round(wetted_segments(stae, 5.0)), [(5.0, 15.0)])
+
 
 class SubtractIntervalsTests(unittest.TestCase):
     def test_middle_removed(self):
