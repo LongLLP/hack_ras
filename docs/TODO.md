@@ -7,13 +7,18 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Four items are open as whole pieces of work. In rough priority:
+Three items are open as whole pieces of work. In rough priority:
 
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
 2. **Interior flood-volume peak (E2)** — §E below.
 3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
-4. **Run plans from the command line, RAS 7.0 first** (added 2026-10-07, not yet
-   scheduled) — §H below.
+
+**§H (run plans from the command line) is DONE for RAS 7.0** — built 2026-10-08 as
+`project/compute.py`; see its section in `ai_context.md`. Small follow-up found
+there: `plans._family_names` does not know 4.1's `<base>.p##.comp_msgs.txt`, so a
+renumber/delete of a 4.1 plan strands it. Same for `<base>.p##.data_errors.txt`,
+which RAS 7.0 wrote when a run on the X: drive could not delete its own
+`.p##.tmp.hdf` ("Unable to delete temporary results file ... File not found").
 
 Two more are half-built and easy to miss, because they are not on that list:
 **E1** and **E3b** each have all their readers and none of the metric on top
@@ -405,14 +410,19 @@ A companion guard comparing the terrain path against the geometry's own
 `Terrain Filename` attribute was **considered and declined by the user** — pointing
 the tool at a deliberately different terrain is a legitimate workflow.
 
-### H. Run plans from the command line — OPEN (added 2026-10-07)
+### H. Run plans from the command line — DONE for 7.0 (2026-10-08, `project/compute.py`)
+
+**Scope: HEC-RAS 7.0 and later only** (user decision 2026-10-08). Running plans in
+4.x / 5.x / 6.x, and any use of the COM controller, are out of scope;
+`compute.ras_exe_path` refuses a version below 7.0. The 4.1 notes below are
+the record of what was learned before that decision, not a plan.
 
 Goal: tell HEC-RAS to compute one plan or several from Python / a command prompt,
 headless, instead of clicking Compute in the GUI. **First target: RAS 7.0**, because
 it has a real batch interface. Older versions come later, if at all.
 
-**What RAS 7.0 offers** — read out of `Ras.exe`'s own built-in help text (`-h`), not
-yet exercised:
+**What RAS 7.0 offers** — read out of `Ras.exe`'s own built-in help text (`-h`);
+`compute.py` uses only `-c` and `-hideCompute`:
 
     Ras.exe -c "<project.prj>" ["<plan.p##>"]   open the project, run the current
                                                 (or the named) plan
@@ -422,17 +432,60 @@ yet exercised:
                                                 plan, close RAS (+ -MaxCores,
                                                 -CleanIBTables, -Clean2DTables)
 
-Unverified, and the first things to test: whether `-c` returns only when the run
-finishes (so a caller can wait on the process), whether it writes anything besides
-the normal plan outputs, and the "There is already an instance of HEC-RAS running"
-prompt the binary contains — a modal dialog would hang an unattended batch while the
-user has RAS open, which is the normal state (see the "HEC-RAS may be running"
-rule in the project `CLAUDE.md`).
+The full switch list (read out of the binary's help block, 2026-10-08) also has
+`-hWndComputeMessages=n` / `-hWndComputeProgress=n` (report to a window handle),
+`-inProcess`, `-FV1D`, `-NoPilot`, `-linux`, `-mouseWheelOff`, `-debug`. File
+arguments must be quoted, and a plan given alone must sit beside its project.
+
+**Step 0 findings (2026-10-08, scratch copies of the 2D fixture, user had 7.0 and
+7.0.1 open):**
+
+- **`-c` does NOT raise the "already an instance of HEC-RAS running" prompt.** With
+  the user's 7.0 GUI open, `-c` ran to completion with no dialog — same-version 7.0,
+  cross-version 7.0.1, with and without `-hideCompute` — and the user's session was
+  untouched. The prompt (a standard `#32770` Yes/No box titled `HEC-RAS`) DOES fire
+  for `-h` and a bare launch; a watcher matching only our own PID saw it 0.5 s in and
+  clicked Yes, so an auto-answer is possible if ever needed — not needed for `-c`.
+- **`-c` blocks until the run ends, then closes itself** (~6-7 s for the fixture
+  plans), computes the plan NAMED on the command line, and leaves `Current Plan=` in
+  the `.prj` unchanged. Disk footprint matches a GUI run; no extra log file.
+- **Exit code is 0 even when the run fails.** This failure (7.0.1 run of a plan
+  whose restart file is 7.0) raised no dialog; it writes `Solution` =
+  `Unsteady failed to run` and NO `Run Time Window`. Other failures DO stop on a
+  modal dialog — see the X:-drive findings in the `ai_context.md` Running Plans
+  section, which is why `run_plans` watches for dialog boxes.
+- **The COM controller is OFF THE TABLE.** `RAS70.HECRASController` /
+  `RAS701.HECRASController` are registered (one ProgID per version), but Dispatch
+  ATTACHED TO THE USER'S OPEN GUI (0.0 s, no prompt): `Project_Open` loaded the
+  scratch project into their session and `QuitRas` closed both their GUIs. Also, its
+  compute return value is not trustworthy (next bullet). Do not use it.
+- **Success must be read from the HDF, never from the launcher.** The 7.0.1 COM run
+  returned True / "Computations Completed" while `Results/Unsteady/Summary` `Solution`
+  read `Unsteady failed to run`. `Run Time Window` there gives a freshness check.
+- **The version guard is necessary, not just policy.** A 7.0.1 run of a 7.0 plan
+  rewrote the SHARED `g03.hdf` (673 KB -> 943 KB, `File Version` 7.0.1), and 7.0.1
+  REFUSES a 7.0 restart file ("The Restart file is not from HEC-RAS 7.0.1 ... Program
+  execution halted"). `Program Version=` in the text files stayed `7.00` throughout.
+  7.0 vs 7.0.1 is a mismatch; the user names the exact version.
+- **Restart chains impose run order.** Fixture p05 consumes p04's `.rst` (via u04), so
+  a batch must run a restart producer before its consumer.
+- **A run touches only the plan's family + its geometry's `.g##.hdf`/`.x##` + its
+  flow's `.u##.hdf` + the shared `.dss`** (plus the `.rst` it writes). `.prj`, `.rasmap`
+  and the plan text were untouched by a 7.0 run (COM and `-c` alike). COM runs also
+  wrote `<base>.p##.computeMsgs.txt`; `-c` does not. `_family_names` knows neither
+  that nor 4.1's `<base>.p##.comp_msgs.txt` (the 4.1 one is a real gap).
+- A `.prj` RAS cannot parse (LF line endings from a careless `sed`) is NOT an error:
+  RAS read it as one title line and APPENDED a default project block, creating
+  `p01`/`g01`/`f01`. Never edit RAS text files with sed; use `utils.lines`.
+
+Step 0 is closed. Since then also run through `-c`: a steady plan (Wisconsin p02),
+and 2D plans of 11-15 min from the X: drive (GMF_DFA p01, Hillside p21).
 
 **Choosing the executable.** Resolve it when a compute is requested, NOT when
-`RasProject` opens — nearly all of hack_ras never needs RAS installed. Accept a
-version (`"7.0"` -> `C:\Program Files (x86)\HEC\HEC-RAS\7.0\Ras.exe`) or an explicit
-exe path. **Do not default to the plan's `Program Version=`**: it records the version
+`RasProject` opens — nearly all of hack_ras never needs RAS installed. As built,
+`ras_version` is required and names the exact install folder (`"7.0"` ->
+`C:\Program Files (x86)\HEC\HEC-RAS\7.0\Ras.exe`; `ras_root=` for another install
+location); there is no exe-path argument. **Do not default to the plan's `Program Version=`**: it records the version
 that last SAVED the plan, not the one that ran it (Model_DCRA/00_Old_4.1 p04-p06 say
 `6.00` but were run in 4.1 on 2026-10-07). Running a model in a newer RAS than it was
 built in upgrades its files, which for a regulatory model (a LOMR) is a decision, not

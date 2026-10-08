@@ -15,9 +15,14 @@ cd C:\Users\2161jap\Desktop\hack_ras_local\hack_ras
 pytest tests\
 ```
 
-All tests must pass. The baseline is 955 passing tests (plus any added in the current
+All tests must pass. The baseline is 988 passing tests (plus any added in the current
 session), and 1 skipped by design — a 5.0.3 fixture HDF that has no culvert table.
 If a new test is added, the new count becomes the baseline.
+
+Three tests in `test_compute.py` (marker `ras_compute`) launch HEC-RAS on temp
+copies and add about a minute; they run by default, skip themselves when the
+needed RAS version is not installed, and `pytest tests\ --skip-ras` leaves them
+out (the count then reads 985 passed, 4 skipped).
 
 The geometry merge tests (`test_geometry_merge.py`) require the sibling `RAS_xsedit`
 repo to be present. See `RAS_xsedit/tests/README.md` for how those fixtures are

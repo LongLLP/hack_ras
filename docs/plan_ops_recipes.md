@@ -1,7 +1,7 @@
 # Plan-ops recipes
 
 Copy-paste recipes for the project-level API: health, plan cloning, deletion,
-geometry compaction and plan settings. Paths below are from the Hillside levee
+geometry compaction, plan settings and running plans. Paths below are from the Hillside levee
 model, kept as provenance — swap in your own `.prj`.
 
 Several of these **delete files**. Read the comment above each block before running
@@ -111,3 +111,25 @@ for pid in [f"p{n:02d}" for n in range(1, 25)]:
     print(pid, s.computation_interval, s.mapping_interval, s.hydrograph_interval,
           s.detailed_interval, s.window_raw)
 ```
+
+## Run plans
+
+Computes each plan with `Ras.exe -c`, one at a time, in the order given; keeps
+going past a failure. Safe while your own RAS is open. The version is required
+and exact (`"7.0"` is not `"7.0.1"`). A run that stops on a dialog box is killed
+and reported `dialog`; a healthy run is never cut short. A failed run REPLACES
+the plan's previous results. Details: `ai_context.md`, **Running Plans**.
+
+```python
+from hack_ras import RasProject, compute
+
+project = RasProject(r"C:\Users\2161jap\Desktop\hack_ras_local\Model_Hillside\Current_Model_20260824\NKC_Hillside_Levee.prj")
+
+report = compute.run_plans(project, "1-20", "7.0")
+print(compute.format_report(report))
+```
+
+Options: `reorder=True` (move restart producers ahead of their consumers),
+`hide_compute=False` (show RAS's compute window), `timeout=<seconds>` (optional
+backstop), `force_version=True` (run in a different RAS version — rewrites shared
+geometry HDFs). `compute.prepare_runs(...)` does every check and runs nothing.

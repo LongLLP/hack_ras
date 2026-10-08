@@ -8,7 +8,7 @@ import unittest
 
 import hack_ras
 from hack_ras.project import (
-    flows, geoms, health, plan_settings, plans, rasmap, sync,
+    compute, flows, geoms, health, plan_settings, plans, rasmap, sync,
 )
 
 
@@ -17,13 +17,14 @@ class TestPackageExports(unittest.TestCase):
         for name, module in (("plans", plans), ("geoms", geoms),
                              ("flows", flows), ("sync", sync),
                              ("health", health), ("rasmap", rasmap),
-                             ("plan_settings", plan_settings)):
+                             ("plan_settings", plan_settings),
+                             ("compute", compute)):
             self.assertIs(getattr(hack_ras, name), module, name)
 
     def test_all_matches_what_is_actually_exported(self):
         self.assertEqual(
             sorted(hack_ras.__all__),
-            ["RasProject", "flows", "geoms", "health", "plan_settings",
+            ["RasProject", "compute", "flows", "geoms", "health", "plan_settings",
              "plans", "rasmap", "sync"],
         )
         for name in hack_ras.__all__:

@@ -10,11 +10,11 @@ writes simulation results to HDF5 files (`.p##.hdf`).
 | Package | Purpose |
 |---------|---------|
 | `hack_ras/` (top level) | `RasProject` — the recommended entry point for any project |
-| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`); `associations.py` — terrain / Manning's n / infiltration layer per geometry and plan |
-| `hack_ras/geometry/` | Parse and transform `.g##` geometry files; `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` maps RAS station values to GIS cut-line XY coordinates |
+| `hack_ras/project/` | Parse `.prj` project files; `ProjectModel` dataclass; `plans.py` — plan file operations (renumber, insert numbering gap, compact, reorder, clone, delete); `geoms.py` — the geometry-file analogue; `flows.py` — the flow-file analogue, covering BOTH steady (`.f##`) and unsteady (`.u##`); `associations.py` — terrain / Manning's n / infiltration layer per geometry and plan; `compute.py` — run plans headlessly with `Ras.exe -c` |
+| `hack_ras/geometry/` | Parse and transform `.g##` geometry files (cross-section blocks, SA/2D connections, culverts, 2D cell seeds); `shift.py` translates XS GIS cut lines along their alignment; `xs_interp.py` / `conn_interp.py` map RAS stations to GIS coordinates; `merge.py` stitches cross sections from two geometries; `active_flow.py` computes active flow extents |
 | `hack_ras/results/` | Read plan HDF5 files — cell geometry, WSE, volume tables, pipe networks — and the steady binary output `.O##` (`steady_output.py`) |
-| `hack_ras/gis/` | GIS operations — profile line sampling, station computation, line-in-polygon measurement, 2D mesh cell attribute export |
-| `hack_ras/utils/` | Shared utilities (logging, line helpers) |
+| `hack_ras/gis/` | GIS operations — WSE/depth mapping and raster differencing (`wse_surface.py`), profile line sampling, station computation, line-in-polygon measurement, 2D mesh face Manning's n export |
+| `hack_ras/utils/` | Shared utilities (logging, raw-line I/O, river/reach name normalization) |
 | `hack_ras/resolve.py` | File discovery and ID resolution (lower-level module) |
 
 ## HEC-RAS File Title Uniqueness
@@ -147,14 +147,15 @@ Pass the absolute path to the `.prj` file; `ValueError` is raised if the file is
 or is not a HEC-RAS project (e.g. an ESRI shapefile projection file with the same extension).
 
 The top-level package also **re-exports the `project/` operations modules** —
-`from hack_ras import RasProject, plans, geoms, sync, rasmap, health` — so a script
+`from hack_ras import RasProject, plans, geoms, flows, plan_settings, sync, rasmap,
+health, compute` — so a script
 needs one import line instead of one per subpackage. The MODULES are re-exported, not
 their functions: `plans` and `geoms` have deliberately parallel APIs (renumber / insert
 gap / compact / clone / delete), so the module name at the call site is what says which
 file type is being operated on, and flattening the functions into the top level would
 throw that cue away. `hack_ras.plans` and `hack_ras.project.plans` are the same module
 object (pinned by `tests/test_package_exports.py`); the canonical home is unchanged, and
-nothing new is imported eagerly (none of the five pulls in h5py/geopandas at module
+nothing new is imported eagerly (none of them pulls in h5py/geopandas at module
 level). When adding a module to `project/`, decide whether it belongs in `__all__` —
 that list is the second place to maintain, and the cost of this convenience.
 
@@ -969,6 +970,96 @@ a.mannings_n, a.infiltration                         # LayerRef or None = "(None
   finds terrain folders from the `.rasmap` `TerrainLayer` entries, i.e. EVERY terrain in
   the project, associated or not — a submittal ships the whole model.
 
+## Running Plans — `Ras.exe -c` (`hack_ras/project/compute.py`)
+
+```python
+from hack_ras import RasProject, compute
+report = compute.run_plans(project, "5-24", ras_version="7.0")       # spec order = run order
+report = compute.run_plans(project, "p05,p04", "7.0", reorder=True)  # fix restart order
+print(compute.format_report(report))
+compute.prepare_runs(project, "5-24", "7.0")   # all the checks, nothing launched
+compute.run_plans(project, "5-24", "7.0", hide_compute=False)  # show RAS's compute window
+```
+
+`hide_compute=False` drops `-hideCompute`: each run's "HEC-RAS Computations"
+window shows live progress and messages (Fortran errors included), then closes
+by itself when the run ends — it is not a working GUI session. Dialog detection
+applies the same either way.
+
+One `Ras.exe -c "<prj>" "<plan>" -hideCompute` per plan, sequential, each waited
+on (plus the `RasPlotDriver.exe` it spawns, which outlives it by ~1 s and keeps
+the folder busy). Keeps going past a failure; a plan whose restart source failed
+is `skipped`. Statuses: `ok` / `failed` / `no_results` / `dialog` / `timeout` /
+`skipped`.
+Never edits the `.prj` or `.rasmap`; the report lists `unlisted_results`.
+Measured behavior (scratch copies, 2026-10-08 — full record in TODO §H):
+
+- **`-c` is safe with the user's RAS open.** It does not raise the "already an
+  instance of HEC-RAS running" prompt (same or other version, with or without
+  `-hideCompute`). `-h` and a bare launch DO raise it — never launch Ras.exe any
+  other way. It computes the NAMED plan and leaves `Current Plan=` alone.
+- **Exit code 0 even when the run fails.** Success is read from the
+  plan HDF: `Solution` (in `Results/Unsteady/Summary`, `Results/Steady/Summary` or
+  `Results/Summary`) must contain "Finished Successfully", and the HDF must be
+  newer than the launch (`no_results` otherwise). A failure has no
+  `Run Time Window`; the report carries the tail of
+  `Results/Summary/Compute Messages (text)`.
+- **Version guard:** `ras_version` is the exact install folder (`'7.0'` is not
+  `'7.0.1'`) and is required. The plan's `.p##.hdf`, its geometry's `.g##.hdf`,
+  and an out-of-batch restart source's `.p##.hdf` must carry that `File Version`,
+  else `RasVersionMismatch` (override `force_version=True`). Evidence: a 7.0.1 run
+  of a 7.0 plan rewrote the SHARED `g03.hdf` and stamped it 7.0.1, and 7.0.1
+  refuses a 7.0 restart file ("The Restart file is not from HEC-RAS 7.0.1").
+  `Program Version=` stayed `7.00` — never use it.
+- **Restart order:** a plan whose unsteady flow has `Use Restart=-1` with
+  `Restart Filename=Base.p##.<stamp>.rst` depends on p##. In-batch producer after
+  consumer -> `RestartOrderError`, or `reorder=True` for a stable topological sort.
+  `Use Restart= 0` with a stored filename is ignored (stored-but-unused pattern).
+- **Not captured:** the geometry "Load Messages" window (e.g. *XS Htab Starting
+  Elevations ... reset to defaults*) shows during `-c` without blocking it and is
+  NOT written to the HDF. Reading it needs window scraping
+  (`LB_GETTEXT` on its `ThunderRT6ListBox`) — left out to keep this simple.
+- **Failures seen from a network drive (TESTING folder, 2026-10-08):**
+  - *Fortran crash* — with the `.dss` held open exclusively, `RasUnsteady.exe`
+    died in `DSS_OPEN` ("forrtl: severe (159)") after the simulation finished.
+    No hang, with or without `-hideCompute`: the error shows in the compute
+    window, which then closes by itself, and Ras.exe exits (~14 s). The plan HDF
+    is REPLACED by one holding only `Results/Summary` (messages, no `Solution`,
+    no results — the old results are gone), and the computed results stay in a
+    `.p##.tmp.hdf` whose `Solution` reads `Running Unsteady`. hack_ras then sees
+    the plan as mid-run (`PlanRunActive`) until that file is removed. The report
+    reason is the `forrtl:` line; the tail carries the traceback.
+  - *Path too long* — a `.p##.tmp.hdf` path of 260 characters made Ras.exe stop
+    on a modal VB "Run-time error 53: File not found" before the solver started,
+    and it hangs until killed (dialog detection below ends it). `prepare_runs` now
+    refuses a `.tmp.hdf` path over 259 characters — minimal by design; a written
+    restart file is 11 characters longer still.
+  - *Share hiccup* — Hillside p05, unchanged, failed twice and then ran ok:
+    once "Geometry Writer Failed" (HDF5 errors writing the geometry), once a
+    hang after RAS could not delete its own `.tmp.hdf` near the end of the run
+    ("Unable to delete temporary results file ... File not found"), which left
+    NO plan HDF at all. That message went only to `<plan>.data_errors.txt`, not
+    the HDF; `run_plans` puts a data_errors file written during the run into
+    the report.
+  - A modal dialog is the one thing that hangs a batch. **Dialog detection**
+    (`kill_on_dialog=True`, the default): every second, standard dialog boxes
+    (class `#32770`) owned by our Ras.exe or its children are listed; one up
+    for 3 s is read (WM_GETTEXT), the run's process tree is killed, and the
+    status is `dialog` with the box's text. Measured: the error-53 runs ended
+    in 5.8 s instead of hanging. RAS's compute window and "Load Messages" are
+    VB forms (`ThunderRT6FormDC`), not `#32770`, so healthy runs of any length
+    are untouched (Hillside p01 and GMF_DFA p17 on X:, no timeout, ran ok).
+    `timeout` stays an optional backstop for a hang that is not a dialog box —
+    as a plain stopwatch it would kill a healthy multi-hour run.
+- **Never the COM controller** (`RAS70.HECRASController`): it attached to the
+  user's open GUI, loaded the project into it, and `QuitRas` closed it; its
+  compute return value said success on a failed run.
+
+Tests: `tests/test_compute.py`. The three real-run tests carry the `ras_compute`
+marker; they run by default and `pytest --skip-ras` leaves them out. The
+dialog-detection test raises a real message box for ~3 s (a Python process
+standing in for Ras.exe) — expected; do not click it.
+
 ## Project Health / Status Inspector (`hack_ras/project/health.py`)
 
 Read-only snapshot of a project — the thing to run to verify state after an
@@ -1034,6 +1125,11 @@ from `hack_ras/geometry/blocks/base.py` to split data lines.
 | `Bank Sta=` | `blocks/xs_bank_sta.py` | `bank_stations: Tuple[float,float]` | left bank, right bank stations |
 | `Levee=` | `blocks/xs_levee.py` | `levee: Levee` | single line; left/right sta+elev, `None` per absent side |
 | `#Block Obstruct=` | `blocks/xs_block_obstruct.py` | `blocked_obstructions: BlockedObstructions` | 8-char triplets `[start,end,elev]`; `normal` (flag 0) / `multiple_block` (flag -1); no `Permanent` follower |
+
+The Manning's field is `CrossSection.manning_def` (a `ManningDef`); there is no
+`CrossSection.manning`. The parser also sets `CrossSection._raw_line_start` /
+`_raw_line_end`, each XS's span in `GeometryFile.raw_lines` — bookkeeping for
+writers and merge, not semantic fields.
 
 ### Parsed non-cross-section blocks
 
@@ -2006,7 +2102,12 @@ RAS's own values to search for. Quirks: no `QuitRas` / `Project_Close` /
 `Output_VariableName`; `Geometry_GetNodes` misbehaves through pywin32 (use
 `Output_GetNodes`); and `Plan_SetCurrent` does NOT refresh the output it serves — set
 `Current Plan=` in a COPY's `.prj` and open a fresh controller per plan. Opening a
-project wrote nothing. Running plans headlessly is TODO §H.
+project wrote nothing. Running 7.0 plans headlessly is `project/compute.py` — see
+**Running Plans**.
+
+**Do not use a RAS COM controller while the user has RAS open.** On 2026-10-08 the
+7.0 / 7.0.1 controllers ATTACHED to the user's running GUI, loaded a scratch project
+into it, and `QuitRas` closed it (TODO §H step 0). The user's ruling: avoid COM.
 
 ## Results Package API (`hack_ras/results/`)
 
@@ -3252,42 +3353,48 @@ and `list_breach_connections` strips the area prefix so the two spellings collap
 entry.
 
 ## Current Work
-*(Last updated: 2026-08-03, session 18 — the list below has NOT been maintained
-since. Subsystems added after it each own a `##` section above: plan settings,
-version detection, culvert groups, breach definitions/results, active flow,
-WSE/depth mapping and raster diffing. `grep "^## " docs/ai_context.md` is the
-reliable index; trust the per-topic sections over this one.)*
-- `results/`, `gis/`, `project/`, and `geometry/shift` packages are complete and in production use
-- `RasProject` is the stable top-level entry point; user scripts reference a `.prj` path
-- `#Sta/Elev=`, `#XS Ineff=`, `#Mann=`, and `Bank Sta=` blocks are now parsed.
-  `CrossSection.sta_elev`, `CrossSection.ineff`, `CrossSection.manning_def`, and
-  `CrossSection.bank_stations` are all populated. (The field is `manning_def`, a
-  `ManningDef`; there is no `CrossSection.manning`.)
-- `CrossSection._raw_line_start` and `CrossSection._raw_line_end` track each XS's
-  position in `GeometryFile.raw_lines` (set by the parser; not semantic fields).
-- `geometry/merge.py` provides `Transform`, `MergeConfig`, `merge_sta_elev()`,
-  `merge_manning()`, `merge_ineff()`, `build_merged_cutline()`, and
-  `write_merged_geometry()` for stitching cross-sections from two geometry files.
-  `write_merged_geometry()` returns `None` — see session 5 below for why the old
-  warnings-list return was removed.
-- `geometry/xs_cutline_blend.py` provides `try_blend_extension()` for using the
-  non-selected geometry's cut line to extend the output cut line rather than straight-line
-  projection, when the two cut lines run in the same general alignment.
-- `geometry/xs_interp.py` is the canonical tool for mapping RAS station values to GIS
-  cut-line XY coordinates; use it for any future station-referenced feature export.
-- XS Editor GUI app lives at `../RAS_xsedit/xsedit.py` (sibling to this repo); built with
-  PySide6 + pyqtgraph; uses the `RAS_xsedit` conda environment. The `hack_ras` test suite
-  uses the `hack_ras` conda environment.
-- `tests/test_geometry_merge.py` covers `write_merged_geometry` using Sterp Creek fixtures
-  in the sibling `RAS_xsedit` repo. See `RAS_xsedit/tests/README.md` for how to add cases.
-- **`SterpCreek.g03` regenerated and verified (2026-07-06)** — the user exported a new
-  g03 from the GUI using a new 5-XS scenario (`RAS_xsedit/tests/xsedit_config.json`:
-  gap segment, B-sourced IFAs, cut-line blend, an extension + truncations) and
-  verified it XS-by-XS in HEC-RAS (`RAS_xsedit/tests/Test_notes.txt`).
-  `_sterp_configs()` in `test_geometry_merge.py` now loads that JSON directly at
-  runtime instead of hardcoding configs, so config/fixture/test can't drift apart
-  silently.  Full suite green: **107 passed, 0 failed, 0 skipped**.
-- Test coverage for `project/catalog.py` and `utils/` modules not yet written
+*(Last updated: 2026-10-08. A one-screen map of what exists; the per-topic `##`
+sections above are the authority, and `grep "^## " docs/ai_context.md` is the
+live index. Open work is `docs/TODO.md`.)*
+
+**State of each package** — all in production use through `hack_ras_scripts/`:
+
+- `project/` — `RasProject` is the stable entry point. File operations for plans,
+  geometries and flows (renumber / insert gap / compact / reorder / clone /
+  retitle / delete), plan settings, `.prj` sync and sorting, `.rasmap` cleanup and
+  sorting (`project.rasmap`), layer associations, breach definitions, the health
+  inspector, and — newest — running plans (`compute.py`, below).
+- `geometry/` — lossless parse/write of `.g##`; cross-section blocks (`#Sta/Elev=`,
+  `#Mann=`, `#XS Ineff=`, `Bank Sta=`, `Levee=`, `#Block Obstruct=`), GIS cut lines,
+  SA/2D connections (`conn_interp.py`), culvert groups, 2D cell seeds; cut-line
+  shifting, the two-geometry merge behind RAS_xsedit (`merge.py`,
+  `xs_cutline_blend.py`), station-to-XY mapping (`xs_interp.py`) and active flow.
+  `Levee=` / `#Block Obstruct=` are PARSE-ONLY (TODO §A).
+- `results/` — plan-HDF readers (2D, connections, bridges, culverts, breaches, pipe
+  networks, pumps, steady XS, volume accounting), the steady `.O##` reader, and the
+  time conventions in `times.py`. Version layouts are probed structurally
+  (`version.py`).
+- `gis/` — WSE/depth mapping and raster differencing (`wse_surface.py`), profile
+  lines, face Manning's n export, line-in-polygon measurement.
+
+**Running plans** (`project/compute.py`, built 2026-10-08) is **HEC-RAS 7.0 and
+later only**, through `Ras.exe -c`. Older versions (4.x, 5.x, 6.x) and any use of
+the COM controller are out of scope by the user's decision (2026-10-08). The
+4.1 material elsewhere in this file is about READING 4.1 output (`.O##`), which
+remains supported.
+
+**Known gaps:** `project/catalog.py` and `utils/logging.py` have no tests
+(`utils/lines.py` and `utils/names.py` do); `plans._family_names` does not know
+RAS's `<plan>.data_errors.txt` or 4.1's `<plan>.comp_msgs.txt` (TODO §H).
+
+**Sibling tools:** the XS Editor GUI is `../RAS_xsedit/xsedit.py` (PySide6 +
+pyqtgraph, `RAS_xsedit` env, its own repo and `CLAUDE.md`);
+`tests/test_geometry_merge.py` reads its Sterp Creek fixtures and
+`xsedit_config.json`. The test suite runs in the `hack_ras` env; the baseline is
+in `dev_rules.md`.
+
+**The dated session log below stops at session 21 (2026-08-24).** Later work is
+recorded in its topic section and in git history, not here.
 
 ### Folder names in the dated entries below are AS OF their date
 
@@ -4089,13 +4196,14 @@ part, not a case worth adding branching for.
 ## Future Features — Not Yet Implemented
 
 **`docs/TODO.md` is the authoritative open-items list — re-read it rather than
-trusting this summary, which has gone stale before.** As of 2026-09-14 it lists
-FOUR open items, in its own priority order: (A) writer / `merge.py` support for
+trusting this summary, which has gone stale before.** As of 2026-10-08 it lists
+THREE open items, in its own priority order: (A) writer / `merge.py` support for
 Blocked Obstructions (`#Block Obstruct=`) and `Levee=` — described just below,
-currently parse-only; (E2) the interior flood-volume peak and (E4) the analysis
-script on top of it, both part of the deferred pipe-network helpers in its §E;
-and (B) dry-run/preview on the mutating ops (LOW PRIORITY). Closed since this
-note was first written: §F cross-mesh result comparison (built 2026-09-14), the
+currently parse-only; (E2) the interior flood-volume peak, part of the deferred
+pipe-network helpers in its §E; and (B) dry-run/preview on the mutating ops (LOW
+PRIORITY). Closed since this note was first written: §H running plans from the
+command line (`project/compute.py`, 2026-10-08), E4 the pumped-vs-gravity script
+(2026-09-22), §F cross-mesh result comparison (built 2026-09-14), the
 E1/E3a pipe readers (built 2026-08-27), the session-13 plan-file-op gaps, the
 session-17 geometry subsystem / rasmap cleanup / health inspector, and — both in
 session 20 — item D (the `flows` subsystem) and item C (the `project.rasmap`
@@ -4127,6 +4235,10 @@ but `active_flow.py` computes active width only.  The `0.0`→edge sentinel is r
 **only for "normal"** features (`_resolve_area`); "multiple_block" stations are literal.
 
 ### `geometry/merge.py` — design notes (2026-06-24)
+
+`geometry/xs_cutline_blend.py` `try_blend_extension()` extends the output cut line
+with the non-selected geometry's cut line, rather than a straight-line
+projection, when the two cut lines run in the same general alignment.
 
 **Station/elevation merging — see session 5 (2026-07-01) above for the current design.**
 `merge_sta_elev()` now guarantees a vertex at every segment's start station via
