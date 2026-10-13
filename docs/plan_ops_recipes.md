@@ -129,8 +129,9 @@ report = compute.run_plans(project, "1-20", "7.0")
 print(compute.format_report(report))
 ```
 
-Each plan prints a line as it runs, with 10% marks for the unsteady simulation
-(`progress=False` silences it).
+Each plan prints a header, then one line per phase as it happens (mesh or 1D
+tables, initial conditions, warm-up, simulation, post-processing, stored maps)
+with 10% marks, start times and durations (`progress=False` silences it).
 
 Options: `reorder=True` (move restart producers ahead of their consumers),
 `hide_compute=False` (show RAS's compute window), `timeout=<seconds>` (optional

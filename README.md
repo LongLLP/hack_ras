@@ -22,7 +22,7 @@ Project files and plan management (hack_ras/project/):
 5. .prj sync and sorting, and .rasmap layer cleanup and sorting.
 6. Project health inspector — read-only inventory of plans/geometries/flows with cross-references, layer associations (terrain, Manning's n, infiltration), and consistency checks (orphan files, stale .prj entries, duplicate titles, unused files, .rasmap problems, active runs).
 7. Breach definitions — decodes every Breach Loc/Geom/Start field of a plan.
-8. Run plans headlessly — HEC-RAS 7.0 and later only: Ras.exe -c per plan, success read from the results HDF, exact-version guard, restart-order check, and detection of runs stopped on an error dialog, and a console line per plan with percent complete.
+8. Run plans headlessly — HEC-RAS 7.0 and later only: Ras.exe -c per plan, success read from the results HDF, exact-version guard, restart-order check, and detection of runs stopped on an error dialog, and live console progress per plan, phase by phase (mesh/1D tables, initial conditions, warm-up, simulation, post-processing, stored maps) with percent complete and durations.
 
 Geometry files (hack_ras/geometry/):
 9. Geometry parsing with lossless round-trip write-back — rivers/reaches, cross sections (station/elevation, Manning's n, ineffective flow areas, bank stations, levees, blocked obstructions), GIS cut lines, SA/2D connections, culvert groups, and 2D cell-seed points.
@@ -80,7 +80,7 @@ docs/TODO.md is the authoritative list. As of 2026-10-08 the open items are:
 1. A writer (and merge support) for blocked obstructions and levees, which are parsed but not yet written.
 2. The interior flood-volume peak for pipe-network analysis.
 3. A dry-run/preview mode for the file operations (low priority).
-4. Progress for the geometry-preprocessing phase of plan runs (the unsteady phase already shows percent complete).
+4. Optional progress-display details for plan runs (mesh-table percent, per-map progress, structure names).
 
 Out of scope: running plans in HEC-RAS versions older than 7.0, and any use of the HEC-RAS COM controller.
 

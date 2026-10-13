@@ -56,6 +56,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import subprocess
 import time
 
@@ -478,70 +479,209 @@ def _dialogs_of(pids: set[int]) -> dict[int, str]:
     return found
 
 
-def _unet_progress(pids: set[int], state: dict):
-    """Fraction complete (0-1) of the unsteady simulation, read from RAS's own
-    compute window, or None when not (yet) available.
+# --- Phase progress, read from RAS's own (hidden) compute window -----------
+#
+# RAS's "HEC-RAS Computations" window exists under -hideCompute (just not
+# visible) and keeps plain text boxes current for every phase. Measured by
+# sampling every box every 0.2 s (Hillside p10 2026-10-08; Current_Model_TESTING
+# p01 2026-10-13, after a g01 mesh edit, with an initial-conditions time and two
+# stored maps; Bald Eagle p01 2026-10-13, 1D with bridges and a post-processor):
+#
+#   phase                 what shows it                                 progress
+#   mesh tables           'Processing 2D Face Profiles (1/4) (RockCr)'  step n/4 per 2D
+#                         ... '(4/4)'; 'txtGeomProg' = fraction OF THE  area (the fraction
+#                         STEP (0.04 -> 1), reset each step             resets, so unused)
+#   1D tables             'txtHtabProg' between 0 and 1 (Bald Eagle     overall fraction
+#                         p01, 2026-10-13: 46 s, ~5 s per bridge, 50    .026 -> 1
+#                         curves each; siblings show river/reach/RS,
+#                         node type and 'Submerged Curves 4/50')
+#   initial conditions    label '<area> initial conditions' (also       'txtUnetProg'
+#                         'initializing 2D Area(s)' just before)        .10 -> .875
+#   warm-up               label 'Unsteady Flow Warmup' (1D: 100,000      'txtUnetProg'
+#                         steps took 5 s; 1D shows 'Initializing' first)  .0008 -> .94
+#   simulation            label 'Unsteady Flow Computations'            'txtUnetProg'
+#                                                                       0 -> .99/1.0
+#   post-processing       'txtPostProcProg' > 0 (1D; RasSteady.exe),     fraction
+#                         label still 'Unsteady Flow Computations'     .04 -> 1.0
+#   stored maps           status 'Computing Stored Results Maps', then   map names
+#                         "Generating stored map: 'WSE (Max)'",
+#                         'Processing Terrain File 1 of 2',
+#                         'File 2 of 2: 60% processed (Map Generation)'
+#                         — while the label STILL reads 'Unsteady Flow
+#                         Computations', so maps are checked first
+#                         (p01 with 2 stored maps on 2 terrain files: ~13 s).
+#                         The trigger is ONLY 'Computing Stored Results Maps',
+#                         which the message log keeps once written: a generic
+#                         'Processing Terrain File' seen before the simulation
+#                         would otherwise skip ahead, and phases never go back.
+#
+# The label, step and status are found by their TEXT and the fraction boxes by
+# the placeholder each holds until first written (its own control name), so
+# nothing depends on control order. The SAME 'txtUnetProg' box carries the
+# initial-conditions ramp before the simulation's own 0 -> 1 — read blindly it
+# printed '10..60..' within seconds of p10 starting; the label tells them apart.
+# A steady plan, or a RAS that renames these, simply shows no phases.
 
-    Measured 2026-10-08 on Hillside p10 (13.5 min): the "HEC-RAS Computations"
-    window exists even under -hideCompute (just not visible), and its
-    "Unsteady Flow Simulation" panel has a text box that holds its own name,
-    'txtUnetProg', until the solver starts, then a fraction — '.4000579E-01',
-    '.2900984', ... in steps of 0.01 — reaching '1.000000' as RasUnsteady.exe
-    exits. That placeholder is how the box is found (once, then remembered in
-    `state`), so this does not depend on the window's control order. A steady
-    plan has no such box and a future RAS may rename it; either way this
-    returns None and nothing is shown. The geometry preprocessor has the same
-    kind of box ('txtHtabProg') — a future feature (TODO §I).
+_PLACEHOLDERS = ("txtUnetProg", "txtHtabProg", "txtPostProcProg")
+_STEP = re.compile(r"^Processing .*\((\d+)/(\d+)\) \((.+)\)$")
+# Each 'Generating stored map' status lasts < 1 s (missed by a 1 s poll), so map
+# names are read from the window's full message log, which keeps every line.
+_MAP_NAME = re.compile(r"Generating stored map: '([^']+)'")
 
-    The SAME box first shows other phases (fast probe of Hillside p01,
-    2026-10-13, sampled every 0.2 s): with a sibling label reading
-    'RockCr initial conditions' it ran .10 -> .875, then 'Unsteady Flow
-    Warmup' .14, and only under 'Unsteady Flow Computations' did it run
-    .00 -> .99 for the real simulation. Reading it blindly printed '10..'
-    through '60..' within seconds of p10 starting. So a value counts only
-    while some control in the window reads exactly 'Unsteady Flow
-    Computations' — found by its text, not its position, and remembered."""
+
+def _frac(text):
+    try:
+        return min(max(float(text), 0.0), 1.0)
+    except (TypeError, ValueError):            # placeholder, blank or absent
+        return None
+
+
+def _phase_of(texts: list[str], boxes: dict[str, str]):
+    """Current phase of a run from its compute window's control texts —
+    ``(name, details, fraction)`` or None. ``details`` is a list of
+    ``(group, item)`` pairs printed as the phase goes: [('RockCr', '1/4')]
+    for a mesh-table step, [('', "'WSE (Max)'"), ...] for the stored maps
+    generated so far. ``boxes`` maps a placeholder name ('txtUnetProg',
+    'txtHtabProg', 'txtPostProcProg') to that box's current text. Pure."""
+    if any("Computing Stored Results Maps" in t for t in texts):
+        names = []
+        for t in texts:
+            for name in _MAP_NAME.findall(t):
+                if name not in names:
+                    names.append(name)
+        return ("stored maps", [("", f"'{n}'") for n in names], None)
+    post = _frac(boxes.get("txtPostProcProg"))
+    if post is not None and post > 0.0:       # label still says computations
+        return ("post-processing", [], post)
+    for t in texts:
+        if t == "Unsteady Flow Computations":
+            return ("simulation", [], _frac(boxes.get("txtUnetProg")))
+        if t == "Unsteady Flow Warmup":
+            return ("warm-up", [], _frac(boxes.get("txtUnetProg")))
+        if t.endswith(" initial conditions") or t == "initializing 2D Area(s)":
+            return ("initial conditions", [], _frac(boxes.get("txtUnetProg")))
+    htab = _frac(boxes.get("txtHtabProg"))
+    if htab is not None and 0.0 < htab < 1.0:
+        return ("1D tables", [], htab)
+    for t in texts:
+        m = _STEP.match(t)
+        if m:
+            return ("mesh tables", [(m.group(3), f"{m.group(1)}/{m.group(2)}")], None)
+    return None
+
+
+def _read_window(pids: set[int], state: dict):
+    """(texts, boxes) for the compute window of our run, or None before it
+    exists. The window and each placeholder box are remembered in `state`."""
     import ctypes
     u32 = ctypes.windll.user32
-    box = state.get("box")
-    if box is None:
-        for h, _cls in _windows_of(pids, visible_only=False):
-            if _win_text(h) == "HEC-RAS Computations":
-                for c in _children_of(h):
-                    if _win_text(c) == "txtUnetProg":
-                        state["window"], state["box"] = h, c
-                        box = c
-                        break
-            if box:
-                break
-        if box is None:
+    win = state.get("window")
+    if win is None or not u32.IsWindow(win):
+        win = next((h for h, _c in _windows_of(pids, visible_only=False)
+                    if _win_text(h) == "HEC-RAS Computations"), None)
+        if win is None:
             return None
-    if not u32.IsWindow(box):
-        return None
-    label = state.get("label")
-    if label is None:
-        label = next((c for c in _children_of(state["window"])
-                      if _win_text(c) == "Unsteady Flow Computations"), None)
-        if label is None:                   # still initial conditions / warm-up
-            return None
-        state["label"] = label
-    if _win_text(label) != "Unsteady Flow Computations":
-        return None
-    try:
-        return min(max(float(_win_text(box)), 0.0), 1.0)
-    except ValueError:                      # still the placeholder, or blank
-        return None
+        state.clear()
+        state["window"] = win
+    kids = _children_of(win)
+    texts = [_win_text(k) for k in kids]
+    for kid, text in zip(kids, texts):
+        if text in _PLACEHOLDERS:
+            state.setdefault(text, kid)
+    boxes = {name: texts[kids.index(state[name])]
+             for name in _PLACEHOLDERS if state.get(name) in kids}
+    return texts, boxes
+
+
+def _took(secs: float) -> str:
+    return f"{secs:.0f} s" if secs < 120 else f"{secs / 60:.1f} min"
+
+
+class _PhaseLog:
+    """Prints a plan's phases, one line each, as they happen:
+
+        13:33:37 mesh tables RockCr 1/4 3/4 4/4   5 s
+        13:33:46 initial conditions 10..20..30..40..50..60..70..80..90..100%   14 s
+        13:34:00 simulation 10..20..30..40..50..60..70..80..90..100%   96 s
+        13:35:36 stored maps 'WSE (Max)' 'Depth (Max)'   20 s
+
+    A phase's line is closed (duration printed) when the next phase starts
+    or the run ends. A phase shorter than one poll is never seen.
+
+    Phases only move FORWARD: a phase that has ended is never reopened. After
+    the stored maps the window's label still reads 'Unsteady Flow
+    Computations' and its status shows GDAL chatter ('0...10...100 - done.'),
+    which once printed a second 'simulation' line; with this rule those last
+    seconds count toward the maps."""
+    INDENT = "      "
+
+    def __init__(self):
+        self.phase, self.started, self.shown, self.steps = None, 0.0, 0, []
+        self.fracs = 0
+        self.ended = set()
+
+    def update(self, phase) -> None:
+        if phase is None or phase[0] in self.ended:
+            return
+        name, details, frac = phase
+        if name != self.phase:
+            # RAS starts each phase only after the previous one finished, so
+            # moving on means the previous phase reached its end even when
+            # its last value seen was short of it (simulation .9925, initial
+            # conditions .875, warm-up .94 — the box is reused, not filled).
+            if self.shown:
+                self._marks(1.0)
+            self._close()
+            self.phase, self.started, self.shown, self.steps = name, time.time(), 0, []
+            self.fracs = 0
+            print(f"{self.INDENT}{time.strftime('%H:%M:%S')} {name}", end="", flush=True)
+        for detail in details:
+            if detail in self.steps:
+                continue
+            group, item = detail
+            same_group = self.steps and self.steps[-1][0] == group
+            print(f" {item}" if same_group or not group else f" {group} {item}",
+                  end="", flush=True)
+            self.steps.append(detail)
+        # A phase's FIRST fraction reading is skipped: RAS leaves a stray
+        # value as a box changes hands — Bald Eagle's post-processor read
+        # '0.400' then '0.040', its 'Initializing' step '.6000000'. Read
+        # blindly, that prints '10..20..30..40..' at once.
+        if frac is not None:
+            self.fracs += 1
+            if self.fracs > 1:
+                self._marks(frac)
+
+    def _marks(self, frac: float) -> None:
+        mark = int(frac * 10 + 1e-9)
+        for m in range(self.shown + 1, mark + 1):
+            lead = " " if m == self.shown + 1 and self.shown == 0 else ""
+            print(f"{lead}{m * 10}{'..' if m < 10 else '%'}", end="", flush=True)
+        self.shown = max(self.shown, mark)
+
+    def finish(self, ok: bool) -> None:
+        # The 1 s poll can miss the last value (Hillside p01 stopped at '90..'):
+        # a run that finished ok completed its last phase too. A failed run
+        # keeps the mark it reached.
+        if ok and self.shown:
+            self._marks(1.0)
+        self._close()
+
+    def _close(self) -> None:
+        if self.phase is not None:
+            print(f"   {_took(time.time() - self.started)}", flush=True)
+            self.ended.add(self.phase)
+        self.phase = None
 
 
 def _wait_watching(proc, timeout, grace: float, poll: float = 1.0,
-                   on_progress=None):
+                   on_poll=None):
     """Wait for proc. Returns (None, "") when it exits by itself,
     ("timeout", "") past timeout, or ("dialog", text) when a dialog box owned
     by its process tree has stayed up `grace` seconds. Kills nothing.
-    `on_progress(fraction)` is called each poll with the unsteady simulation's
-    fraction complete whenever RAS shows one."""
+    `on_poll(pids)` is called each poll with the run's process tree."""
     t0 = time.time()
-    first_seen, state = {}, {}
+    first_seen = {}
     while True:
         try:
             proc.wait(timeout=poll)
@@ -551,13 +691,11 @@ def _wait_watching(proc, timeout, grace: float, poll: float = 1.0,
         now = time.time()
         if timeout is not None and now - t0 >= timeout:
             return "timeout", ""
-        if grace is None and on_progress is None:
+        if grace is None and on_poll is None:
             continue
         tree = _process_tree(proc.pid)
-        if on_progress is not None:
-            frac = _unet_progress(tree, state)
-            if frac is not None:
-                on_progress(frac)
+        if on_poll is not None:
+            on_poll(tree)
         if grace is None:
             continue
         dialogs = _dialogs_of(tree)
@@ -567,26 +705,10 @@ def _wait_watching(proc, timeout, grace: float, poll: float = 1.0,
                 return "dialog", dialogs[h]
 
 
-def _ten_percent_marks():
-    """on_progress callback for one plan: prints each new 10% mark on the
-    plan's console line — '10..20..30..' and '100%' — never repeating one.
-    ``.shown`` is the highest mark printed (0-10)."""
-    def on_progress(frac: float) -> None:
-        mark = int(frac * 10 + 1e-9)
-        for m in range(on_progress.shown + 1, mark + 1):
-            print(f"{m * 10}.." if m < 10 else "100% ", end="", flush=True)
-        on_progress.shown = max(on_progress.shown, mark)
-
-    on_progress.shown = 0
-    return on_progress
-
-
 def _progress_end(run: dict) -> str:
-    """End of a plan's progress line: 'ok in 6.2 min (13:04)', plus the reason
-    when it did not finish."""
-    secs = run["seconds"] or 0.0
-    took = f"{secs:.0f} s" if secs < 120 else f"{secs / 60:.1f} min"
-    line = f"{run['status']} in {took} ({time.strftime('%H:%M')})"
+    """A plan's closing progress line: 'ok in 6.2 min (13:04)', plus the
+    reason when it did not finish."""
+    line = f"{run['status']} in {_took(run['seconds'] or 0.0)} ({time.strftime('%H:%M')})"
     why = " - ".join(x for x in (run["solution"], run["reason"]) if x)
     return line if run["status"] == "ok" or not why else f"{line}: {why[:150]}"
 
@@ -609,10 +731,11 @@ def run_plans(project: RasProject, spec, ras_version: str,
     box — status 'dialog', the box's text as the reason — and never touches a
     healthy run however long it takes. ``timeout`` (seconds, per plan; None =
     no limit) is an optional wall-clock backstop. Both kill only the process
-    tree this function started. ``progress`` (default on) prints one line per
-    plan as it starts and ends — '[2/4] p11 FC 010year ... ok in 6.2 min
-    (13:04)' — so a console shows where a long batch is without any logging
-    setup; the same events also go to the module logger.
+    tree this function started. ``progress`` (default on) prints, per plan, a
+    header line, one line per phase as it happens (start time, progress,
+    duration — see ``_PhaseLog``) and a closing 'ok in 6.2 min (13:04)', so a
+    console shows where a long batch is without any logging setup; plan
+    starts and ends also go to the module logger.
 
     Returns ``{'ras_exe', 'ras_version', 'order', 'version_mismatches',
     'runs', 'unlisted_results'}``. Each run is ``{'plan', 'title', 'status',
@@ -650,13 +773,19 @@ def run_plans(project: RasProject, spec, ras_version: str,
         cmd = f'"{exe}" -c "{prj}" "{ppath}"' + (" -hideCompute" if hide_compute else "")
         logger.info("running %s (%s) in HEC-RAS %s", pid, run["title"], ras_version)
         if progress:
-            print(f"[{i}/{n}] {pid} {run['title']} ... ", end="", flush=True)
+            print(f"[{i}/{n}] {pid} {run['title']}", flush=True)
         t0 = time.time()
         proc = subprocess.Popen(cmd)
-        marks = _ten_percent_marks() if progress else None
+        phases, window = (_PhaseLog(), {}) if progress else (None, None)
+        on_poll = None
+        if progress:
+            def on_poll(tree):
+                got = _read_window(tree, window)
+                if got:
+                    phases.update(_phase_of(*got))
         stop, dialog = _wait_watching(proc, timeout,
                                       _DIALOG_GRACE if kill_on_dialog else None,
-                                      on_progress=marks)
+                                      on_poll=on_poll)
         if stop:
             _kill_tree(proc.pid)
             proc.wait()
@@ -707,12 +836,8 @@ def run_plans(project: RasProject, spec, ras_version: str,
         else:
             logger.info("%s ok in %.1f s", pid, run["seconds"])
         if progress:
-            # RAS writes 1.000000 just before the solver exits, so the 1 s poll
-            # can miss it (Hillside p01 stopped at '90..'). A run that finished
-            # successfully did reach the end of its window: finish the marks.
-            if run["status"] == "ok" and marks.shown:
-                marks(1.0)
-            print(_progress_end(run), flush=True)
+            phases.finish(run["status"] == "ok")
+            print(f"{_PhaseLog.INDENT}{_progress_end(run)}", flush=True)
 
     return {"ras_exe": exe, "ras_version": str(ras_version),
             "order": prep["order"],

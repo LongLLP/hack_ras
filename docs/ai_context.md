@@ -981,33 +981,67 @@ compute.prepare_runs(project, "5-24", "7.0")   # all the checks, nothing launche
 compute.run_plans(project, "5-24", "7.0", hide_compute=False)  # show RAS's compute window
 ```
 
-**Console progress** (`progress=True`, the default) — one line per plan, no
-logging setup needed, with 10% marks for the unsteady simulation:
+**Console progress** (`progress=True`, the default) — per plan, a header, one line
+per phase as it happens (start time, progress, duration), and a closing line; no
+logging setup needed. Real output (2026-10-13):
 
 ```
-[1/4] p10 FC 002year ... 10..20..30..40..50..60..70..80..90..100% ok in 13.5 min (14:12)
-[2/4] p11 FC 010year ... failed in 12 s (14:12): Error Processing Geometry
+[1/1] p01 Hist 1998 max depth                          <- Current_Model_TESTING, mesh edited
+      14:13:36 mesh tables RockCr 1/4 4/4   7 s
+      14:13:44 initial conditions 10..20..30..40..50..60..70..80..90..100%   16 s
+      14:13:59 simulation 10..20..30..40..50..60..70..80..90..100%   58 s
+      14:14:57 stored maps 'WSE (Max)' 'Depth (01JAN2025 00:30:00)'   22 s
+      ok in 105 s (14:15)
+[1/1] p01 Unsteady with Bridges and Dam                <- Bald Eagle, 1D, inputs only
+      14:35:32 1D tables 10..20..30..40..50..60..70..80..90..100%   47 s
+      14:36:19 warm-up 10..20..30..40..50..60..70..80..90..100%   5 s
+      14:36:24 simulation 10..20..30..40..50..60..70..80..90..100%   3 s
+      14:36:28 post-processing 10..20..30..40..50..60..70..80..90..100%   7 s
+      ok in 64 s (14:36)
+[2/4] p11 FC 010year
+      failed in 12 s (14:12): Error Processing Geometry
 [3/4] p12 FC 050year ... skipped: restarts from p11, which did not finish
 ```
 
-The percent is RAS's own, read from its compute window, which exists under
-`-hideCompute` — just not visible. Probe of Hillside p10 (2026-10-08, 13.5 min):
-the "Unsteady Flow Simulation" panel's text box holds its own name
-`txtUnetProg` until the solver starts, then a fraction (`.4000579E-01`,
-`.2900984`, ... in 0.01 steps) reaching `1.000000` as `RasUnsteady.exe` exits;
-neighbors hold the simulation clock (`11:19:05`), date (`01JAN2025`) and hours
-simulated (`14.0864`). `_unet_progress` finds the box by that placeholder, so it
-does not depend on control order, and returns None — nothing shown — for a steady
-plan or a RAS that renames it. The same box first shows OTHER phases (fast probe,
-Hillside p01, 2026-10-13): under a sibling label `RockCr initial conditions` it ran
-.10 -> .875, then `Unsteady Flow Warmup` .14, and only under `Unsteady Flow
-Computations` .00 -> .99 — read blindly, p10 printed `10..`-`60..` in its first
-seconds. So a value counts only while a control reads exactly `Unsteady Flow
-Computations`. The last value RAS shows can be `.9925`, never `1.000000`, so an
-`ok` run completes its marks to 100%. It is percent of SIMULATION time, not wall-clock: a
-plan that slows down late (a breach opening) passes 50% early. Window text is
-read with `SendMessageTimeoutW` (500 ms), so a busy RAS cannot stall the poll.
-Geometry-preprocessing progress (`txtHtabProg`) is TODO §I.
+Everything comes from RAS's own compute window, which exists under
+`-hideCompute` — just not visible — and keeps plain text boxes current. Found by
+sampling every box every 0.2 s on Hillside p10 / `Current_Model_TESTING` p01 (2D,
+mesh edit, initial-conditions time, two stored maps) and Bald Eagle p01 (1D, 10
+bridges, an inline weir, 100,000 warm-up steps); the phase table is in the
+`compute.py` comment above `_phase_of`. Rules that each came from a wrong display:
+
+- **Boxes are found by text, not position.** Each progress box holds its own
+  control name (`txtUnetProg`, `txtHtabProg`, `txtPostProcProg`) until first
+  written; labels and statuses are matched by their text.
+- **One box serves several phases.** `txtUnetProg` carries the
+  initial-conditions ramp (.10 -> .875), then the warm-up, then the simulation
+  (0 -> .99). Read blindly, p10 printed `10..`-`60..` in its first seconds; the
+  phase label (`<area> initial conditions` / `Unsteady Flow Warmup` /
+  `Unsteady Flow Computations`) says which.
+- **The label lies after the simulation.** It still reads `Unsteady Flow
+  Computations` during post-processing and stored maps, so those are checked
+  first, and phases only move FORWARD — GDAL chatter at the end of the maps once
+  produced a second "simulation" line.
+- **Stored-map names come from the full message log.** Each
+  `Generating stored map: '<name>'` status lasts < 1 s; the log keeps it. The
+  phase itself starts only on the log's `Computing Stored Results Maps` — never
+  on generic statuses like `Processing Terrain File 1 of 2`, which, seen before
+  the simulation, would skip it for good (phases never go back). Maps
+  are only computed when "Floodplain Mapping" is checked in the plan AND the
+  `.rasmap` defines stored maps for that result (RAS Mapper drops a plan's
+  results layer when its geometry changes; none defined -> the phase is instant).
+- **A phase's first fraction is skipped** — RAS leaves a stray value as a box
+  changes hands (`0.400` then `0.040`; `.6000000` under `Initializing`).
+- **Moving on completes the previous phase to 100%**, and so does an `ok` run's
+  last phase: RAS's last value can be `.875`/`.94`/`.9925` and the 1 s poll can
+  miss `1.000000`. A failed run keeps the mark it reached.
+- Percent is of SIMULATION time, not wall-clock: a plan that slows down late (a
+  breach opening) passes 50% early. A phase shorter than one poll is not shown
+  (the mesh-table steps 2/4 and 3/4 above). Window text is read with
+  `SendMessageTimeoutW` (500 ms), so a busy RAS cannot stall the poll.
+- Not shown (yet): a percent for mesh tables (`txtGeomProg` is per-step and
+  resets), per-map progress, and the structure names behind a long 1D-tables
+  phase — TODO §I.
 
 `hide_compute=False` drops `-hideCompute`: each run's "HEC-RAS Computations"
 window shows live progress and messages (Fortran errors included), then closes
@@ -4229,7 +4263,7 @@ FOUR open items, in its own priority order: (A) writer / `merge.py` support for
 Blocked Obstructions (`#Block Obstruct=`) and `Levee=` — described just below,
 currently parse-only; (E2) the interior flood-volume peak, part of the deferred
 pipe-network helpers in its §E; (B) dry-run/preview on the mutating ops (LOW
-PRIORITY); and (I) geometry-preprocessing progress in `run_plans`. Closed since this note was first written: §H running plans from the
+PRIORITY); and (I) the remaining progress-display details in `run_plans`. Closed since this note was first written: §H running plans from the
 command line (`project/compute.py`, 2026-10-08), E4 the pumped-vs-gravity script
 (2026-09-22), §F cross-mesh result comparison (built 2026-09-14), the
 E1/E3a pipe readers (built 2026-08-27), the session-13 plan-file-op gaps, the

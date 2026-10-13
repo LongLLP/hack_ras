@@ -12,7 +12,8 @@ Four items are open as whole pieces of work. In rough priority:
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
 2. **Interior flood-volume peak (E2)** — §E below.
 3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
-4. **Geometry-preprocessing progress in `run_plans`** (requested 2026-10-13) — §I below.
+4. **Progress-display details in `run_plans`** (LOW PRIORITY; phase display built
+   2026-10-13) — §I below.
 
 **§H (run plans from the command line) is DONE for RAS 7.0** — built 2026-10-08 as
 `project/compute.py`; see its section in `ai_context.md`. Small follow-up found
@@ -505,22 +506,28 @@ the `.prj` and open a fresh controller per plan.
 
 ---
 
-### I. Geometry-preprocessing progress in `run_plans` — OPEN (requested 2026-10-13)
+### I. Progress-display details in `run_plans` — mostly DONE 2026-10-13
 
-`run_plans(progress=True)` prints 10% marks for the UNSTEADY simulation only, read
-from the `txtUnetProg` text box of RAS's (hidden) "HEC-RAS Computations" window
-(`compute._unet_progress`). The user wants the geometry preprocessor covered too —
-large 2D meshes can spend real time there before any percent appears.
+Built: `run_plans(progress=True)` prints one line per phase — mesh tables (2D area
+and step n/4), 1D tables, initial conditions, warm-up, simulation,
+post-processing, stored maps (names) — with 10% marks where RAS shows a fraction,
+start times and durations. Design and evidence: `ai_context.md`, Running Plans,
+and the phase table above `compute._phase_of`.
 
-What is already known (Hillside p10 probe, 2026-10-08): the same window has a
-"Geometry Processor" panel with a text box whose placeholder is `txtHtabProg`; it
-read `1.000000` once preprocessing finished (that plan's tables were current, so
-the phase took seconds and no intermediate values were seen). Before building:
-probe a plan whose property tables must be recomputed (e.g. after a terrain or
-mesh edit) to confirm intermediate fractions appear, then show it as its own
-phase on the console line (e.g. `geometry 50..100% unsteady 10..20..`). The other
-panels have placeholders too (`txtPostProcProg`, `txtMapProg`, `txtWQnetProg`,
-`txtADHProg`) if ever wanted.
+Left, all optional and LOW PRIORITY:
+
+- **Mesh-tables percent.** `txtGeomProg` is the fraction of the CURRENT step and
+  resets each step (0.04 -> 1 within 'Processing 2D Cells (4/4)'), so only the
+  step numbers are shown. A combined percent would need the steps' relative cost.
+- **Per-map progress.** The status shows 'File 2 of 2: 60% processed (Map
+  Generation)'; `txtMapProg` ran 15 -> 19, reset to 11 at the next map, then 100 —
+  its meaning is not pinned down. Durations and names are shown today.
+- **Which structure a long 1D-tables phase is on.** Siblings of `txtHtabProg`
+  show river / reach / RS / node type ('Bridge') and the curve family and count
+  ('Submerged Curves 4/50'); Bald Eagle spent ~5 s per bridge. Could list the
+  bridges as they pass, or name the slowest at the end.
+- The Hillside mesh edits never made the table phase long (7 s at most); a
+  minutes-long rebuild has not been watched.
 
 ---
 

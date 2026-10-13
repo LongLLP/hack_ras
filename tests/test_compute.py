@@ -85,37 +85,132 @@ class TestFailureLine(unittest.TestCase):
         self.assertEqual(compute._failure_line(None), "")
 
 
-class TestPercentDisplay(unittest.TestCase):
-    """Percent complete, read from RAS's hidden compute window (probe of
-    Hillside p10, 2026-10-08: 'txtUnetProg' placeholder, then a fraction)."""
+class TestPhaseProgress(unittest.TestCase):
+    """Phase lines read from RAS's hidden compute window. Texts below are as
+    RAS showed them (probes of Hillside p10 2026-10-08 and
+    Current_Model_TESTING p01 2026-10-13)."""
 
-    def test_ten_percent_marks(self):
+    def test_phase_of(self):
+        P = compute._phase_of
+        unet = {"txtUnetProg": ".2900984"}
+        self.assertIsNone(P(["txtMessages", "txtGeomProg", ""], {"txtUnetProg": "txtUnetProg"}))
+        self.assertEqual(P(["0.84", "Processing 2D Face Profiles (1/4) (RockCr)"], {}),
+                         ("mesh tables", [("RockCr", "1/4")], None))
+        self.assertEqual(P(["Processing 2D Cells (4/4) (RockCr)"], {}),
+                         ("mesh tables", [("RockCr", "4/4")], None))
+        self.assertEqual(P([""], {"txtHtabProg": ".5000000"}), ("1D tables", [], 0.5))
+        self.assertIsNone(P([""], {"txtHtabProg": "1.000000"}))      # finished: not a phase
+        self.assertEqual(P(["RockCr initial conditions"], {"txtUnetProg": ".8752778"}),
+                         ("initial conditions", [], 0.8752778))
+        self.assertEqual(P(["Unsteady Flow Warmup"], {"txtUnetProg": ".5608000E-01"}),
+                         ("warm-up", [], 0.05608))
+        # 1D (Bald Eagle p01): overall 1D-table fraction, Fortran exponent form
+        self.assertEqual(P(["Bridge", "103245", "Submerged Curves"],
+                           {"txtHtabProg": ".2567475E-01"}), ("1D tables", [], 0.02567475))
+        # post-processor runs after the simulation; the label still says computations
+        self.assertEqual(P(["Unsteady Flow Computations"],
+                           {"txtUnetProg": "1.000000", "txtPostProcProg": "0.342"}),
+                         ("post-processing", [], 0.342))
+        self.assertEqual(P(["Unsteady Flow Computations"],
+                           {"txtUnetProg": ".5", "txtPostProcProg": "txtPostProcProg"})[0],
+                         "simulation")                  # placeholder: no post-processing yet
+        self.assertEqual(P(["Unsteady Flow Computations"], unet),
+                         ("simulation", [], 0.2900984))
+        # the step label lingers after the tables; the later phase wins
+        self.assertEqual(P(["Processing 2D Cells (4/4) (RockCr)", "Unsteady Flow Computations"],
+                           unet)[0], "simulation")
+        # the label still reads 'Unsteady Flow Computations' while maps are written
+        sim = "Unsteady Flow Computations"
+        self.assertEqual(P([sim, "Computing Stored Results Maps"], unet),
+                         ("stored maps", [], None))
+        # map statuses alone do NOT start the phase — only the log's 'Computing
+        # Stored Results Maps' does, so terrain work seen before the simulation
+        # cannot skip it (phases never go back)
+        for status in ("Processing Terrain File 1 of 2",
+                       "File 2 of 2: 60% processed (Map Generation)"):
+            self.assertEqual(P([sim, status], unet)[0], "simulation", status)
+            self.assertEqual(P(["Processing Terrain File 1 of 2"], {}), None)
+        # map names come from the full message log (each status lasts < 1 s);
+        # RAS logs a name more than once — listed once, in order
+        log = ("Plan: 'Hist 1998 max depth' ... Finished Unsteady Flow Simulation "
+               "Computing Stored Results Maps Generating stored map: 'WSE (Max)' "
+               "Processing Terrain File 1 of 2 Generating stored map: 'WSE (Max)' "
+               "Generating stored map: 'Depth (01JAN2025 01:30:00)' "
+               "File 2 of 2: 60% processed (Map Generation)")
+        self.assertEqual(P([sim, "0...10...20...30...40...50...60...70...80...90...100 - done.",
+                            log], unet),
+                         ("stored maps", [("", "'WSE (Max)'"),
+                                          ("", "'Depth (01JAN2025 01:30:00)'")], None))
+
+    def test_phase_log_lines(self):
         import contextlib
         import io
         out = io.StringIO()
-        show = compute._ten_percent_marks()
+        log = compute._PhaseLog()
+        wse, depth = ("", "'WSE (Max)'"), ("", "'Depth (Max)'")
+        seq = [("mesh tables", [("RockCr", "1/4")], None), ("mesh tables", [("RockCr", "1/4")], None),
+               ("mesh tables", [("RockCr", "3/4")], None), ("mesh tables", [("Interior", "1/4")], None),
+               ("initial conditions", [], 0.1), ("initial conditions", [], 0.875),
+               ("simulation", [], 0.0), ("simulation", [], 0.2900984),
+               ("simulation", [], 0.29), ("simulation", [], 0.9925397),
+               ("stored maps", [], None), ("stored maps", [wse], None),
+               ("stored maps", [wse, depth], None),
+               # after the maps the label still says simulation: never reopened
+               ("simulation", [], 1.0)]
         with contextlib.redirect_stdout(out):
-            # values as RAS wrote them, plus a repeat and a 7-mark jump
-            for v in (0.04000579, 0.1000289, 0.2900984, 0.29, 0.9503762, 1.0, 1.0):
-                show(v)
-        self.assertEqual(out.getvalue(), "10..20..30..40..50..60..70..80..90..100% ")
-        self.assertEqual(show.shown, 10)
-        # the 1 s poll can miss RAS's final 1.000000 (Hillside p01 stopped at
-        # '90..'); run_plans then completes the marks for an 'ok' run
-        late = compute._ten_percent_marks()
+            for ph in seq:
+                log.update(ph)
+            log.update(None)                          # no window this poll: nothing
+            log.finish(ok=True)                       # ok run completes to 100%
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 4, lines)
+        self.assertRegex(lines[0], r"^      \d\d:\d\d:\d\d mesh tables RockCr 1/4 3/4 "
+                                   r"Interior 1/4   \d+ s$")
+        # last value .875, but the simulation started: initial conditions finished
+        self.assertRegex(lines[1], r"^      \d\d:\d\d:\d\d initial conditions 10\.\.20\.\.30\.\."
+                                   r"40\.\.50\.\.60\.\.70\.\.80\.\.90\.\.100%   \d+ s$")
+        # last value seen .9925, but the maps started: the simulation finished
+        self.assertRegex(lines[2], r"^      \d\d:\d\d:\d\d simulation 10\.\.20\.\.30\.\.40\.\."
+                                   r"50\.\.60\.\.70\.\.80\.\.90\.\.100%   \d+ s$")
+        self.assertRegex(lines[3], r"^      \d\d:\d\d:\d\d stored maps 'WSE \(Max\)' "
+                                   r"'Depth \(Max\)'   \d+ s$")
+
+    def test_first_reading_of_a_phase_is_skipped(self):
+        """Bald Eagle's post-processor box read '0.400' and then '0.040'; the
+        stray first value must not print '10..20..30..40..' at once."""
+        import contextlib
+        import io
         out = io.StringIO()
+        log = compute._PhaseLog()
         with contextlib.redirect_stdout(out):
-            late(0.9903935)
-            self.assertEqual(late.shown, 9)
-            late(1.0)
-        self.assertTrue(out.getvalue().endswith("90..100% "))
+            for v in (0.400, 0.040, 0.092, 0.237, 1.0):
+                log.update(("post-processing", [], v))
+            log.finish(ok=True)
+        self.assertRegex(out.getvalue(), r"post-processing 10\.\.20\.\.30\.\.40\.\.50\.\.60\.\."
+                                         r"70\.\.80\.\.90\.\.100%   \d+ s\n$")
+        out = io.StringIO()
+        log = compute._PhaseLog()
+        with contextlib.redirect_stdout(out):
+            log.update(("post-processing", [], 0.400))
+            log.update(("post-processing", [], 0.040))
+        self.assertTrue(out.getvalue().endswith("post-processing"), out.getvalue())
+
+    def test_failed_run_keeps_its_last_mark(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        log = compute._PhaseLog()
+        with contextlib.redirect_stdout(out):
+            log.update(("simulation", [], 0.0))       # first reading: skipped
+            log.update(("simulation", [], 0.42))
+            log.finish(ok=False)
+        self.assertRegex(out.getvalue(), r"simulation 10\.\.20\.\.30\.\.40\.\.   \d+ s\n$")
 
     def test_reads_hidden_compute_window(self):
-        """A stand-in process owns a HIDDEN window titled like RAS's, whose
-        text box holds 'txtUnetProg', then an initial-conditions value under a
-        'RockCr initial conditions' label (must be ignored), then '.5000000'
-        under 'Unsteady Flow Computations'. Found by text, read across
-        processes."""
+        """A stand-in process owns a HIDDEN window titled like RAS's: a text
+        box holding 'txtUnetProg', then an initial-conditions value under a
+        'RockCr initial conditions' label, then '.5000000' under 'Unsteady
+        Flow Computations'. Read across processes and classified."""
         import subprocess
         import sys
         import time
@@ -154,16 +249,15 @@ pump(30)
         state, seen = {}, []
         end = time.time() + 15
         while time.time() < end:
-            v = compute._unet_progress({child.pid}, state)
-            seen.append(v)
-            if v is not None:
+            got = compute._read_window({child.pid}, state)
+            seen.append(compute._phase_of(*got) if got else None)
+            if seen[-1] and seen[-1][0] == "simulation":
                 break
             time.sleep(0.25)
-        self.assertEqual(seen[-1], 0.5)
-        self.assertIn(None, seen)                  # placeholder phase came first
-        self.assertNotIn(0.8752778, seen)          # initial-conditions ramp ignored
-        self.assertIn("box", state)
-        self.assertIsNone(compute._unet_progress(set(), {}))   # no RAS: nothing
+        self.assertEqual(seen[-1], ("simulation", [], 0.5))
+        self.assertIn(("initial conditions", [], 0.8752778), seen)   # labelled, not simulation
+        self.assertIn("txtUnetProg", state)                          # box found by placeholder
+        self.assertIsNone(compute._read_window(set(), {}))           # no RAS: nothing
 
 
 class TestExecutable(unittest.TestCase):
@@ -314,12 +408,13 @@ class TestPrepareRuns(unittest.TestCase):
         self.assertEqual(status, {"p04": "failed", "p05": "skipped", "p07": "ok"})
         # progress=True (default): one console line per plan, numbered
         lines = out.getvalue().splitlines()
-        self.assertEqual(len(lines), 3, lines)
-        self.assertRegex(lines[0], r"^\[1/3\] p04 .* \.\.\. failed in \d+ s \(\d\d:\d\d\): "
-                                   r"Unsteady failed to run")
-        self.assertIn("[2/3] p05", lines[1])
-        self.assertIn("skipped: restarts from p04", lines[1])
-        self.assertRegex(lines[2], r"^\[3/3\] p07 .* \.\.\. ok in \d+ s \(\d\d:\d\d\)$")
+        self.assertEqual(len(lines), 5, lines)                # no window: no phase lines
+        self.assertEqual(lines[0], "[1/3] p04 Test higher IA and nvals")
+        self.assertRegex(lines[1], r"^      failed in \d+ s \(\d\d:\d\d\): Unsteady failed to run")
+        self.assertIn("[2/3] p05", lines[2])
+        self.assertIn("skipped: restarts from p04", lines[2])
+        self.assertTrue(lines[3].startswith("[3/3] p07 "))
+        self.assertRegex(lines[4], r"^      ok in \d+ s \(\d\d:\d\d\)$")
         self.assertIn("boom", rep["runs"][0]["messages_tail"])
         self.assertIn("1 of 3 ok", compute.format_report(rep))
 
@@ -469,13 +564,22 @@ class TestRealRuns70(unittest.TestCase):
         self.assertEqual(open(prj, "rb").read(), prj_bytes)
 
     def test_steady_plan(self):
+        import contextlib
+        import io
         tmp, folder = _copy(_WISC)
         self.addCleanup(tmp.cleanup)
-        rep = compute.run_plans(RasProject(os.path.join(folder, "SterpCreek.prj")),
-                                "p02", "7.0", timeout=300)
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            rep = compute.run_plans(RasProject(os.path.join(folder, "SterpCreek.prj")),
+                                    "p02", "7.0", timeout=300)
         r = rep["runs"][0]
         self.assertEqual(r["status"], "ok", compute.format_report(rep))
         self.assertEqual(r["solution"], "Steady Finished Successfully")
+        # a steady plan has none of the unsteady panels: header + result only
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 2, lines)
+        self.assertEqual(lines[0], "[1/1] p02 RAS 7.0")
+        self.assertRegex(lines[1], r"^      ok in \d+ s \(\d\d:\d\d\)$")
 
 
 @pytest.mark.ras_compute
