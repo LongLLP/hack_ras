@@ -85,6 +85,87 @@ class TestFailureLine(unittest.TestCase):
         self.assertEqual(compute._failure_line(None), "")
 
 
+class TestPercentDisplay(unittest.TestCase):
+    """Percent complete, read from RAS's hidden compute window (probe of
+    Hillside p10, 2026-10-08: 'txtUnetProg' placeholder, then a fraction)."""
+
+    def test_ten_percent_marks(self):
+        import contextlib
+        import io
+        out = io.StringIO()
+        show = compute._ten_percent_marks()
+        with contextlib.redirect_stdout(out):
+            # values as RAS wrote them, plus a repeat and a 7-mark jump
+            for v in (0.04000579, 0.1000289, 0.2900984, 0.29, 0.9503762, 1.0, 1.0):
+                show(v)
+        self.assertEqual(out.getvalue(), "10..20..30..40..50..60..70..80..90..100% ")
+        self.assertEqual(show.shown, 10)
+        # the 1 s poll can miss RAS's final 1.000000 (Hillside p01 stopped at
+        # '90..'); run_plans then completes the marks for an 'ok' run
+        late = compute._ten_percent_marks()
+        out = io.StringIO()
+        with contextlib.redirect_stdout(out):
+            late(0.9903935)
+            self.assertEqual(late.shown, 9)
+            late(1.0)
+        self.assertTrue(out.getvalue().endswith("90..100% "))
+
+    def test_reads_hidden_compute_window(self):
+        """A stand-in process owns a HIDDEN window titled like RAS's, whose
+        text box holds 'txtUnetProg', then an initial-conditions value under a
+        'RockCr initial conditions' label (must be ignored), then '.5000000'
+        under 'Unsteady Flow Computations'. Found by text, read across
+        processes."""
+        import subprocess
+        import sys
+        import time
+        child_code = r'''
+import ctypes, time
+from ctypes import wintypes
+u = ctypes.windll.user32
+u.CreateWindowExW.restype = wintypes.HWND
+u.CreateWindowExW.argtypes = [wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+    wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+    wintypes.HWND, wintypes.HMENU, wintypes.HINSTANCE, wintypes.LPVOID]
+u.SetWindowTextW.argtypes = [wintypes.HWND, wintypes.LPCWSTR]
+top = u.CreateWindowExW(0, "Static", "HEC-RAS Computations", 0x00CF0000,
+                        0, 0, 200, 100, None, None, None, None)      # never shown
+label = u.CreateWindowExW(0, "Edit", "", 0x40000000,
+                          0, 30, 100, 20, top, None, None, None)     # phase label
+box = u.CreateWindowExW(0, "Edit", "txtUnetProg", 0x40000000,
+                        0, 0, 100, 20, top, None, None, None)        # WS_CHILD
+msg = wintypes.MSG()
+def pump(sec):
+    end = time.time() + sec
+    while time.time() < end:
+        while u.PeekMessageW(ctypes.byref(msg), None, 0, 0, 1):
+            u.TranslateMessage(ctypes.byref(msg)); u.DispatchMessageW(ctypes.byref(msg))
+        time.sleep(0.01)
+pump(2.0)
+u.SetWindowTextW(label, "RockCr initial conditions")   # same box, earlier phase
+u.SetWindowTextW(box, ".8752778")
+pump(2.0)
+u.SetWindowTextW(label, "Unsteady Flow Computations")
+u.SetWindowTextW(box, ".5000000")
+pump(30)
+'''
+        child = subprocess.Popen([sys.executable, "-c", child_code])
+        self.addCleanup(lambda: child.poll() is None and child.kill())
+        state, seen = {}, []
+        end = time.time() + 15
+        while time.time() < end:
+            v = compute._unet_progress({child.pid}, state)
+            seen.append(v)
+            if v is not None:
+                break
+            time.sleep(0.25)
+        self.assertEqual(seen[-1], 0.5)
+        self.assertIn(None, seen)                  # placeholder phase came first
+        self.assertNotIn(0.8752778, seen)          # initial-conditions ramp ignored
+        self.assertIn("box", state)
+        self.assertIsNone(compute._unet_progress(set(), {}))   # no RAS: nothing
+
+
 class TestExecutable(unittest.TestCase):
     def test_exact_version_folder_only(self):
         with tempfile.TemporaryDirectory() as root:
@@ -224,9 +305,21 @@ class TestPrepareRuns(unittest.TestCase):
                 mock.patch.object(compute, "_wait_for_children"), \
                 mock.patch.object(compute.subprocess, "Popen", side_effect=fake_popen), \
                 mock.patch.object(compute, "read_run_status", side_effect=fake_status):
-            rep = compute.run_plans(self.project, "p04,p05,p07", "7.0")
+            import contextlib
+            import io
+            out = io.StringIO()
+            with contextlib.redirect_stdout(out):
+                rep = compute.run_plans(self.project, "p04,p05,p07", "7.0")
         status = {r["plan"]: r["status"] for r in rep["runs"]}
         self.assertEqual(status, {"p04": "failed", "p05": "skipped", "p07": "ok"})
+        # progress=True (default): one console line per plan, numbered
+        lines = out.getvalue().splitlines()
+        self.assertEqual(len(lines), 3, lines)
+        self.assertRegex(lines[0], r"^\[1/3\] p04 .* \.\.\. failed in \d+ s \(\d\d:\d\d\): "
+                                   r"Unsteady failed to run")
+        self.assertIn("[2/3] p05", lines[1])
+        self.assertIn("skipped: restarts from p04", lines[1])
+        self.assertRegex(lines[2], r"^\[3/3\] p07 .* \.\.\. ok in \d+ s \(\d\d:\d\d\)$")
         self.assertIn("boom", rep["runs"][0]["messages_tail"])
         self.assertIn("1 of 3 ok", compute.format_report(rep))
 

@@ -7,11 +7,12 @@ the user has asked to be consulted before hack_ras changes).
 
 ## OPEN ITEMS
 
-Three items are open as whole pieces of work. In rough priority:
+Four items are open as whole pieces of work. In rough priority:
 
 1. **Blocked Obstruction / Levee writer + `merge.py` support** — §A below.
 2. **Interior flood-volume peak (E2)** — §E below.
 3. **Dry-run / preview on the mutating ops** (LOW PRIORITY) — §B below.
+4. **Geometry-preprocessing progress in `run_plans`** (requested 2026-10-13) — §I below.
 
 **§H (run plans from the command line) is DONE for RAS 7.0** — built 2026-10-08 as
 `project/compute.py`; see its section in `ai_context.md`. Small follow-up found
@@ -501,6 +502,25 @@ object can regenerate and compute (`Compute_CurrentPlan` returned True on five H
 example projects), with quirks: no `QuitRas` / `Project_Close`, and
 `Plan_SetCurrent` does not refresh the output it serves, so set `Current Plan=` in
 the `.prj` and open a fresh controller per plan.
+
+---
+
+### I. Geometry-preprocessing progress in `run_plans` — OPEN (requested 2026-10-13)
+
+`run_plans(progress=True)` prints 10% marks for the UNSTEADY simulation only, read
+from the `txtUnetProg` text box of RAS's (hidden) "HEC-RAS Computations" window
+(`compute._unet_progress`). The user wants the geometry preprocessor covered too —
+large 2D meshes can spend real time there before any percent appears.
+
+What is already known (Hillside p10 probe, 2026-10-08): the same window has a
+"Geometry Processor" panel with a text box whose placeholder is `txtHtabProg`; it
+read `1.000000` once preprocessing finished (that plan's tables were current, so
+the phase took seconds and no intermediate values were seen). Before building:
+probe a plan whose property tables must be recomputed (e.g. after a terrain or
+mesh edit) to confirm intermediate fractions appear, then show it as its own
+phase on the console line (e.g. `geometry 50..100% unsteady 10..20..`). The other
+panels have placeholders too (`txtPostProcProg`, `txtMapProg`, `txtWQnetProg`,
+`txtADHProg`) if ever wanted.
 
 ---
 

@@ -981,6 +981,34 @@ compute.prepare_runs(project, "5-24", "7.0")   # all the checks, nothing launche
 compute.run_plans(project, "5-24", "7.0", hide_compute=False)  # show RAS's compute window
 ```
 
+**Console progress** (`progress=True`, the default) — one line per plan, no
+logging setup needed, with 10% marks for the unsteady simulation:
+
+```
+[1/4] p10 FC 002year ... 10..20..30..40..50..60..70..80..90..100% ok in 13.5 min (14:12)
+[2/4] p11 FC 010year ... failed in 12 s (14:12): Error Processing Geometry
+[3/4] p12 FC 050year ... skipped: restarts from p11, which did not finish
+```
+
+The percent is RAS's own, read from its compute window, which exists under
+`-hideCompute` — just not visible. Probe of Hillside p10 (2026-10-08, 13.5 min):
+the "Unsteady Flow Simulation" panel's text box holds its own name
+`txtUnetProg` until the solver starts, then a fraction (`.4000579E-01`,
+`.2900984`, ... in 0.01 steps) reaching `1.000000` as `RasUnsteady.exe` exits;
+neighbors hold the simulation clock (`11:19:05`), date (`01JAN2025`) and hours
+simulated (`14.0864`). `_unet_progress` finds the box by that placeholder, so it
+does not depend on control order, and returns None — nothing shown — for a steady
+plan or a RAS that renames it. The same box first shows OTHER phases (fast probe,
+Hillside p01, 2026-10-13): under a sibling label `RockCr initial conditions` it ran
+.10 -> .875, then `Unsteady Flow Warmup` .14, and only under `Unsteady Flow
+Computations` .00 -> .99 — read blindly, p10 printed `10..`-`60..` in its first
+seconds. So a value counts only while a control reads exactly `Unsteady Flow
+Computations`. The last value RAS shows can be `.9925`, never `1.000000`, so an
+`ok` run completes its marks to 100%. It is percent of SIMULATION time, not wall-clock: a
+plan that slows down late (a breach opening) passes 50% early. Window text is
+read with `SendMessageTimeoutW` (500 ms), so a busy RAS cannot stall the poll.
+Geometry-preprocessing progress (`txtHtabProg`) is TODO §I.
+
 `hide_compute=False` drops `-hideCompute`: each run's "HEC-RAS Computations"
 window shows live progress and messages (Fortran errors included), then closes
 by itself when the run ends — it is not a working GUI session. Dialog detection
@@ -4197,11 +4225,11 @@ part, not a case worth adding branching for.
 
 **`docs/TODO.md` is the authoritative open-items list — re-read it rather than
 trusting this summary, which has gone stale before.** As of 2026-10-08 it lists
-THREE open items, in its own priority order: (A) writer / `merge.py` support for
+FOUR open items, in its own priority order: (A) writer / `merge.py` support for
 Blocked Obstructions (`#Block Obstruct=`) and `Levee=` — described just below,
 currently parse-only; (E2) the interior flood-volume peak, part of the deferred
-pipe-network helpers in its §E; and (B) dry-run/preview on the mutating ops (LOW
-PRIORITY). Closed since this note was first written: §H running plans from the
+pipe-network helpers in its §E; (B) dry-run/preview on the mutating ops (LOW
+PRIORITY); and (I) geometry-preprocessing progress in `run_plans`. Closed since this note was first written: §H running plans from the
 command line (`project/compute.py`, 2026-10-08), E4 the pumped-vs-gravity script
 (2026-09-22), §F cross-mesh result comparison (built 2026-09-14), the
 E1/E3a pipe readers (built 2026-08-27), the session-13 plan-file-op gaps, the

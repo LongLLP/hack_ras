@@ -412,52 +412,136 @@ def _process_tree(root: int) -> set[int]:
     return tree
 
 
-def _dialogs_of(pids: set[int]) -> dict[int, str]:
-    """Visible standard dialog boxes (class #32770 — what MsgBox and VB's
-    run-time-error box create) owned by any of pids, as {hwnd: text}. Text is
-    the title plus every control's text, read with WM_GETTEXT, which works
-    across processes. Reads only; never clicks."""
+def _win_text(hwnd: int) -> str:
+    """A window's text via WM_GETTEXT, which works across processes, with a
+    500 ms limit so a busy or hung RAS can never stall the caller ('' then)."""
+    import ctypes
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+    flags = 0x0002 | 0x0008                      # SMTO_ABORTIFHUNG | SMTO_ERRORONEXIT
+    n = ctypes.c_size_t()
+    if not u32.SendMessageTimeoutW(wintypes.HWND(hwnd), 0x000E, 0, 0,   # WM_GETTEXTLENGTH
+                                   flags, 500, ctypes.byref(n)) or n.value <= 0:
+        return ""
+    buf = ctypes.create_unicode_buffer(n.value + 1)
+    if not u32.SendMessageTimeoutW(wintypes.HWND(hwnd), 0x000D, n.value + 1, buf,  # WM_GETTEXT
+                                   flags, 500, ctypes.byref(ctypes.c_size_t())):
+        return ""
+    return buf.value.strip()
+
+
+def _windows_of(pids: set[int], visible_only: bool) -> list[tuple[int, str]]:
+    """Top-level windows owned by any of pids, as [(hwnd, class name)]."""
     import ctypes
     from ctypes import wintypes
     u32 = ctypes.windll.user32
     enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
-
-    def text(h):
-        n = u32.SendMessageW(h, 0x000E, 0, 0)                 # WM_GETTEXTLENGTH
-        if n <= 0:
-            return ""
-        buf = ctypes.create_unicode_buffer(n + 1)
-        u32.SendMessageW(h, 0x000D, n + 1, buf)               # WM_GETTEXT
-        return buf.value.strip()
-
-    found = {}
+    found = []
 
     def on_top(h, _):
         pid = wintypes.DWORD()
         u32.GetWindowThreadProcessId(h, ctypes.byref(pid))
-        if pid.value in pids and u32.IsWindowVisible(h):
+        if pid.value in pids and (u32.IsWindowVisible(h) or not visible_only):
             cls = ctypes.create_unicode_buffer(64)
             u32.GetClassNameW(h, cls, 64)
-            if cls.value == "#32770":
-                parts = [text(h)]
-
-                def on_child(c, _):
-                    parts.append(text(c))
-                    return True
-                u32.EnumChildWindows(h, enum_proc(on_child), 0)
-                found[h] = " | ".join(" ".join(p.split()) for p in parts if p)
+            found.append((h, cls.value))
         return True
 
     u32.EnumWindows(enum_proc(on_top), 0)
     return found
 
 
-def _wait_watching(proc, timeout, grace: float, poll: float = 1.0):
+def _children_of(hwnd: int) -> list[int]:
+    import ctypes
+    from ctypes import wintypes
+    u32 = ctypes.windll.user32
+    enum_proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    kids = []
+
+    def on_child(c, _):
+        kids.append(c)
+        return True
+
+    u32.EnumChildWindows(wintypes.HWND(hwnd), enum_proc(on_child), 0)
+    return kids
+
+
+def _dialogs_of(pids: set[int]) -> dict[int, str]:
+    """Visible standard dialog boxes (class #32770 — what MsgBox and VB's
+    run-time-error box create) owned by any of pids, as {hwnd: text}. Text is
+    the title plus every control's text. Reads only; never clicks."""
+    found = {}
+    for h, cls in _windows_of(pids, visible_only=True):
+        if cls == "#32770":
+            parts = [_win_text(h)] + [_win_text(c) for c in _children_of(h)]
+            found[h] = " | ".join(" ".join(p.split()) for p in parts if p)
+    return found
+
+
+def _unet_progress(pids: set[int], state: dict):
+    """Fraction complete (0-1) of the unsteady simulation, read from RAS's own
+    compute window, or None when not (yet) available.
+
+    Measured 2026-10-08 on Hillside p10 (13.5 min): the "HEC-RAS Computations"
+    window exists even under -hideCompute (just not visible), and its
+    "Unsteady Flow Simulation" panel has a text box that holds its own name,
+    'txtUnetProg', until the solver starts, then a fraction — '.4000579E-01',
+    '.2900984', ... in steps of 0.01 — reaching '1.000000' as RasUnsteady.exe
+    exits. That placeholder is how the box is found (once, then remembered in
+    `state`), so this does not depend on the window's control order. A steady
+    plan has no such box and a future RAS may rename it; either way this
+    returns None and nothing is shown. The geometry preprocessor has the same
+    kind of box ('txtHtabProg') — a future feature (TODO §I).
+
+    The SAME box first shows other phases (fast probe of Hillside p01,
+    2026-10-13, sampled every 0.2 s): with a sibling label reading
+    'RockCr initial conditions' it ran .10 -> .875, then 'Unsteady Flow
+    Warmup' .14, and only under 'Unsteady Flow Computations' did it run
+    .00 -> .99 for the real simulation. Reading it blindly printed '10..'
+    through '60..' within seconds of p10 starting. So a value counts only
+    while some control in the window reads exactly 'Unsteady Flow
+    Computations' — found by its text, not its position, and remembered."""
+    import ctypes
+    u32 = ctypes.windll.user32
+    box = state.get("box")
+    if box is None:
+        for h, _cls in _windows_of(pids, visible_only=False):
+            if _win_text(h) == "HEC-RAS Computations":
+                for c in _children_of(h):
+                    if _win_text(c) == "txtUnetProg":
+                        state["window"], state["box"] = h, c
+                        box = c
+                        break
+            if box:
+                break
+        if box is None:
+            return None
+    if not u32.IsWindow(box):
+        return None
+    label = state.get("label")
+    if label is None:
+        label = next((c for c in _children_of(state["window"])
+                      if _win_text(c) == "Unsteady Flow Computations"), None)
+        if label is None:                   # still initial conditions / warm-up
+            return None
+        state["label"] = label
+    if _win_text(label) != "Unsteady Flow Computations":
+        return None
+    try:
+        return min(max(float(_win_text(box)), 0.0), 1.0)
+    except ValueError:                      # still the placeholder, or blank
+        return None
+
+
+def _wait_watching(proc, timeout, grace: float, poll: float = 1.0,
+                   on_progress=None):
     """Wait for proc. Returns (None, "") when it exits by itself,
     ("timeout", "") past timeout, or ("dialog", text) when a dialog box owned
-    by its process tree has stayed up `grace` seconds. Kills nothing."""
+    by its process tree has stayed up `grace` seconds. Kills nothing.
+    `on_progress(fraction)` is called each poll with the unsteady simulation's
+    fraction complete whenever RAS shows one."""
     t0 = time.time()
-    first_seen = {}
+    first_seen, state = {}, {}
     while True:
         try:
             proc.wait(timeout=poll)
@@ -467,13 +551,44 @@ def _wait_watching(proc, timeout, grace: float, poll: float = 1.0):
         now = time.time()
         if timeout is not None and now - t0 >= timeout:
             return "timeout", ""
+        if grace is None and on_progress is None:
+            continue
+        tree = _process_tree(proc.pid)
+        if on_progress is not None:
+            frac = _unet_progress(tree, state)
+            if frac is not None:
+                on_progress(frac)
         if grace is None:
             continue
-        dialogs = _dialogs_of(_process_tree(proc.pid))
+        dialogs = _dialogs_of(tree)
         first_seen = {h: first_seen.get(h, now) for h in dialogs}
         for h, seen in first_seen.items():
             if now - seen >= grace:
                 return "dialog", dialogs[h]
+
+
+def _ten_percent_marks():
+    """on_progress callback for one plan: prints each new 10% mark on the
+    plan's console line — '10..20..30..' and '100%' — never repeating one.
+    ``.shown`` is the highest mark printed (0-10)."""
+    def on_progress(frac: float) -> None:
+        mark = int(frac * 10 + 1e-9)
+        for m in range(on_progress.shown + 1, mark + 1):
+            print(f"{m * 10}.." if m < 10 else "100% ", end="", flush=True)
+        on_progress.shown = max(on_progress.shown, mark)
+
+    on_progress.shown = 0
+    return on_progress
+
+
+def _progress_end(run: dict) -> str:
+    """End of a plan's progress line: 'ok in 6.2 min (13:04)', plus the reason
+    when it did not finish."""
+    secs = run["seconds"] or 0.0
+    took = f"{secs:.0f} s" if secs < 120 else f"{secs / 60:.1f} min"
+    line = f"{run['status']} in {took} ({time.strftime('%H:%M')})"
+    why = " - ".join(x for x in (run["solution"], run["reason"]) if x)
+    return line if run["status"] == "ok" or not why else f"{line}: {why[:150]}"
 
 
 # ---------------------------
@@ -483,7 +598,8 @@ def _wait_watching(proc, timeout, grace: float, poll: float = 1.0):
 def run_plans(project: RasProject, spec, ras_version: str,
               force_version: bool = False, reorder: bool = False,
               timeout: float | None = None, hide_compute: bool = True,
-              kill_on_dialog: bool = True, ras_root: str = RAS_ROOT) -> dict:
+              kill_on_dialog: bool = True, progress: bool = True,
+              ras_root: str = RAS_ROOT) -> dict:
     """Compute plans one at a time with ``Ras.exe -c``; keep going past a failure.
 
     ``spec`` is a plan id-spec whose ORDER is the run order ('p05,p04',
@@ -493,7 +609,10 @@ def run_plans(project: RasProject, spec, ras_version: str,
     box — status 'dialog', the box's text as the reason — and never touches a
     healthy run however long it takes. ``timeout`` (seconds, per plan; None =
     no limit) is an optional wall-clock backstop. Both kill only the process
-    tree this function started.
+    tree this function started. ``progress`` (default on) prints one line per
+    plan as it starts and ends — '[2/4] p11 FC 010year ... ok in 6.2 min
+    (13:04)' — so a console shows where a long batch is without any logging
+    setup; the same events also go to the module logger.
 
     Returns ``{'ras_exe', 'ras_version', 'order', 'version_mismatches',
     'runs', 'unlisted_results'}``. Each run is ``{'plan', 'title', 'status',
@@ -508,7 +627,8 @@ def run_plans(project: RasProject, spec, ras_version: str,
     prep = prepare_runs(project, spec, ras_version, force_version, reorder)
     prj = os.path.join(project.folder, f"{project.base_name}.prj")
     failed, runs = set(), []
-    for pid in prep["order"]:
+    n = len(prep["order"])
+    for i, pid in enumerate(prep["order"], 1):
         ppath = plan_path(project, pid)
         run = {"plan": pid, "title": read_plan_sidecar(ppath)["title"],
                "status": None, "solution": None, "run_time_window": None,
@@ -521,15 +641,22 @@ def run_plans(project: RasProject, spec, ras_version: str,
             run["reason"] = f"restarts from {src}, which did not finish"
             failed.add(pid)
             logger.warning("%s skipped: %s", pid, run["reason"])
+            if progress:
+                print(f"[{i}/{n}] {pid} {run['title']} ... skipped: {run['reason']}",
+                      flush=True)
             continue
 
         # RAS wants file arguments quoted, so the command is one string.
         cmd = f'"{exe}" -c "{prj}" "{ppath}"' + (" -hideCompute" if hide_compute else "")
         logger.info("running %s (%s) in HEC-RAS %s", pid, run["title"], ras_version)
+        if progress:
+            print(f"[{i}/{n}] {pid} {run['title']} ... ", end="", flush=True)
         t0 = time.time()
         proc = subprocess.Popen(cmd)
+        marks = _ten_percent_marks() if progress else None
         stop, dialog = _wait_watching(proc, timeout,
-                                      _DIALOG_GRACE if kill_on_dialog else None)
+                                      _DIALOG_GRACE if kill_on_dialog else None,
+                                      on_progress=marks)
         if stop:
             _kill_tree(proc.pid)
             proc.wait()
@@ -579,6 +706,13 @@ def run_plans(project: RasProject, spec, ras_version: str,
                            " - ".join(x for x in (run["solution"], run["reason"]) if x))
         else:
             logger.info("%s ok in %.1f s", pid, run["seconds"])
+        if progress:
+            # RAS writes 1.000000 just before the solver exits, so the 1 s poll
+            # can miss it (Hillside p01 stopped at '90..'). A run that finished
+            # successfully did reach the end of its window: finish the marks.
+            if run["status"] == "ok" and marks.shown:
+                marks(1.0)
+            print(_progress_end(run), flush=True)
 
     return {"ras_exe": exe, "ras_version": str(ras_version),
             "order": prep["order"],
